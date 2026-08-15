@@ -5,13 +5,14 @@ description: Plan and build resumable AI video projects with QuickAI image gener
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, and assembly.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.2.0`.
 
 ## Setup
 
 1. Run `python scripts/grok_video_studio.py configure` in an interactive terminal. Never request or pass API keys in chat or command-line arguments.
 2. Run `python scripts/grok_video_studio.py doctor` and resolve both provider and FFmpeg checks before paid generation.
 3. Keep the default direct providers. QuickAI handles images; QuickAI New handles videos. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
+4. Run `version` after installation. The repository root includes `install.ps1`; it copies the Skill without storing credentials in the repository.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 
@@ -31,6 +32,8 @@ Run `python scripts/grok_video_studio.py describe <workflow-id>` for the selecte
 3. Fill `project.json`: story, concise identity and style bibles, and every shot's image and video prompts. Keep stable shot IDs.
 4. Put user-supplied references under `assets/references/` and use only project-relative paths.
 5. Run `python scripts/grok_video_studio.py preflight <project-folder>` before spending. Review request counts, total duration, prompt lengths, warnings, and errors.
+6. Set `budget.image_request`, `budget.video_request`, and `budget.max_estimated_cost` when a hard project spending ceiling is required. Every attempted paid request is recorded in `state.json` before it is sent.
+7. Run `audit` to review structured character IDs, wardrobe changes, adjacent-shot continuity notes, and the manual review checklist.
 
 Read [references/project-schema.md](references/project-schema.md) before editing `project.json`. Read [references/prompt-contract.md](references/prompt-contract.md) before writing prompts.
 
@@ -52,11 +55,12 @@ Run `generate-character` independently or let `run` create it before shot keyfra
 - Submit and poll only video shots with `generate-videos`.
 - Resume existing task IDs with `resume`. A resumed task must not create a second paid task.
 - Add repeatable `--shot <shot-id>` to process selected shots. Partial `run` operations do not auto-assemble.
+- Add `--progress` to generation or resume commands to receive JSONL progress events on stderr while the final JSON result remains on stdout.
 - Inspect durable state with `status`.
 - Assemble completed clips with `assemble`.
 - Normalize and combine arbitrary existing clips with `assemble-files <output.mp4> <clip...>`.
 
-Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. Use `--retry-failed` only after inspecting the provider and accepting possible duplicate billing. Polling and content download may retry safely.
+Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. `--retry-failed` requires `--retry-reason "..."`; the reason and prior task state are preserved in history. Polling, model discovery, and content download may retry safely with bounded backoff and a circuit breaker.
 
 Keep every final composed image and video prompt at or below 4096 characters. Treat 3800 characters as the working ceiling. The preflight and API clients enforce this; do not silently truncate creative instructions.
 
@@ -66,7 +70,8 @@ Keep every final composed image and video prompt at or below 4096 characters. Tr
 2. Require every video to have a `.mp4` filename, MP4 signature, readable video stream, positive duration, and valid dimensions.
 3. Normalize assembled output to H.264, `yuv420p`, 30 fps, and the requested canvas; core assembly intentionally omits audio.
 4. Check `deliverables/final.mp4` and its recorded media metadata.
-5. Report failed or unresolved task IDs without exposing credentials.
-6. Preserve `state.json`; it is the resume contract and contains no secrets.
+5. Run `qa <project-folder>`. Treat orientation/dimension errors as technical failures; review black/freeze warnings. Identity, wardrobe, hands, limbs, facial anatomy, and motion naturalness always require human or visual-model review.
+6. Report failed or unresolved task IDs without exposing credentials.
+7. Preserve `state.json`; it is the resume contract and contains no secrets.
 
-Treat subtitles, voice-over, music, transitions, and complex timelines as optional post-production. Use FFmpeg or a dedicated editing skill only when the user asks for those deliverables.
+Use `postprocess <input.mp4> <output.mp4>` for optional background music, voice-over, burned SRT subtitles, and fades. Use `cover <input.mp4> <cover.jpg>` to export a publishing cover. These commands cover lightweight delivery; use a dedicated editing skill for complex transitions, motion graphics, dialogue editing, or a full timeline.

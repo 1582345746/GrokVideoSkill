@@ -31,8 +31,11 @@ from gvs_common import (
     save_settings,
 )
 from media_client import QuickAIImageClient, QuickAINewVideoClient, save_image_bytes
+from media_tools import extract_cover, postprocess_video, quality_report
+from provider_contracts import task_progress
 
 
+SKILL_VERSION = "1.2.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -116,6 +119,7 @@ def fresh_state() -> dict[str, Any]:
         "character_master": {"status": "pending", "attempts": 0},
         "shots": {},
         "deliverables": {},
+        "budget_usage": {"image_attempts": 0, "video_attempts": 0, "estimated_cost": 0.0},
     }
 
 
@@ -131,6 +135,7 @@ def load_state(root: Path) -> dict[str, Any]:
         raise SkillError("state file has an unsupported format")
     value.setdefault("character_master", {"status": "pending", "attempts": 0})
     value.setdefault("deliverables", {})
+    value.setdefault("budget_usage", {"image_attempts": 0, "video_attempts": 0, "estimated_cost": 0.0})
     return value
 
 
@@ -176,6 +181,93 @@ def shot_value(project: dict[str, Any], shot: dict[str, Any], name: str, default
 def character_master_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("character_master")
     return value if isinstance(value, dict) else {}
+
+
+def project_characters(project: dict[str, Any]) -> list[dict[str, Any]]:
+    value = project.get("characters", [])
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def budget_config(project: dict[str, Any]) -> dict[str, Any]:
+    value = project.get("budget")
+    return value if isinstance(value, dict) else {}
+
+
+def _budget_number(value: Any, name: str, *, allow_none: bool = False) -> float | None:
+    if allow_none and value in (None, ""):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise SkillError(f"budget.{name} must be a non-negative number") from error
+    if result < 0:
+        raise SkillError(f"budget.{name} must be a non-negative number")
+    return result
+
+
+def estimated_project_cost(project: dict[str, Any], *, image_requests: int, video_requests: int) -> dict[str, Any]:
+    budget = budget_config(project)
+    image_rate = _budget_number(budget.get("image_request", 0), "image_request") or 0.0
+    video_rate = _budget_number(budget.get("video_request", 0), "video_request") or 0.0
+    maximum = _budget_number(budget.get("max_estimated_cost"), "max_estimated_cost", allow_none=True)
+    estimated = round(image_requests * image_rate + video_requests * video_rate, 6)
+    return {
+        "currency": str(budget.get("currency") or "CNY"),
+        "image_request": image_rate,
+        "video_request": video_rate,
+        "max_estimated_cost": maximum,
+        "estimated_cost": estimated,
+        "within_budget": maximum is None or estimated <= maximum,
+    }
+
+
+def record_budget_attempt(state: dict[str, Any], project: dict[str, Any], kind: str) -> None:
+    if kind not in {"image", "video"}:
+        raise SkillError(f"unsupported budget attempt kind: {kind}")
+    budget = budget_config(project)
+    rate = _budget_number(budget.get(f"{kind}_request", 0), f"{kind}_request") or 0.0
+    maximum = _budget_number(budget.get("max_estimated_cost"), "max_estimated_cost", allow_none=True)
+    usage = state.setdefault("budget_usage", {"image_attempts": 0, "video_attempts": 0, "estimated_cost": 0.0})
+    next_cost = round(float(usage.get("estimated_cost", 0)) + rate, 6)
+    if maximum is not None and next_cost > maximum:
+        raise SkillError(
+            f"budget gate blocked the next {kind} request: estimated attempted cost {next_cost} exceeds {maximum} {budget.get('currency', 'CNY')}"
+        )
+    usage[f"{kind}_attempts"] = int(usage.get(f"{kind}_attempts", 0)) + 1
+    usage["estimated_cost"] = next_cost
+    usage["currency"] = str(budget.get("currency") or "CNY")
+
+
+def require_retry_reason(retry_failed: bool, retry_reason: str) -> str:
+    reason = retry_reason.strip()
+    if retry_failed and not reason:
+        raise SkillError("--retry-reason is required with --retry-failed to preserve a duplicate-billing audit trail")
+    return reason
+
+
+def archive_runtime_attempt(runtime: dict[str, Any], reason: str) -> None:
+    snapshot = {
+        "at": int(time.time()),
+        "reason": reason,
+        "status": runtime.get("status", ""),
+        "attempts": runtime.get("attempts", 0),
+        "task_id": runtime.get("task_id", ""),
+        "path": runtime.get("path", ""),
+        "error": runtime.get("error", ""),
+    }
+    history = runtime.setdefault("history", [])
+    if isinstance(history, list):
+        history.append(snapshot)
+        del history[:-20]
+
+
+def emit_progress(enabled: bool, **event: Any) -> None:
+    if enabled:
+        print(json.dumps({"gvs_progress": True, "at": int(time.time()), **event}, ensure_ascii=False, separators=(",", ":")), file=sys.stderr, flush=True)
+
+
+def portable_qa(report: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in report.items() if key != "path"}
 
 
 def _positive_limit(limits: dict[str, Any], name: str, fallback: int, errors: list[str]) -> int:
@@ -229,6 +321,28 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append(f"limits.max_prompt_chars cannot exceed provider limit {HARD_PROMPT_CHARS}")
         max_prompt_chars = HARD_PROMPT_CHARS
 
+    raw_characters = project.get("characters", [])
+    character_ids: set[str] = set()
+    if not isinstance(raw_characters, list):
+        errors.append("project.characters must be an array")
+        raw_characters = []
+    for index, character in enumerate(raw_characters):
+        prefix = f"characters[{index}]"
+        if not isinstance(character, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        character_id = str(character.get("id", "")).strip()
+        if not SHOT_ID_RE.fullmatch(character_id):
+            errors.append(f"{prefix}.id must use lowercase letters, digits, and hyphens")
+        elif character_id in character_ids:
+            errors.append(f"duplicate character id: {character_id}")
+        character_ids.add(character_id)
+        if not str(character.get("name", "")).strip():
+            errors.append(f"{prefix}.name is required")
+        if not str(character.get("identity", "")).strip():
+            errors.append(f"{prefix}.identity is required")
+        errors.extend(_reference_errors(root, character.get("references", []), f"{prefix}.references", max_references))
+
     master = character_master_config(project)
     master_enabled = bool(master.get("enabled", False))
     master_generate = bool(master.get("generate", False))
@@ -265,6 +379,17 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     generated_images = sum(1 for shot in shots if isinstance(shot, dict) and bool(shot.get("generate_image", True))) + int(master_enabled and master_generate)
     if generated_images > max_images:
         errors.append(f"generated image count {generated_images} exceeds max_image_requests {max_images}")
+    if project.get("budget") is not None and not isinstance(project.get("budget"), dict):
+        errors.append("project.budget must be an object")
+    else:
+        try:
+            cost = estimated_project_cost(project, image_requests=generated_images, video_requests=len(shots))
+            if not cost["within_budget"]:
+                errors.append(
+                    f"estimated project cost {cost['estimated_cost']} exceeds budget.max_estimated_cost {cost['max_estimated_cost']} {cost['currency']}"
+                )
+        except SkillError as error:
+            errors.append(str(error))
     seen: set[str] = set()
     total_seconds = 0
     for index, raw_shot in enumerate(shots, 1):
@@ -284,6 +409,18 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.video_prompt is required")
         if bool(raw_shot.get("use_character_master", False)) and not master_enabled:
             errors.append(f"{prefix}.use_character_master requires project.character_master.enabled")
+        shot_character_ids = raw_shot.get("character_ids", [])
+        if not isinstance(shot_character_ids, list) or not all(isinstance(value, str) and value.strip() for value in shot_character_ids):
+            errors.append(f"{prefix}.character_ids must be an array of character ids")
+        else:
+            unknown_characters = [value for value in shot_character_ids if value not in character_ids]
+            if unknown_characters:
+                errors.append(f"{prefix}.character_ids has unknown ids: {', '.join(unknown_characters)}")
+        scene_id = str(raw_shot.get("scene_id", "")).strip()
+        if scene_id and not SHOT_ID_RE.fullmatch(scene_id):
+            errors.append(f"{prefix}.scene_id must use lowercase letters, digits, and hyphens")
+        if raw_shot.get("wardrobe") is not None and not isinstance(raw_shot.get("wardrobe"), dict):
+            errors.append(f"{prefix}.wardrobe must map character ids to wardrobe descriptions")
         if str(raw_shot.get("image_prompt", "")).strip():
             image_prompt = composed_image_prompt(project, raw_shot)
             if len(image_prompt) > max_prompt_chars:
@@ -361,6 +498,30 @@ def composed_character_prompt(project: dict[str, Any]) -> str:
     return "\n\n".join(sections)
 
 
+def structured_shot_context(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    requested = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
+    by_id = {str(item.get("id", "")): item for item in project_characters(project)}
+    wardrobe_overrides = shot.get("wardrobe") if isinstance(shot.get("wardrobe"), dict) else {}
+    lines: list[str] = []
+    for character_id in requested:
+        character = by_id.get(str(character_id))
+        if not character:
+            continue
+        wardrobe = str(wardrobe_overrides.get(character_id) or character.get("wardrobe") or "").strip()
+        identity = str(character.get("identity") or "").strip()
+        line = f"{character.get('name')} ({character_id}): {identity}"
+        if wardrobe:
+            line += f" Wardrobe: {wardrobe}."
+        lines.append(line)
+    scene_id = str(shot.get("scene_id", "")).strip()
+    continuity = str(shot.get("continuity_notes", "")).strip()
+    if scene_id:
+        lines.append(f"Scene: {scene_id}.")
+    if continuity:
+        lines.append(f"Continuity: {continuity}")
+    return "\n".join(lines)
+
+
 def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
     character = str(project.get("character_bible", "")).strip()
@@ -369,6 +530,9 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         sections.append("[CHARACTER BIBLE]\n" + character)
     if style:
         sections.append("[STYLE BIBLE]\n" + style)
+    structured = structured_shot_context(project, shot)
+    if structured:
+        sections.append("[SHOT CONTINUITY]\n" + structured)
     sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
     return "\n\n".join(sections)
 
@@ -381,6 +545,9 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         sections.append("[IDENTITY LOCK]\n" + character)
     if style:
         sections.append("[STYLE LOCK]\n" + style)
+    structured = structured_shot_context(project, shot)
+    if structured:
+        sections.append("[SHOT CONTINUITY]\n" + structured)
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
     return "\n\n".join(sections)
 
@@ -416,19 +583,59 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
             warnings.append(
                 f"{item['kind']} prompt {item['id']} uses {item['characters']} characters; keep it at or below {SAFE_PROMPT_CHARS} for provider headroom"
             )
+    video_requests = len([shot for shot in project.get("shots", []) if isinstance(shot, dict)])
+    try:
+        cost = estimated_project_cost(project, image_requests=image_requests, video_requests=video_requests)
+    except SkillError as error:
+        cost = {"error": str(error), "within_budget": False}
     return {
         "workflow": project.get("workflow", "general-video"),
         "requests": {
             "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
             "shot_images": image_requests - int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
             "total_images": image_requests,
-            "videos": len([shot for shot in project.get("shots", []) if isinstance(shot, dict)]),
+            "videos": video_requests,
         },
         "total_video_seconds": total_seconds,
         "max_clip_seconds": MAX_VIDEO_SECONDS,
         "prompt_hard_limit": HARD_PROMPT_CHARS,
         "prompts": prompts,
+        "budget": cost,
         "warnings": warnings,
+    }
+
+
+def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
+    errors = validate_project(root, project)
+    warnings: list[str] = []
+    shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    characters = {str(item.get("id")): item for item in project_characters(project)}
+    previous: dict[str, Any] | None = None
+    for shot in shots:
+        shot_id = str(shot.get("id", ""))
+        character_ids = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
+        if characters and not character_ids:
+            warnings.append(f"{shot_id}: no character_ids selected; structured identity locks will not be added")
+        wardrobe = shot.get("wardrobe") if isinstance(shot.get("wardrobe"), dict) else {}
+        for character_id, description in wardrobe.items():
+            canonical = str((characters.get(str(character_id)) or {}).get("wardrobe") or "").strip()
+            if canonical and str(description).strip() != canonical and not bool(shot.get("continuity_change", False)):
+                warnings.append(f"{shot_id}: wardrobe for {character_id} differs from the character bible without continuity_change=true")
+        if previous:
+            same_scene = str(previous.get("scene_id", "")) and previous.get("scene_id") == shot.get("scene_id")
+            shared_characters = set(previous.get("character_ids", [])) & set(character_ids)
+            if (same_scene or shared_characters) and not str(shot.get("continuity_notes", "")).strip():
+                warnings.append(f"{shot_id}: adjacent scene/character continuity has no continuity_notes")
+        previous = shot
+    return {
+        "ok": not errors,
+        "errors": errors,
+        "warnings": warnings,
+        "manual_review_required": [
+            "character identity and wardrobe across adjacent shots",
+            "screen direction, eyeline, prop placement, and scene lighting",
+            "hands, limbs, facial anatomy, and motion naturalness",
+        ],
     }
 
 
@@ -470,7 +677,8 @@ def resolved_character_master(root: Path, project: dict[str, Any], state: dict[s
     raise SkillError("generated character master is missing; run generate-character first")
 
 
-def generate_character_master(root: Path, *, retry_failed: bool) -> dict[str, Any]:
+def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: str = "", progress: bool = False) -> dict[str, Any]:
+    reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
     state = load_state(root)
     master = character_master_config(project)
@@ -496,9 +704,14 @@ def generate_character_master(root: Path, *, retry_failed: bool) -> dict[str, An
     attempts = int(runtime.get("attempts", 0))
     if attempts > 0 and not retry_failed:
         raise SkillError("character master creation was already attempted; inspect state.json and use --retry-failed to authorize another billable request")
+    if attempts > 0:
+        archive_runtime_attempt(runtime, reason)
+        write_event(root, {"kind": "character_master_retry_authorized", "reason": reason, "previous_status": runtime.get("status", "")})
+    record_budget_attempt(state, project, "image")
     runtime.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": ""})
     save_state(root, state)
     write_event(root, {"kind": "character_master_create", "attempt": runtime["attempts"]})
+    emit_progress(progress, phase="character_master_create", status="submitting", attempt=runtime["attempts"])
     try:
         data = image_client.edit(prompt, references, size=size, quality=quality) if references else image_client.generate(prompt, size=size, quality=quality)
         target = resolve_project_path(root, str(master["path"]), must_exist=False)
@@ -514,6 +727,7 @@ def generate_character_master(root: Path, *, retry_failed: bool) -> dict[str, An
         )
         save_state(root, state)
         write_event(root, {"kind": "character_master_completed", "bytes": output.stat().st_size})
+        emit_progress(progress, phase="character_master_create", status="completed", bytes=output.stat().st_size)
         return {"status": "completed", "path": str(output), "source": "generated", "skipped": False}
     except Exception as error:
         runtime.update({"status": "failed", "error": str(error)[:1000]})
@@ -522,7 +736,15 @@ def generate_character_master(root: Path, *, retry_failed: bool) -> dict[str, An
         raise
 
 
-def generate_images(root: Path, *, retry_failed: bool, shot_ids: list[str] | None = None) -> dict[str, Any]:
+def generate_images(
+    root: Path,
+    *,
+    retry_failed: bool,
+    retry_reason: str = "",
+    progress: bool = False,
+    shot_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
     state = load_state(root)
     image_client, _, settings = clients()
@@ -550,15 +772,21 @@ def generate_images(root: Path, *, retry_failed: bool, shot_ids: list[str] | Non
             continue
         if int(runtime.get("attempts", 0)) > 0 and not retry_failed:
             raise SkillError(f"image create was already attempted for {shot_id}; inspect state.json and use --retry-failed to authorize another billable request")
+        if int(runtime.get("attempts", 0)) > 0:
+            archive_runtime_attempt(runtime, reason)
+            write_event(root, {"kind": "image_retry_authorized", "shot_id": shot_id, "reason": reason, "previous_status": runtime.get("status", "")})
+        record_budget_attempt(state, project, "image")
         runtime.update({"status": "submitting", "attempts": int(runtime.get("attempts", 0)) + 1, "signature": current_signature, "error": ""})
         save_state(root, state)
         write_event(root, {"kind": "image_create", "shot_id": shot_id, "attempt": runtime["attempts"]})
+        emit_progress(progress, phase="image_create", shot_id=shot_id, status="submitting", attempt=runtime["attempts"])
         try:
             data = image_client.edit(prompt, references, size=size, quality=quality) if references else image_client.generate(prompt, size=size, quality=quality)
             output = save_image_bytes(data, root / "assets" / "keyframes" / shot_id)
             runtime.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "error": ""})
             completed.append(shot_id)
             save_state(root, state)
+            emit_progress(progress, phase="image_create", shot_id=shot_id, status="completed", bytes=output.stat().st_size)
         except Exception as error:
             runtime.update({"status": "failed", "error": str(error)[:1000]})
             save_state(root, state)
@@ -579,7 +807,16 @@ def video_references(root: Path, shot: dict[str, Any], runtime: dict[str, Any]) 
     return []
 
 
-def generate_videos(root: Path, *, retry_failed: bool, poll_timeout: int, shot_ids: list[str] | None = None) -> dict[str, Any]:
+def generate_videos(
+    root: Path,
+    *,
+    retry_failed: bool,
+    retry_reason: str = "",
+    progress: bool = False,
+    poll_timeout: int,
+    shot_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
     state = load_state(root)
     _, video_client, settings = clients()
@@ -603,12 +840,15 @@ def generate_videos(root: Path, *, retry_failed: bool, poll_timeout: int, shot_i
         task_id = str(video.get("task_id", "")).strip()
         if task_id and video.get("signature") and video.get("signature") != current_signature:
             raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
+        archived_for_retry = False
         if task_id and video.get("status") == "failed":
             if not retry_failed:
                 raise SkillError(
                     f"video task failed for {shot_id} ({task_id}); inspect the provider and use --retry-failed only to authorize a new billable task"
                 )
-            write_event(root, {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": task_id})
+            archive_runtime_attempt(video, reason)
+            archived_for_retry = True
+            write_event(root, {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": task_id, "reason": reason})
             video["previous_task_id"] = task_id
             video["task_id"] = ""
             task_id = ""
@@ -616,9 +856,17 @@ def generate_videos(root: Path, *, retry_failed: bool, poll_timeout: int, shot_i
             attempts = int(video.get("attempts", 0))
             if attempts > 0 and not retry_failed:
                 raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
+            if attempts > 0 and not archived_for_retry:
+                archive_runtime_attempt(video, reason)
+                write_event(
+                    root,
+                    {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": video.get("task_id", ""), "reason": reason},
+                )
+            record_budget_attempt(state, project, "video")
             video.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": "", "create_attempted_at": int(time.time())})
             save_state(root, state)
             write_event(root, {"kind": "video_create", "shot_id": shot_id, "attempt": video["attempts"]})
+            emit_progress(progress, phase="video_create", shot_id=shot_id, status="submitting", attempt=video["attempts"])
             try:
                 task_id = video_client.create(prompt, seconds=seconds, size=size, references=references)
             except Exception as error:
@@ -629,19 +877,45 @@ def generate_videos(root: Path, *, retry_failed: bool, poll_timeout: int, shot_i
                 raise
             video.update({"status": "queued", "task_id": task_id, "error": ""})
             save_state(root, state)
+            emit_progress(progress, phase="video_create", shot_id=shot_id, status="queued", task_id=task_id)
 
         def on_status(status: str, payload: dict[str, Any]) -> None:
             video["status"] = status
             video["last_polled_at"] = int(time.time())
+            provider_progress = task_progress(payload)
+            if provider_progress is not None:
+                video["progress"] = provider_progress
             save_state(root, state)
+            emit_progress(
+                progress,
+                phase="video_poll",
+                shot_id=shot_id,
+                task_id=task_id,
+                status=status,
+                progress=provider_progress,
+            )
 
         try:
             status_payload = video_client.poll(task_id, timeout_seconds=poll_timeout, on_status=on_status)
             output = root / "clips" / f"{shot_id}.mp4"
             video_client.download(task_id, status_payload, output)
-            video.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "error": ""})
+            try:
+                qa = quality_report(output, expected_size=size, expected_duration=seconds)
+            except SkillError as error:
+                qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
+            video.update(
+                {
+                    "status": "completed",
+                    "path": output.relative_to(root).as_posix(),
+                    "bytes": output.stat().st_size,
+                    "progress": 100.0,
+                    "qa": portable_qa(qa),
+                    "error": "",
+                }
+            )
             save_state(root, state)
             write_event(root, {"kind": "video_completed", "shot_id": shot_id, "task_id": task_id, "bytes": output.stat().st_size})
+            emit_progress(progress, phase="video_download", shot_id=shot_id, task_id=task_id, status="completed", bytes=output.stat().st_size)
             completed.append(shot_id)
         except TimeoutError as error:
             video.update({"status": "poll_timeout", "error": str(error)[:1000]})
@@ -789,14 +1063,55 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
     output = root / "deliverables" / "final.mp4"
     target_size = str(project.get("defaults", {}).get("video_size") or "auto")
     media = assemble_clips(clips, output, target_size=target_size)
+    qa = quality_report(output, expected_size=target_size, expected_duration=sum(probe_media(path)["duration"] for path in clips))
     state.setdefault("deliverables", {})["final"] = {
         "path": output.relative_to(root).as_posix(),
         "bytes": output.stat().st_size,
         "updated_at": int(time.time()),
         "media": {key: value for key, value in media.items() if key not in {"path", "bytes"}},
+        "qa": portable_qa(qa),
     }
     save_state(root, state)
     return output, media
+
+
+def qa_project(root: Path) -> dict[str, Any]:
+    project = require_valid_project(root)
+    state = load_state(root)
+    reports: list[dict[str, Any]] = []
+    for shot in project["shots"]:
+        shot_id = str(shot["id"])
+        runtime = shot_state(state, shot_id)["video"]
+        if runtime.get("status") != "completed" or not runtime.get("path"):
+            reports.append({"kind": "clip", "id": shot_id, "ok": False, "errors": ["video is not completed"], "warnings": []})
+            continue
+        path = resolve_project_path(root, str(runtime["path"]))
+        report = quality_report(
+            path,
+            expected_size=str(shot_value(project, shot, "video_size", "1280x720")),
+            expected_duration=float(shot_value(project, shot, "seconds", 6)),
+        )
+        runtime["qa"] = portable_qa(report)
+        reports.append({"kind": "clip", "id": shot_id, **report})
+    final = state.get("deliverables", {}).get("final", {})
+    if isinstance(final, dict) and final.get("path"):
+        final_path = resolve_project_path(root, str(final["path"]))
+        report = quality_report(
+            final_path,
+            expected_size=str(project.get("defaults", {}).get("video_size") or "auto"),
+            expected_duration=float(preflight_report(project)["total_video_seconds"]),
+        )
+        final["qa"] = portable_qa(report)
+        reports.append({"kind": "deliverable", "id": "final", **report})
+    save_state(root, state)
+    technical_ok = all(bool(item.get("ok")) for item in reports) if reports else False
+    return {
+        "ok": technical_ok,
+        "technical_ok": technical_ok,
+        "reports": reports,
+        "project_audit": audit_project(root, project),
+        "manual_review_complete": False,
+    }
 
 
 def plan_shot_durations(
@@ -845,6 +1160,9 @@ def init_project(
         {
             "id": f"shot-{index:03d}",
             "summary": "",
+            "scene_id": "",
+            "character_ids": [],
+            "continuity_notes": "",
             "image_prompt": "",
             "video_prompt": "",
             "generate_image": bool(shot_defaults.get("generate_image", True)),
@@ -867,6 +1185,7 @@ def init_project(
         "story": "",
         "character_bible": "",
         "style_bible": "",
+        "characters": [],
         "character_master": {
             "enabled": uses_master,
             "mode": "single-sheet",
@@ -885,6 +1204,19 @@ def init_project(
             "max_reference_images": 9,
             "max_prompt_chars": HARD_PROMPT_CHARS,
         },
+        "budget": {
+            "currency": "CNY",
+            "image_request": 0.0,
+            "video_request": 0.0,
+            "max_estimated_cost": None,
+        },
+        "postproduction": {
+            "music": "",
+            "voice": "",
+            "subtitles": "",
+            "fade_seconds": 0.0,
+            "cover_at_seconds": 0.5,
+        },
         "shots": shots,
     }
     atomic_write_json(path, project)
@@ -896,6 +1228,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
     image_client, video_client, settings = clients()
     result: dict[str, Any] = {
         "ok": True,
+        "skill_version": SKILL_VERSION,
         "config": str(config_path()),
         "providers": {},
         "ffmpeg": shutil.which("ffmpeg") or "not_found",
@@ -908,14 +1241,30 @@ def doctor() -> tuple[int, dict[str, Any]]:
         ("quickainew", video_client.list_models, settings["video_model"]),
     ]
     for name, operation, configured_model in checks:
+        started = time.perf_counter()
         try:
             models = operation()
             present = configured_model in models
-            result["providers"][name] = {"ok": present, "configured_model": configured_model, "model_present": present, "model_count": len(models)}
+            client = image_client if name == "quickai" else video_client
+            result["providers"][name] = {
+                "ok": present,
+                "configured_model": configured_model,
+                "model_present": present,
+                "model_count": len(models),
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "circuit": client.health_snapshot(),
+            }
             if not present:
                 result["ok"] = False
         except Exception as error:
-            result["providers"][name] = {"ok": False, "configured_model": configured_model, "error": str(error)[:1000]}
+            client = image_client if name == "quickai" else video_client
+            result["providers"][name] = {
+                "ok": False,
+                "configured_model": configured_model,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "error": str(error)[:1000],
+                "circuit": client.health_snapshot(),
+            }
             result["ok"] = False
     return (0 if result["ok"] else 1), result
 
@@ -960,7 +1309,11 @@ def status_summary(root: Path) -> dict[str, Any]:
             {
                 "id": shot.get("id"),
                 "image": {key: runtime["image"].get(key) for key in ("status", "path", "attempts", "error") if runtime["image"].get(key) not in (None, "")},
-                "video": {key: runtime["video"].get(key) for key in ("status", "task_id", "path", "attempts", "error") if runtime["video"].get(key) not in (None, "")},
+                "video": {
+                    key: runtime["video"].get(key)
+                    for key in ("status", "task_id", "path", "attempts", "progress", "qa", "history", "error")
+                    if runtime["video"].get(key) not in (None, "")
+                },
             }
         )
     master = state.get("character_master", {})
@@ -971,6 +1324,7 @@ def status_summary(root: Path) -> dict[str, Any]:
         "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
         "shots": shots,
         "deliverables": state.get("deliverables", {}),
+        "budget_usage": state.get("budget_usage", {}),
     }
 
 
@@ -978,6 +1332,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    commands.add_parser("version", help="Print the installed Skill version.")
     commands.add_parser("capabilities", help="List editable workflow titles for conversational selection.")
     describe = commands.add_parser("describe", help="Show one workflow's planning and prompt guidance.")
     describe.add_argument("workflow")
@@ -1002,29 +1357,41 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--video-size", default="1280x720")
     init.add_argument("--seconds", type=int)
 
-    for name in ("validate", "preflight", "status", "assemble"):
+    for name in ("validate", "preflight", "status", "assemble", "audit"):
         command = commands.add_parser(name)
         command.add_argument("project", type=Path)
+
+    qa = commands.add_parser("qa", help="Run technical media QA and emit the required human review checklist.")
+    qa.add_argument("project", type=Path)
+    qa.add_argument("--strict", action="store_true", help="Return a failing exit code when technical QA fails.")
 
     character = commands.add_parser("generate-character")
     character.add_argument("project", type=Path)
     character.add_argument("--retry-failed", action="store_true")
+    character.add_argument("--retry-reason", default="")
+    character.add_argument("--progress", action="store_true")
 
     images = commands.add_parser("generate-images")
     images.add_argument("project", type=Path)
     images.add_argument("--retry-failed", action="store_true")
+    images.add_argument("--retry-reason", default="")
+    images.add_argument("--progress", action="store_true")
     images.add_argument("--shot", action="append", help="Generate only this shot id; repeat for multiple shots.")
 
     for name in ("generate-videos", "resume"):
         videos = commands.add_parser(name)
         videos.add_argument("project", type=Path)
         videos.add_argument("--retry-failed", action="store_true")
+        videos.add_argument("--retry-reason", default="")
+        videos.add_argument("--progress", action="store_true", help="Write JSONL progress events to stderr.")
         videos.add_argument("--poll-timeout", type=int, default=1800)
         videos.add_argument("--shot", action="append", help="Process only this shot id; repeat for multiple shots.")
 
     run = commands.add_parser("run")
     run.add_argument("project", type=Path)
     run.add_argument("--retry-failed", action="store_true")
+    run.add_argument("--retry-reason", default="")
+    run.add_argument("--progress", action="store_true", help="Write JSONL progress events to stderr.")
     run.add_argument("--poll-timeout", type=int, default=1800)
     run.add_argument("--no-assemble", action="store_true")
     run.add_argument("--shot", action="append", help="Process only this shot id; partial runs do not auto-assemble.")
@@ -1033,14 +1400,30 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_files.add_argument("output", type=Path)
     assemble_files.add_argument("clips", type=Path, nargs="+")
     assemble_files.add_argument("--target-size", default="auto")
+
+    postprocess = commands.add_parser("postprocess", help="Add optional music, voice, burned subtitles, and fades to an MP4.")
+    postprocess.add_argument("input", type=Path)
+    postprocess.add_argument("output", type=Path)
+    postprocess.add_argument("--music", type=Path)
+    postprocess.add_argument("--voice", type=Path)
+    postprocess.add_argument("--subtitles", type=Path)
+    postprocess.add_argument("--fade-seconds", type=float, default=0.0)
+
+    cover = commands.add_parser("cover", help="Export a representative frame as a JPG or PNG cover.")
+    cover.add_argument("input", type=Path)
+    cover.add_argument("output", type=Path)
+    cover.add_argument("--at-seconds", type=float, default=0.5)
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
     try:
+        if args.command == "version":
+            print_json({"ok": True, "version": SKILL_VERSION})
+            return 0
         if args.command == "capabilities":
-            print_json({"ok": True, "workflows": workflow_catalog(), "selection": "Reply with a workflow id or title."})
+            print_json({"ok": True, "version": SKILL_VERSION, "workflows": workflow_catalog(), "selection": "Reply with a workflow id or title."})
             return 0
         if args.command == "describe":
             print_json({"ok": True, "workflow": get_workflow(args.workflow)})
@@ -1073,26 +1456,91 @@ def main() -> int:
             media = assemble_clips(clips, args.output.resolve(), target_size=args.target_size)
             print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
             return 0
+        if args.command == "postprocess":
+            input_path = args.input.resolve()
+            if not input_path.is_file():
+                raise SkillError(f"input video does not exist: {input_path}")
+            media = postprocess_video(
+                input_path,
+                args.output.resolve(),
+                music=args.music.resolve() if args.music else None,
+                voice=args.voice.resolve() if args.voice else None,
+                subtitles=args.subtitles.resolve() if args.subtitles else None,
+                fade_seconds=args.fade_seconds,
+            )
+            print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
+            return 0
+        if args.command == "cover":
+            input_path = args.input.resolve()
+            if not input_path.is_file():
+                raise SkillError(f"input video does not exist: {input_path}")
+            result = extract_cover(input_path, args.output.resolve(), at_seconds=args.at_seconds)
+            print_json({"ok": True, "cover": result})
+            return 0
         root = args.project.resolve()
         if args.command in {"validate", "preflight"}:
             project = load_project(root)
             errors = validate_project(root, project)
-            print_json({"ok": not errors, "project": str(root), "errors": errors, "preflight": preflight_report(project)})
+            print_json(
+                {
+                    "ok": not errors,
+                    "project": str(root),
+                    "errors": errors,
+                    "preflight": preflight_report(project),
+                    "audit": audit_project(root, project),
+                }
+            )
             return 0 if not errors else 1
         if args.command == "status":
             print_json({"ok": True, **status_summary(root)})
             return 0
+        if args.command == "audit":
+            result = audit_project(root, load_project(root))
+            print_json({"project": str(root), **result})
+            return 0 if result["ok"] else 1
+        if args.command == "qa":
+            result = qa_project(root)
+            print_json({"project": str(root), **result})
+            return 0 if result["ok"] or not args.strict else 1
         if args.command == "generate-character":
-            print_json({"ok": True, "character_master": generate_character_master(root, retry_failed=args.retry_failed)})
+            print_json(
+                {
+                    "ok": True,
+                    "character_master": generate_character_master(
+                        root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                    ),
+                }
+            )
             return 0
         if args.command == "generate-images":
-            print_json({"ok": True, "images": generate_images(root, retry_failed=args.retry_failed, shot_ids=args.shot)})
+            print_json(
+                {
+                    "ok": True,
+                    "images": generate_images(
+                        root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                        shot_ids=args.shot,
+                    ),
+                }
+            )
             return 0
         if args.command in {"generate-videos", "resume"}:
             print_json(
                 {
                     "ok": True,
-                    "videos": generate_videos(root, retry_failed=args.retry_failed, poll_timeout=args.poll_timeout, shot_ids=args.shot),
+                    "videos": generate_videos(
+                        root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                        poll_timeout=args.poll_timeout,
+                        shot_ids=args.shot,
+                    ),
                 }
             )
             return 0
@@ -1101,9 +1549,27 @@ def main() -> int:
             print_json({"ok": True, "output": str(output), "media": media})
             return 0
         if args.command == "run":
-            character_result = generate_character_master(root, retry_failed=args.retry_failed)
-            image_result = generate_images(root, retry_failed=args.retry_failed, shot_ids=args.shot)
-            video_result = generate_videos(root, retry_failed=args.retry_failed, poll_timeout=args.poll_timeout, shot_ids=args.shot)
+            character_result = generate_character_master(
+                root,
+                retry_failed=args.retry_failed,
+                retry_reason=args.retry_reason,
+                progress=args.progress,
+            )
+            image_result = generate_images(
+                root,
+                retry_failed=args.retry_failed,
+                retry_reason=args.retry_reason,
+                progress=args.progress,
+                shot_ids=args.shot,
+            )
+            video_result = generate_videos(
+                root,
+                retry_failed=args.retry_failed,
+                retry_reason=args.retry_reason,
+                progress=args.progress,
+                poll_timeout=args.poll_timeout,
+                shot_ids=args.shot,
+            )
             assembled = None if args.no_assemble or args.shot else assemble(root)
             print_json(
                 {

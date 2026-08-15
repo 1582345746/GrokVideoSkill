@@ -22,6 +22,24 @@ FAKE_MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"fake-video-pa
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from gvs_common import load_settings, save_settings  # noqa: E402
+from provider_contracts import is_completed, result_urls, task_error, task_id, task_progress, task_status  # noqa: E402
+
+
+class ProviderContractTests(unittest.TestCase):
+    def test_offline_response_fixtures(self) -> None:
+        fixtures = json.loads((REPO_ROOT / "tests" / "fixtures" / "provider-contracts.json").read_text(encoding="utf-8"))
+        for fixture in fixtures:
+            with self.subTest(fixture["name"]):
+                payload = fixture["payload"]
+                self.assertEqual(task_id(payload), fixture["task_id"])
+                self.assertEqual(task_status(payload), fixture["status"])
+                self.assertEqual(task_progress(payload), fixture["progress"])
+                urls = result_urls(payload)
+                self.assertEqual(urls[0] if urls else "", fixture["url"])
+                if fixture.get("error"):
+                    self.assertEqual(task_error(payload), fixture["error"])
+                if fixture["url"]:
+                    self.assertTrue(is_completed(payload))
 
 
 class FakeProviderHandler(BaseHTTPRequestHandler):
@@ -368,9 +386,22 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
         FakeProviderHandler.fail_video_create = False
-        retried = self.run_cli("resume", str(project), "--poll-timeout", "5", "--retry-failed")
+        missing_reason = self.run_cli("resume", str(project), "--poll-timeout", "5", "--retry-failed", expected=1)
+        self.assertIn("--retry-reason", missing_reason["error"])
+        retried = self.run_cli(
+            "resume",
+            str(project),
+            "--poll-timeout",
+            "5",
+            "--retry-failed",
+            "--retry-reason",
+            "provider dashboard confirmed no usable task",
+        )
         self.assertTrue(retried["ok"])
         self.assertEqual(FakeProviderHandler.video_creates, 2)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        history = state["shots"]["shot-001"]["video"]["history"]
+        self.assertEqual(history[-1]["reason"], "provider dashboard confirmed no usable task")
 
     def test_terminal_failed_task_requires_explicit_retry_authorization(self) -> None:
         project = self.create_project("terminal-failure", generate_image=False)
@@ -390,13 +421,78 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
         FakeProviderHandler.video_status = "completed"
-        retried = self.run_cli("resume", str(project), "--poll-timeout", "5", "--retry-failed")
+        retried = self.run_cli(
+            "resume",
+            str(project),
+            "--poll-timeout",
+            "5",
+            "--retry-failed",
+            "--retry-reason",
+            "terminal provider failure confirmed",
+        )
         self.assertTrue(retried["ok"])
         self.assertEqual(FakeProviderHandler.video_creates, 2)
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         video = state["shots"]["shot-001"]["video"]
         self.assertEqual(video["status"], "completed")
         self.assertEqual(video["previous_task_id"], "task-1")
+        self.assertEqual(video["history"][-1]["reason"], "terminal provider failure confirmed")
+
+    def test_budget_gate_blocks_before_billable_request(self) -> None:
+        project = self.create_project("budget", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["budget"] = {"currency": "CNY", "image_request": 0.1, "video_request": 1.0, "max_estimated_cost": 0.5}
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("preflight", str(project), expected=1)
+        self.assertFalse(result["preflight"]["budget"]["within_budget"])
+        blocked = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertIn("estimated project cost", blocked["error"])
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
+    def test_structured_character_and_continuity_audit(self) -> None:
+        project = self.create_project("continuity")
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["characters"] = [
+            {"id": "lead", "name": "Lead", "identity": "Adult woman with a short black bob.", "wardrobe": "Green jacket.", "references": []}
+        ]
+        shot = value["shots"][0]
+        shot["character_ids"] = ["lead"]
+        shot["scene_id"] = "office"
+        shot["continuity_notes"] = "Keep the green jacket and desk position unchanged."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        audit = self.run_cli("audit", str(project))
+        self.assertTrue(audit["ok"])
+        self.assertFalse(audit["warnings"])
+        preflight = self.run_cli("preflight", str(project))
+        video_prompt = next(item for item in preflight["preflight"]["prompts"] if item["kind"] == "video")
+        self.assertGreater(video_prompt["characters"], len(shot["video_prompt"]))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_progress_qa_postprocess_and_cover_are_offline(self) -> None:
+        project = self.create_project("delivery", generate_image=False)
+        result = subprocess.run(
+            [sys.executable, str(CLI), "generate-videos", str(project), "--poll-timeout", "5", "--progress"],
+            env=self.env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('"gvs_progress":true', result.stderr)
+        self.assertTrue(json.loads(result.stdout)["ok"])
+
+        qa = self.run_cli("qa", str(project))
+        self.assertFalse(qa["technical_ok"])
+        self.assertTrue(any("dimensions mismatch" in error for report in qa["reports"] for error in report.get("errors", [])))
+
+        source = project / "clips" / "shot-001.mp4"
+        processed = project / "deliverables" / "processed.mp4"
+        cover = project / "deliverables" / "cover.jpg"
+        post = self.run_cli("postprocess", str(source), str(processed), "--fade-seconds", "0.1")
+        self.assertEqual(post["media"]["codec"], "h264")
+        cover_result = self.run_cli("cover", str(processed), str(cover), "--at-seconds", "0.2")
+        self.assertGreater(cover_result["cover"]["bytes"], 100)
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_dpapi_storage_keeps_plaintext_out_of_config(self) -> None:

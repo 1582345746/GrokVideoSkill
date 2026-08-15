@@ -1,0 +1,43 @@
+[
+  {
+    "name": "newapi-nested-data",
+    "payload": {"data": {"id": "task-a", "status": "queued", "progress": 0.25}},
+    "task_id": "task-a",
+    "status": "queued",
+    "progress": 25.0,
+    "url": ""
+  },
+  {
+    "name": "result-output-camelcase",
+    "payload": {"result": {"output": {"taskId": "task-b", "taskStatus": "running", "percentage": "48%"}}},
+    "task_id": "task-b",
+    "status": "in_progress",
+    "progress": 48.0,
+    "url": ""
+  },
+  {
+    "name": "completed-video-list",
+    "payload": {"response": {"state": "finished", "videos": [{"downloadUrl": "https://cdn.example/video.mp4"}]}},
+    "task_id": "",
+    "status": "completed",
+    "progress": null,
+    "url": "https://cdn.example/video.mp4"
+  },
+  {
+    "name": "url-implies-complete",
+    "payload": {"output": {"media": {"video_url": "https://cdn.example/direct.mp4"}}},
+    "task_id": "",
+    "status": "",
+    "progress": null,
+    "url": "https://cdn.example/direct.mp4"
+  },
+  {
+    "name": "nested-error",
+    "payload": {"data": {"task_id": "task-e", "state": "rejected", "failure": {"reason": "policy rejected"}}},
+    "task_id": "task-e",
+    "status": "rejected",
+    "progress": null,
+    "url": "",
+    "error": "policy rejected"
+  }
+]

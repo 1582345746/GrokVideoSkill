@@ -27,7 +27,7 @@ Accept image results from `data[].b64_json`, data URLs, or HTTPS URLs. Never for
 
 `POST /v1/videos` as multipart with `model`, `prompt`, `seconds`, optional `size`, and zero or more repeated `input_reference` file parts. This Skill enforces 1-15 seconds and a final composed prompt of at most 4096 characters. For image-to-video, send the current shot keyframe; do not send a multi-view character sheet directly.
 
-The expected model is configured, with `grok-imagine-video-1.5` as the default. Do not silently rename it to a preview model. Normalize a task ID from `id`, `request_id`, or `task_id`, including a nested `data` object.
+The expected model is configured, with `grok-imagine-video-1.5` as the default. Do not silently rename it to a preview model. The adapter searches common `data`, `result`, `output`, `response`, `task`, and `video` wrappers; it accepts snake_case and camelCase task IDs, status, progress, errors, and result URLs.
 
 ## Video status and content
 
@@ -37,3 +37,5 @@ The expected model is configured, with `grok-imagine-video-1.5` as the default. 
 - Failed: `failed`, `failure`, `error`, `cancelled`, `expired`
 
 If a completed response exposes `url`, `result_url`, `video_url`, or a nested content/video/metadata URL, use it only if the authenticated content endpoint is unavailable. Validate bytes, not only HTTP status or MIME type.
+
+Model discovery, status queries, and downloads are idempotent and may use bounded exponential backoff. Repeated transient failures open a short process-local circuit breaker. `POST /v1/videos` and all image creation endpoints are billable writes and are never automatically retried.

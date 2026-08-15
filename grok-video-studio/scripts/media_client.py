@@ -21,10 +21,19 @@ from gvs_common import (
     request_bytes,
     request_json,
 )
+from provider_contracts import (
+    COMPLETED_STATES,
+    FAILED_STATES,
+    CircuitBreaker,
+    is_completed,
+    result_urls,
+    safe_operation,
+    task_error,
+    task_id,
+    task_status,
+)
 
 
-COMPLETED = {"completed", "complete", "succeeded", "success", "done"}
-FAILED = {"failed", "failure", "error", "cancelled", "canceled", "expired"}
 MAX_PROMPT_CHARS = 4096
 MAX_VIDEO_SECONDS = 15
 
@@ -34,13 +43,6 @@ def _validate_prompt(prompt: str) -> None:
         raise SkillError("prompt is required")
     if len(prompt) > MAX_PROMPT_CHARS:
         raise SkillError(f"prompt has {len(prompt)} characters; provider maximum is {MAX_PROMPT_CHARS}")
-
-
-def _unwrap_object(payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload.get("data")
-    if isinstance(data, dict):
-        return data
-    return payload
 
 
 def _model_ids(payload: dict[str, Any]) -> list[str]:
@@ -111,47 +113,21 @@ def _extract_image(payload: dict[str, Any]) -> bytes:
     raise SkillError("image provider response has neither b64_json nor URL")
 
 
-def _task_id(payload: dict[str, Any]) -> str:
-    value = _unwrap_object(payload)
-    return str(value.get("id") or value.get("request_id") or value.get("task_id") or "").strip()
-
-
-def _status(payload: dict[str, Any]) -> str:
-    value = _unwrap_object(payload)
-    return str(value.get("status") or value.get("state") or "").strip().lower()
-
-
-def _task_error(payload: dict[str, Any]) -> str:
-    value = _unwrap_object(payload)
-    error = value.get("error") or payload.get("error")
-    if isinstance(error, dict):
-        return str(error.get("message") or error.get("detail") or error.get("code") or "video generation failed")[:1000]
-    if isinstance(error, str):
-        return error[:1000]
-    return str(value.get("message") or value.get("msg") or "video generation failed")[:1000]
-
-
-def _result_url(payload: dict[str, Any]) -> str:
-    value = _unwrap_object(payload)
-    candidates: list[Any] = [value.get("url"), value.get("result_url"), value.get("video_url")]
-    for container_name in ("content", "video", "metadata"):
-        container = value.get(container_name)
-        if isinstance(container, dict):
-            candidates.extend([container.get("url"), container.get("video_url")])
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
-    return ""
-
-
 class QuickAIImageClient:
     def __init__(self, base_url: str, key: str, model: str) -> None:
         self.base_url = base_url
         self.key = key
         self.model = model
+        self.breaker = CircuitBreaker()
 
     def list_models(self) -> list[str]:
-        return _model_ids(request_json("GET", api_url(self.base_url, "/v1/models"), key=self.key, timeout=60))
+        return safe_operation(
+            lambda: _model_ids(request_json("GET", api_url(self.base_url, "/v1/models"), key=self.key, timeout=60)),
+            breaker=self.breaker,
+        )
+
+    def health_snapshot(self) -> dict[str, Any]:
+        return self.breaker.snapshot()
 
     def generate(self, prompt: str, *, size: str, quality: str) -> bytes:
         _validate_prompt(prompt)
@@ -203,9 +179,16 @@ class QuickAINewVideoClient:
         self.base_url = base_url
         self.key = key
         self.model = model
+        self.breaker = CircuitBreaker()
 
     def list_models(self) -> list[str]:
-        return _model_ids(request_json("GET", api_url(self.base_url, "/v1/models"), key=self.key, timeout=60))
+        return safe_operation(
+            lambda: _model_ids(request_json("GET", api_url(self.base_url, "/v1/models"), key=self.key, timeout=60)),
+            breaker=self.breaker,
+        )
+
+    def health_snapshot(self) -> dict[str, Any]:
+        return self.breaker.snapshot()
 
     def create(self, prompt: str, *, seconds: int, size: str, references: Iterable[Path]) -> str:
         _validate_prompt(prompt)
@@ -224,16 +207,19 @@ class QuickAINewVideoClient:
             content_type=content_type,
             timeout=120,
         )
-        task_id = _task_id(payload)
-        if not task_id:
+        created_task_id = task_id(payload)
+        if not created_task_id:
             raise SkillError("video provider returned no task ID")
-        return task_id
+        return created_task_id
 
     def query(self, task_id: str) -> tuple[str, dict[str, Any]]:
         encoded = urllib.parse.quote(task_id, safe="")
-        payload = request_json("GET", api_url(self.base_url, f"/v1/videos/{encoded}"), key=self.key, timeout=60)
-        status = _status(payload)
-        if not status and _result_url(payload):
+        payload = safe_operation(
+            lambda: request_json("GET", api_url(self.base_url, f"/v1/videos/{encoded}"), key=self.key, timeout=60),
+            breaker=self.breaker,
+        )
+        status = task_status(payload)
+        if not status and is_completed(payload):
             status = "completed"
         return status or "unknown", payload
 
@@ -253,14 +239,19 @@ class QuickAINewVideoClient:
             except APIError as error:
                 if error.status not in {408, 425, 429, 500, 502, 503, 504}:
                     raise
-                status, payload = last_status, {}
+                status, payload = last_status, {"warning": str(error)}
+            except SkillError as error:
+                message = str(error)
+                if "circuit is open" not in message and "cannot connect" not in message:
+                    raise
+                status, payload = last_status, {"warning": message}
             last_status = status
             if on_status:
                 on_status(status, payload)
-            if status in COMPLETED:
+            if status in COMPLETED_STATES or is_completed(payload):
                 return payload
-            if status in FAILED:
-                raise SkillError(_task_error(payload))
+            if status in FAILED_STATES:
+                raise SkillError(task_error(payload))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"video task polling timed out: {task_id}")
@@ -272,18 +263,25 @@ class QuickAINewVideoClient:
         content_url = api_url(self.base_url, f"/v1/videos/{encoded}/content")
         content_error: Exception | None = None
         try:
-            download_file(content_url, destination, key=self.key, timeout=300)
+            safe_operation(
+                lambda: download_file(content_url, destination, key=self.key, timeout=300),
+                breaker=self.breaker,
+            )
             assert_mp4(destination)
             return
         except (APIError, SkillError) as error:
             content_error = error
             if destination.exists():
                 destination.unlink()
-        result_url = _result_url(status_payload)
-        if result_url:
-            download_file(result_url, destination, timeout=300)
-            assert_mp4(destination)
-            return
+        for result_url in result_urls(status_payload):
+            try:
+                safe_operation(lambda: download_file(result_url, destination, timeout=300), breaker=self.breaker)
+                assert_mp4(destination)
+                return
+            except (APIError, SkillError) as error:
+                content_error = error
+                if destination.exists():
+                    destination.unlink()
         raise SkillError(f"video content is unavailable: {content_error}")
 
 
