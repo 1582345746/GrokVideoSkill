@@ -4,6 +4,7 @@ param(
     [string]$Python = "python",
     [switch]$Force,
     [switch]$Configure,
+    [switch]$ConfigureFromStdin,
     [switch]$SkipProviderTest
 )
 
@@ -25,6 +26,9 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
 
 $sourcePath = [IO.Path]::GetFullPath($source)
 $destinationPath = [IO.Path]::GetFullPath($Destination)
+if ($Configure -and $ConfigureFromStdin) {
+    throw "Use either -Configure or -ConfigureFromStdin, not both."
+}
 if ($sourcePath -eq $destinationPath) {
     throw "Source and destination must be different directories."
 }
@@ -50,8 +54,11 @@ if ($LASTEXITCODE -ne 0) {
     throw "Installed Skill did not pass the version check."
 }
 
-if ($Configure) {
+if ($Configure -or $ConfigureFromStdin) {
     $arguments = @($cli, "configure")
+    if ($ConfigureFromStdin) {
+        $arguments += "--credentials-stdin"
+    }
     if ($SkipProviderTest) {
         $arguments += "--skip-test"
     }
@@ -62,6 +69,6 @@ if ($Configure) {
 }
 
 Write-Host "Installed Grok Video Studio to $destinationPath"
-if (-not $Configure) {
-    Write-Host "Next: run python `"$cli`" configure in an interactive terminal, then run doctor."
+if (-not $Configure -and -not $ConfigureFromStdin) {
+    Write-Host "Next: Codex can run python `"$cli`" configure --credentials-stdin --skip-test and provide the credential JSON through process stdin."
 }

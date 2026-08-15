@@ -21,7 +21,7 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png-payload"
 FAKE_MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"fake-video-payload"
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-from gvs_common import load_settings, save_settings  # noqa: E402
+from gvs_common import load_settings  # noqa: E402
 from provider_contracts import is_completed, result_urls, task_error, task_id, task_progress, task_status  # noqa: E402
 
 
@@ -497,26 +497,57 @@ class SkillIntegrationTests(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_dpapi_storage_keeps_plaintext_out_of_config(self) -> None:
         secure_dir = self.root / "secure-config"
-        environment = {"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""}
+        image_secret = "private-image-value"
+        video_secret = "private-video-value"
+        environment = self.env.copy()
+        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(CLI),
+                "configure",
+                "--credentials-stdin",
+                "--skip-test",
+                "--quickai-base-url",
+                self.base_url,
+                "--quickainew-base-url",
+                self.base_url,
+            ],
+            input=json.dumps({"quickai_key": image_secret, "quickainew_key": video_secret}) + "\n",
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(image_secret, result.stdout + result.stderr)
+        self.assertNotIn(video_secret, result.stdout + result.stderr)
         with mock.patch.dict(os.environ, environment, clear=False):
-            save_settings(
-                {
-                    "quickai_base_url": self.base_url,
-                    "quickainew_base_url": self.base_url,
-                    "image_model": "gpt-image-2",
-                    "video_model": "grok-imagine-video-1.5",
-                },
-                "private-image-value",
-                "private-video-value",
-                store_secrets=True,
-            )
             config_bytes = (secure_dir / "config.json").read_bytes()
             secret_bytes = (secure_dir / "secrets.dpapi").read_bytes()
-            self.assertNotIn(b"private-image-value", config_bytes + secret_bytes)
-            self.assertNotIn(b"private-video-value", config_bytes + secret_bytes)
+            self.assertNotIn(image_secret.encode(), config_bytes + secret_bytes)
+            self.assertNotIn(video_secret.encode(), config_bytes + secret_bytes)
             loaded = load_settings()
-            self.assertEqual(loaded["quickai_key"], "private-image-value")
-            self.assertEqual(loaded["quickainew_key"], "private-video-value")
+            self.assertEqual(loaded["quickai_key"], image_secret)
+            self.assertEqual(loaded["quickainew_key"], video_secret)
+
+    def test_credentials_stdin_rejects_invalid_payload_before_storage(self) -> None:
+        secure_dir = self.root / "invalid-config"
+        environment = self.env.copy()
+        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
+        result = subprocess.run(
+            [sys.executable, str(CLI), "configure", "--credentials-stdin", "--skip-test"],
+            input='{"quickai_key":"only-one-key"}\n',
+            env=environment,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("requires string fields quickai_key and quickainew_key", result.stderr)
+        self.assertFalse((secure_dir / "config.json").exists())
 
 
 if __name__ == "__main__":

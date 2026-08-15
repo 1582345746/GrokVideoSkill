@@ -35,12 +35,13 @@ from media_tools import extract_cover, postprocess_video, quality_report
 from provider_contracts import task_progress
 
 
-SKILL_VERSION = "1.2.0"
+SKILL_VERSION = "1.2.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
 HARD_PROMPT_CHARS = 4096
 SAFE_PROMPT_CHARS = 3800
+MAX_CREDENTIAL_PAYLOAD_CHARS = 32768
 SHOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -1269,13 +1270,38 @@ def doctor() -> tuple[int, dict[str, Any]]:
     return (0 if result["ok"] else 1), result
 
 
+def read_credentials_payload() -> tuple[str, str]:
+    prompt = "Credential payload JSON: "
+    raw = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline(MAX_CREDENTIAL_PAYLOAD_CHARS + 1)
+    if len(raw) > MAX_CREDENTIAL_PAYLOAD_CHARS:
+        raise SkillError("credential payload is too large")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SkillError("credential payload must be one JSON object") from error
+    if not isinstance(payload, dict):
+        raise SkillError("credential payload must be one JSON object")
+    quickai_key = payload.get("quickai_key")
+    quickainew_key = payload.get("quickainew_key")
+    if not isinstance(quickai_key, str) or not isinstance(quickainew_key, str):
+        raise SkillError("credential payload requires string fields quickai_key and quickainew_key")
+    return quickai_key.strip(), quickainew_key.strip()
+
+
 def configure(args: argparse.Namespace) -> dict[str, Any]:
-    quickai_key = os.environ.get("GVS_QUICKAI_KEY", "").strip()
-    quickainew_key = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
-    if not quickai_key:
-        quickai_key = getpass.getpass("QuickAI image key: ").strip()
-    if not quickainew_key:
-        quickainew_key = getpass.getpass("QuickAI New video key: ").strip()
+    if args.credentials_stdin and args.environment_only:
+        raise SkillError("--credentials-stdin cannot be combined with --environment-only because the supplied keys would not persist")
+    if args.credentials_stdin:
+        quickai_key, quickainew_key = read_credentials_payload()
+        credential_source = "agent-stdin"
+    else:
+        quickai_key = os.environ.get("GVS_QUICKAI_KEY", "").strip()
+        quickainew_key = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
+        if not quickai_key:
+            quickai_key = getpass.getpass("QuickAI image key: ").strip()
+        if not quickainew_key:
+            quickainew_key = getpass.getpass("QuickAI New video key: ").strip()
+        credential_source = "environment-or-interactive"
     if not quickai_key or not quickainew_key:
         raise SkillError("both provider keys are required")
     config = {
@@ -1294,7 +1320,12 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
             raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
         connection = {"quickai": "ok", "quickainew": "ok"}
     save_settings(config, quickai_key, quickainew_key, store_secrets=not args.environment_only)
-    return {"configured": str(config_path()), "secret_provider": "environment" if args.environment_only else "windows-dpapi", "connection": connection}
+    return {
+        "configured": str(config_path()),
+        "secret_provider": "environment" if args.environment_only else "windows-dpapi",
+        "credential_source": credential_source,
+        "connection": connection,
+    }
 
 
 def status_summary(root: Path) -> dict[str, Any]:
@@ -1343,6 +1374,11 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
     setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
+    setup.add_argument(
+        "--credentials-stdin",
+        action="store_true",
+        help="Read one non-echoed JSON credential payload from stdin for Codex-managed installation.",
+    )
     setup.add_argument("--skip-test", action="store_true")
 
     commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")

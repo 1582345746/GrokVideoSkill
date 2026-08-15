@@ -5,14 +5,16 @@ description: Plan and build resumable AI video projects with QuickAI image gener
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.2.0`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.2.1`.
 
 ## Setup
 
-1. Run `python scripts/grok_video_studio.py configure` in an interactive terminal. Never request or pass API keys in chat or command-line arguments.
-2. Run `python scripts/grok_video_studio.py doctor` and resolve both provider and FFmpeg checks before paid generation.
-3. Keep the default direct providers. QuickAI handles images; QuickAI New handles videos. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
-4. Run `version` after installation. The repository root includes `install.ps1`; it copies the Skill without storing credentials in the repository.
+1. When the user supplies both provider keys in the installation conversation, Codex must perform configuration itself. Run `python scripts/grok_video_studio.py configure --credentials-stdin --skip-test` in a managed process and send exactly one JSON object through that process's stdin: `{"quickai_key":"...","quickainew_key":"..."}`. Do not ask the user to open PowerShell.
+2. Never place keys in command-line arguments, temporary files, `SKILL.md`, project files, source control, or terminal output. On Windows, configuration stores them with DPAPI under the current user's local application-data directory. The installed Skill directory remains secret-free and updateable.
+3. If the user has not supplied keys in the conversation, use the original hidden interactive `configure` flow instead of inventing credentials.
+4. Run `python scripts/grok_video_studio.py doctor` and resolve both provider and FFmpeg checks before paid generation. Skip `doctor` when the user asks to avoid all real upstream tests.
+5. Keep the default direct providers. QuickAI handles images; QuickAI New handles videos. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
+6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 
