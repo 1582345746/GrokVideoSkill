@@ -1,0 +1,18 @@
+{
+  "id": "comedy-action",
+  "title": "搞笑动作视频",
+  "summary": "基于人物或物体图片制作表情、反应和轻剧情笑点。",
+  "default_shots": 2,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["笑点类型", "人物或物体参考图", "动作幅度", "是否需要反应镜头"],
+    "story": "每个镜头安排一个明确笑点或反应，避免在单段里堆叠过多事件。",
+    "image_prompt": "需要新场景时只描述笑点发生前的静止关键帧。",
+    "video_prompt": "用一个清晰动作和一个反应完成笑点，保持主体外观和背景连续。"
+  }
+}

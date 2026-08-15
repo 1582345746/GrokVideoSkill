@@ -1,0 +1,18 @@
+{
+  "id": "single-image-animation",
+  "title": "单图动画",
+  "summary": "把用户提供的一张人物、插画、海报或场景图自然动起来。",
+  "default_shots": 1,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["需要运动的主体", "希望保持不变的元素", "动作幅度", "镜头是否固定"],
+    "story": "将用户图片放入当前镜头的 video_references，默认只使用这一张参考图。",
+    "image_prompt": "此流程默认直接使用用户图片，不再生图。",
+    "video_prompt": "限定小范围自然动作，并明确锁定身份、服装、背景和构图。"
+  }
+}

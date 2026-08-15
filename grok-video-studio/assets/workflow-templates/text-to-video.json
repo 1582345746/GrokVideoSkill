@@ -1,0 +1,18 @@
+{
+  "id": "text-to-video",
+  "title": "文生视频",
+  "summary": "不依赖参考图，直接把简洁的场景与动作描述生成视频。",
+  "default_shots": 1,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["主体与场景", "核心动作", "镜头运动", "比例和时长"],
+    "story": "每个镜头只保留一段能在十五秒内自然完成的动作。",
+    "image_prompt": "此流程默认不生成关键帧。",
+    "video_prompt": "按主体、动作、镜头、环境、节奏和收尾姿态的顺序描述。"
+  }
+}

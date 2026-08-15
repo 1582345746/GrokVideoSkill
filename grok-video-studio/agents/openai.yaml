@@ -1,0 +1,4 @@
+interface:
+  display_name: "Grok Video Studio"
+  short_description: "Plan, generate, resume, and assemble AI video projects"
+  default_prompt: "Use $grok-video-studio to choose a workflow, build a shot plan, generate a single-sheet character master when needed, and produce a resumable MP4 project."

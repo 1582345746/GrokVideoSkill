@@ -1,0 +1,1126 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+from typing import Any, Callable
+
+from gvs_common import (
+    APIError,
+    DEFAULT_IMAGE_MODEL,
+    DEFAULT_QUICKAI_URL,
+    DEFAULT_QUICKAINEW_URL,
+    DEFAULT_VIDEO_MODEL,
+    SkillError,
+    assert_mp4,
+    atomic_write_json,
+    config_path,
+    load_settings,
+    normalize_base_url,
+    print_json,
+    save_settings,
+)
+from media_client import QuickAIImageClient, QuickAINewVideoClient, save_image_bytes
+
+
+PROJECT_VERSION = 1
+STATE_VERSION = 1
+MAX_VIDEO_SECONDS = 15
+HARD_PROMPT_CHARS = 4096
+SAFE_PROMPT_CHARS = 3800
+SHOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+TERMINAL_FAILURES = {"failed", "submission_unknown"}
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+WORKFLOW_ROOT = SKILL_ROOT / "assets" / "workflow-templates"
+
+
+def project_file(root: Path) -> Path:
+    return root / "project.json"
+
+
+def state_file(root: Path) -> Path:
+    return root / "state.json"
+
+
+def load_workflows() -> dict[str, dict[str, Any]]:
+    workflows: dict[str, dict[str, Any]] = {}
+    for path in sorted(WORKFLOW_ROOT.glob("*.json")):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as error:
+            raise SkillError(f"invalid workflow template {path.name} at line {error.lineno}") from error
+        if not isinstance(value, dict):
+            raise SkillError(f"workflow template root must be an object: {path.name}")
+        workflow_id = str(value.get("id", "")).strip()
+        title = str(value.get("title", "")).strip()
+        if not SHOT_ID_RE.fullmatch(workflow_id) or not title:
+            raise SkillError(f"workflow template requires a valid id and title: {path.name}")
+        if workflow_id in workflows:
+            raise SkillError(f"duplicate workflow id: {workflow_id}")
+        workflows[workflow_id] = value
+    if not workflows:
+        raise SkillError(f"no workflow templates found: {WORKFLOW_ROOT}")
+    return workflows
+
+
+def workflow_catalog() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": workflow_id,
+            "title": workflow["title"],
+            "summary": workflow.get("summary", ""),
+            "character_master": bool(workflow.get("character_master", False)),
+            "preferred_clip_seconds": int(workflow.get("preferred_clip_seconds", 6)),
+        }
+        for workflow_id, workflow in load_workflows().items()
+    ]
+
+
+def get_workflow(workflow_id: str) -> dict[str, Any]:
+    workflows = load_workflows()
+    try:
+        return workflows[workflow_id]
+    except KeyError as error:
+        raise SkillError(f"unknown workflow '{workflow_id}'; run capabilities to list available workflows") from error
+
+
+def load_project(root: Path) -> dict[str, Any]:
+    path = project_file(root)
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise SkillError(f"project does not exist: {path}") from error
+    except json.JSONDecodeError as error:
+        raise SkillError(f"invalid project JSON at line {error.lineno}") from error
+    if not isinstance(value, dict):
+        raise SkillError("project JSON root must be an object")
+    return value
+
+
+def fresh_state() -> dict[str, Any]:
+    return {
+        "version": STATE_VERSION,
+        "updated_at": int(time.time()),
+        "character_master": {"status": "pending", "attempts": 0},
+        "shots": {},
+        "deliverables": {},
+    }
+
+
+def load_state(root: Path) -> dict[str, Any]:
+    path = state_file(root)
+    if not path.exists():
+        return fresh_state()
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise SkillError(f"invalid state JSON at line {error.lineno}") from error
+    if not isinstance(value, dict) or value.get("version") != STATE_VERSION or not isinstance(value.get("shots"), dict):
+        raise SkillError("state file has an unsupported format")
+    value.setdefault("character_master", {"status": "pending", "attempts": 0})
+    value.setdefault("deliverables", {})
+    return value
+
+
+def save_state(root: Path, state: dict[str, Any]) -> None:
+    state["updated_at"] = int(time.time())
+    atomic_write_json(state_file(root), state)
+
+
+def resolve_project_path(root: Path, value: str, *, must_exist: bool = True) -> Path:
+    candidate = Path(value)
+    if candidate.is_absolute():
+        raise SkillError(f"project paths must be relative: {value}")
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as error:
+        raise SkillError(f"project path escapes the project: {value}") from error
+    if must_exist and not resolved.is_file():
+        raise SkillError(f"reference file does not exist: {value}")
+    return resolved
+
+
+def _known_secret_field(value: Any) -> bool:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if normalized in {"api_key", "quickai_key", "quickainew_key", "authorization", "secret"}:
+                return True
+            if _known_secret_field(child):
+                return True
+    if isinstance(value, list):
+        return any(_known_secret_field(item) for item in value)
+    return False
+
+
+def shot_value(project: dict[str, Any], shot: dict[str, Any], name: str, default: Any) -> Any:
+    defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
+    default_name = "video_seconds" if name == "seconds" else name
+    return shot.get(name, defaults.get(default_name, default))
+
+
+def character_master_config(project: dict[str, Any]) -> dict[str, Any]:
+    value = project.get("character_master")
+    return value if isinstance(value, dict) else {}
+
+
+def _positive_limit(limits: dict[str, Any], name: str, fallback: int, errors: list[str]) -> int:
+    try:
+        value = int(limits.get(name, fallback))
+    except (TypeError, ValueError):
+        errors.append(f"limits.{name} must be a positive integer")
+        return fallback
+    if value < 1:
+        errors.append(f"limits.{name} must be a positive integer")
+        return fallback
+    return value
+
+
+def _reference_errors(root: Path, references: Any, prefix: str, max_references: int) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(references, list) or not all(isinstance(item, str) and item.strip() for item in references):
+        return [f"{prefix} must be an array of relative paths"]
+    if len(references) > max_references:
+        errors.append(f"{prefix} exceeds max_reference_images {max_references}")
+    for reference in references:
+        try:
+            path = resolve_project_path(root, reference)
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                errors.append(f"{prefix} has unsupported image type: {reference}")
+        except SkillError as error:
+            errors.append(str(error))
+    return errors
+
+
+def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if project.get("version") != PROJECT_VERSION:
+        errors.append("project.version must be 1")
+    for field in ("title", "topic", "story"):
+        if not str(project.get(field, "")).strip():
+            errors.append(f"project.{field} is required")
+    if _known_secret_field(project):
+        errors.append("project contains a credential-like field; credentials must stay outside the project")
+    shots = project.get("shots")
+    if not isinstance(shots, list) or not shots:
+        errors.append("project.shots must be a non-empty array")
+        return errors
+    limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
+    max_images = _positive_limit(limits, "max_image_requests", 12, errors)
+    max_videos = _positive_limit(limits, "max_video_requests", 8, errors)
+    max_seconds = _positive_limit(limits, "max_total_video_seconds", 60, errors)
+    max_references = _positive_limit(limits, "max_reference_images", 9, errors)
+    max_prompt_chars = _positive_limit(limits, "max_prompt_chars", HARD_PROMPT_CHARS, errors)
+    if max_prompt_chars > HARD_PROMPT_CHARS:
+        errors.append(f"limits.max_prompt_chars cannot exceed provider limit {HARD_PROMPT_CHARS}")
+        max_prompt_chars = HARD_PROMPT_CHARS
+
+    master = character_master_config(project)
+    master_enabled = bool(master.get("enabled", False))
+    master_generate = bool(master.get("generate", False))
+    if project.get("character_master") is not None and not isinstance(project.get("character_master"), dict):
+        errors.append("project.character_master must be an object")
+    if master_enabled:
+        if str(master.get("mode", "single-sheet")) != "single-sheet":
+            errors.append("character_master.mode must be single-sheet")
+        master_path = str(master.get("path", "")).strip()
+        if not master_path:
+            errors.append("character_master.path is required when enabled")
+        elif not master_generate:
+            try:
+                path = resolve_project_path(root, master_path)
+                if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                    errors.append("character_master.path must be PNG, JPEG, or WebP")
+            except SkillError as error:
+                errors.append(str(error))
+        else:
+            try:
+                resolve_project_path(root, master_path, must_exist=False)
+            except SkillError as error:
+                errors.append(str(error))
+            if not str(master.get("prompt", "")).strip():
+                errors.append("character_master.prompt is required when generate is true")
+            else:
+                prompt = composed_character_prompt(project)
+                if len(prompt) > max_prompt_chars:
+                    errors.append(f"character_master composed prompt has {len(prompt)} characters; maximum is {max_prompt_chars}")
+        errors.extend(_reference_errors(root, master.get("source_references", []), "character_master.source_references", max_references))
+
+    if len(shots) > max_videos:
+        errors.append(f"shot count {len(shots)} exceeds max_video_requests {max_videos}")
+    generated_images = sum(1 for shot in shots if isinstance(shot, dict) and bool(shot.get("generate_image", True))) + int(master_enabled and master_generate)
+    if generated_images > max_images:
+        errors.append(f"generated image count {generated_images} exceeds max_image_requests {max_images}")
+    seen: set[str] = set()
+    total_seconds = 0
+    for index, raw_shot in enumerate(shots, 1):
+        prefix = f"shots[{index - 1}]"
+        if not isinstance(raw_shot, dict):
+            errors.append(f"{prefix} must be an object")
+            continue
+        shot_id = str(raw_shot.get("id", "")).strip()
+        if not SHOT_ID_RE.fullmatch(shot_id):
+            errors.append(f"{prefix}.id must use lowercase letters, digits, and hyphens")
+        elif shot_id in seen:
+            errors.append(f"duplicate shot id: {shot_id}")
+        seen.add(shot_id)
+        if bool(raw_shot.get("generate_image", True)) and not str(raw_shot.get("image_prompt", "")).strip():
+            errors.append(f"{prefix}.image_prompt is required when generate_image is true")
+        if not str(raw_shot.get("video_prompt", "")).strip():
+            errors.append(f"{prefix}.video_prompt is required")
+        if bool(raw_shot.get("use_character_master", False)) and not master_enabled:
+            errors.append(f"{prefix}.use_character_master requires project.character_master.enabled")
+        if str(raw_shot.get("image_prompt", "")).strip():
+            image_prompt = composed_image_prompt(project, raw_shot)
+            if len(image_prompt) > max_prompt_chars:
+                errors.append(f"{prefix} composed image prompt has {len(image_prompt)} characters; maximum is {max_prompt_chars}")
+        if str(raw_shot.get("video_prompt", "")).strip():
+            video_prompt = composed_video_prompt(project, raw_shot)
+            if len(video_prompt) > max_prompt_chars:
+                errors.append(f"{prefix} composed video prompt has {len(video_prompt)} characters; maximum is {max_prompt_chars}")
+        seconds = shot_value(project, raw_shot, "seconds", 6)
+        if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds < 1 or seconds > MAX_VIDEO_SECONDS:
+            errors.append(f"{prefix}.seconds must be an integer from 1 to {MAX_VIDEO_SECONDS}")
+        else:
+            total_seconds += seconds
+        for size_name, fallback in (("image_size", "1024x1024"), ("video_size", "1280x720")):
+            size = str(shot_value(project, raw_shot, size_name, fallback))
+            if size != "auto" and not SIZE_RE.fullmatch(size):
+                errors.append(f"{prefix}.{size_name} must be WIDTHxHEIGHT or auto")
+        for ref_name in ("image_references", "video_references"):
+            references = raw_shot.get(ref_name, [])
+            errors.extend(_reference_errors(root, references, f"{prefix}.{ref_name}", max_references))
+    if total_seconds > max_seconds:
+        errors.append(f"total video seconds {total_seconds} exceeds max_total_video_seconds {max_seconds}")
+    return errors
+
+
+def require_valid_project(root: Path) -> dict[str, Any]:
+    project = load_project(root)
+    errors = validate_project(root, project)
+    if errors:
+        raise SkillError("project validation failed: " + "; ".join(errors))
+    return project
+
+
+def selected_shots(project: dict[str, Any], shot_ids: list[str] | None) -> list[dict[str, Any]]:
+    shots = [shot for shot in project["shots"] if isinstance(shot, dict)]
+    if not shot_ids:
+        return shots
+    requested = list(dict.fromkeys(shot_ids))
+    by_id = {str(shot["id"]): shot for shot in shots}
+    unknown = [shot_id for shot_id in requested if shot_id not in by_id]
+    if unknown:
+        raise SkillError("unknown shot id(s): " + ", ".join(unknown))
+    return [by_id[shot_id] for shot_id in requested]
+
+
+def file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def signature(value: dict[str, Any], references: list[Path]) -> str:
+    digest = hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+    for path in references:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(file_digest(path).encode("ascii"))
+    return digest.hexdigest()
+
+
+def composed_character_prompt(project: dict[str, Any]) -> str:
+    master = character_master_config(project)
+    sections = []
+    character = str(project.get("character_bible", "")).strip()
+    style = str(project.get("style_bible", "")).strip()
+    if character:
+        sections.append("[CHARACTER IDENTITY]\n" + character)
+    sections.append("[SINGLE-SHEET CHARACTER MASTER]\n" + str(master.get("prompt", "")).strip())
+    if style:
+        sections.append("[STYLE]\n" + style)
+    return "\n\n".join(sections)
+
+
+def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    sections = []
+    character = str(project.get("character_bible", "")).strip()
+    style = str(project.get("style_bible", "")).strip()
+    if character:
+        sections.append("[CHARACTER BIBLE]\n" + character)
+    if style:
+        sections.append("[STYLE BIBLE]\n" + style)
+    sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
+    return "\n\n".join(sections)
+
+
+def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    sections = []
+    character = str(project.get("character_bible", "")).strip()
+    style = str(project.get("style_bible", "")).strip()
+    if character:
+        sections.append("[IDENTITY LOCK]\n" + character)
+    if style:
+        sections.append("[STYLE LOCK]\n" + style)
+    sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
+    return "\n\n".join(sections)
+
+
+def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
+    master = character_master_config(project)
+    prompts: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    if bool(master.get("enabled", False)) and bool(master.get("generate", False)) and str(master.get("prompt", "")).strip():
+        value = composed_character_prompt(project)
+        prompts.append({"kind": "character_master", "id": "character-master", "characters": len(value)})
+    total_seconds = 0
+    image_requests = int(bool(master.get("enabled", False)) and bool(master.get("generate", False)))
+    for shot in project.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        shot_id = str(shot.get("id", ""))
+        if bool(shot.get("generate_image", True)):
+            image_requests += 1
+        if str(shot.get("image_prompt", "")).strip():
+            value = composed_image_prompt(project, shot)
+            prompts.append({"kind": "image", "id": shot_id, "characters": len(value)})
+        if str(shot.get("video_prompt", "")).strip():
+            value = composed_video_prompt(project, shot)
+            prompts.append({"kind": "video", "id": shot_id, "characters": len(value)})
+        seconds = shot_value(project, shot, "seconds", 6)
+        if isinstance(seconds, int) and not isinstance(seconds, bool):
+            total_seconds += seconds
+        if bool(shot.get("use_character_master", False)) and shot.get("video_references"):
+            warnings.append(f"{shot_id}: explicit video_references bypass the generated keyframe; do not send a multi-view master sheet directly to video")
+    for item in prompts:
+        if item["characters"] > SAFE_PROMPT_CHARS:
+            warnings.append(
+                f"{item['kind']} prompt {item['id']} uses {item['characters']} characters; keep it at or below {SAFE_PROMPT_CHARS} for provider headroom"
+            )
+    return {
+        "workflow": project.get("workflow", "general-video"),
+        "requests": {
+            "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
+            "shot_images": image_requests - int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
+            "total_images": image_requests,
+            "videos": len([shot for shot in project.get("shots", []) if isinstance(shot, dict)]),
+        },
+        "total_video_seconds": total_seconds,
+        "max_clip_seconds": MAX_VIDEO_SECONDS,
+        "prompt_hard_limit": HARD_PROMPT_CHARS,
+        "prompts": prompts,
+        "warnings": warnings,
+    }
+
+
+def shot_state(state: dict[str, Any], shot_id: str) -> dict[str, Any]:
+    shots = state.setdefault("shots", {})
+    value = shots.setdefault(shot_id, {"image": {"status": "pending", "attempts": 0}, "video": {"status": "pending", "attempts": 0}})
+    value.setdefault("image", {"status": "pending", "attempts": 0})
+    value.setdefault("video", {"status": "pending", "attempts": 0})
+    return value
+
+
+def write_event(root: Path, event: dict[str, Any]) -> None:
+    path = root / "logs" / "events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"at": int(time.time()), **event}
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def clients() -> tuple[QuickAIImageClient, QuickAINewVideoClient, dict[str, Any]]:
+    settings = load_settings()
+    return (
+        QuickAIImageClient(settings["quickai_base_url"], settings["quickai_key"], settings["image_model"]),
+        QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_key"], settings["video_model"]),
+        settings,
+    )
+
+
+def resolved_character_master(root: Path, project: dict[str, Any], state: dict[str, Any]) -> Path:
+    master = character_master_config(project)
+    if not bool(master.get("enabled", False)):
+        raise SkillError("character master is not enabled")
+    runtime = state.setdefault("character_master", {"status": "pending", "attempts": 0})
+    runtime_path = str(runtime.get("path", "")).strip()
+    if runtime.get("status") == "completed" and runtime_path:
+        return resolve_project_path(root, runtime_path)
+    if not bool(master.get("generate", False)):
+        return resolve_project_path(root, str(master.get("path", "")))
+    raise SkillError("generated character master is missing; run generate-character first")
+
+
+def generate_character_master(root: Path, *, retry_failed: bool) -> dict[str, Any]:
+    project = require_valid_project(root)
+    state = load_state(root)
+    master = character_master_config(project)
+    runtime = state.setdefault("character_master", {"status": "pending", "attempts": 0})
+    if not bool(master.get("enabled", False)):
+        return {"status": "disabled", "skipped": True}
+    if not bool(master.get("generate", False)):
+        path = resolve_project_path(root, str(master["path"]))
+        runtime.update({"status": "completed", "path": path.relative_to(root).as_posix(), "source": "external", "error": ""})
+        save_state(root, state)
+        return {"status": "completed", "path": str(path), "source": "external", "skipped": True}
+
+    image_client, _, settings = clients()
+    references = [resolve_project_path(root, value) for value in master.get("source_references", [])]
+    prompt = composed_character_prompt(project)
+    size = str(master.get("image_size") or project.get("defaults", {}).get("image_size") or "1024x1024")
+    quality = str(master.get("image_quality") or project.get("defaults", {}).get("image_quality") or "auto")
+    current_signature = signature({"model": settings["image_model"], "prompt": prompt, "size": size, "quality": quality}, references)
+    existing_path = str(runtime.get("path", ""))
+    existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
+    if runtime.get("status") == "completed" and existing and existing.is_file() and runtime.get("signature") == current_signature:
+        return {"status": "completed", "path": str(existing), "source": "generated", "skipped": True}
+    attempts = int(runtime.get("attempts", 0))
+    if attempts > 0 and not retry_failed:
+        raise SkillError("character master creation was already attempted; inspect state.json and use --retry-failed to authorize another billable request")
+    runtime.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": ""})
+    save_state(root, state)
+    write_event(root, {"kind": "character_master_create", "attempt": runtime["attempts"]})
+    try:
+        data = image_client.edit(prompt, references, size=size, quality=quality) if references else image_client.generate(prompt, size=size, quality=quality)
+        target = resolve_project_path(root, str(master["path"]), must_exist=False)
+        output = save_image_bytes(data, target.with_suffix(""))
+        runtime.update(
+            {
+                "status": "completed",
+                "path": output.relative_to(root).as_posix(),
+                "source": "generated",
+                "bytes": output.stat().st_size,
+                "error": "",
+            }
+        )
+        save_state(root, state)
+        write_event(root, {"kind": "character_master_completed", "bytes": output.stat().st_size})
+        return {"status": "completed", "path": str(output), "source": "generated", "skipped": False}
+    except Exception as error:
+        runtime.update({"status": "failed", "error": str(error)[:1000]})
+        save_state(root, state)
+        write_event(root, {"kind": "character_master_failed", "error": str(error)[:1000]})
+        raise
+
+
+def generate_images(root: Path, *, retry_failed: bool, shot_ids: list[str] | None = None) -> dict[str, Any]:
+    project = require_valid_project(root)
+    state = load_state(root)
+    image_client, _, settings = clients()
+    completed: list[str] = []
+    skipped: list[str] = []
+    for shot in selected_shots(project, shot_ids):
+        shot_id = str(shot["id"])
+        if not bool(shot.get("generate_image", True)):
+            skipped.append(shot_id)
+            continue
+        references = [resolve_project_path(root, value) for value in shot.get("image_references", [])]
+        if bool(shot.get("use_character_master", False)):
+            master_path = resolved_character_master(root, project, state)
+            if master_path not in references:
+                references.insert(0, master_path)
+        prompt = composed_image_prompt(project, shot)
+        size = str(shot_value(project, shot, "image_size", "1024x1024"))
+        quality = str(shot_value(project, shot, "image_quality", "auto"))
+        current_signature = signature({"model": settings["image_model"], "prompt": prompt, "size": size, "quality": quality}, references)
+        runtime = shot_state(state, shot_id)["image"]
+        existing_path = str(runtime.get("path", ""))
+        existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
+        if runtime.get("status") == "completed" and existing and existing.is_file() and runtime.get("signature") == current_signature:
+            skipped.append(shot_id)
+            continue
+        if int(runtime.get("attempts", 0)) > 0 and not retry_failed:
+            raise SkillError(f"image create was already attempted for {shot_id}; inspect state.json and use --retry-failed to authorize another billable request")
+        runtime.update({"status": "submitting", "attempts": int(runtime.get("attempts", 0)) + 1, "signature": current_signature, "error": ""})
+        save_state(root, state)
+        write_event(root, {"kind": "image_create", "shot_id": shot_id, "attempt": runtime["attempts"]})
+        try:
+            data = image_client.edit(prompt, references, size=size, quality=quality) if references else image_client.generate(prompt, size=size, quality=quality)
+            output = save_image_bytes(data, root / "assets" / "keyframes" / shot_id)
+            runtime.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "error": ""})
+            completed.append(shot_id)
+            save_state(root, state)
+        except Exception as error:
+            runtime.update({"status": "failed", "error": str(error)[:1000]})
+            save_state(root, state)
+            write_event(root, {"kind": "image_failed", "shot_id": shot_id, "error": str(error)[:1000]})
+            raise
+    return {"completed": completed, "skipped": skipped}
+
+
+def video_references(root: Path, shot: dict[str, Any], runtime: dict[str, Any]) -> list[Path]:
+    explicit = [resolve_project_path(root, value) for value in shot.get("video_references", [])]
+    if explicit:
+        return explicit
+    image = runtime.get("image", {})
+    if image.get("status") == "completed" and image.get("path"):
+        return [resolve_project_path(root, str(image["path"]))]
+    if bool(shot.get("generate_image", True)):
+        raise SkillError(f"generated keyframe is missing for {shot['id']}")
+    return []
+
+
+def generate_videos(root: Path, *, retry_failed: bool, poll_timeout: int, shot_ids: list[str] | None = None) -> dict[str, Any]:
+    project = require_valid_project(root)
+    state = load_state(root)
+    _, video_client, settings = clients()
+    completed: list[str] = []
+    skipped: list[str] = []
+    for shot in selected_shots(project, shot_ids):
+        shot_id = str(shot["id"])
+        runtime = shot_state(state, shot_id)
+        video = runtime["video"]
+        references = video_references(root, shot, runtime)
+        prompt = composed_video_prompt(project, shot)
+        seconds = int(shot_value(project, shot, "seconds", 6))
+        size = str(shot_value(project, shot, "video_size", "1280x720"))
+        current_signature = signature({"model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size}, references)
+        existing_path = str(video.get("path", ""))
+        existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
+        if video.get("status") == "completed" and existing and existing.is_file() and video.get("signature") == current_signature:
+            assert_mp4(existing)
+            skipped.append(shot_id)
+            continue
+        task_id = str(video.get("task_id", "")).strip()
+        if task_id and video.get("signature") and video.get("signature") != current_signature:
+            raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
+        if task_id and video.get("status") == "failed":
+            if not retry_failed:
+                raise SkillError(
+                    f"video task failed for {shot_id} ({task_id}); inspect the provider and use --retry-failed only to authorize a new billable task"
+                )
+            write_event(root, {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": task_id})
+            video["previous_task_id"] = task_id
+            video["task_id"] = ""
+            task_id = ""
+        if not task_id:
+            attempts = int(video.get("attempts", 0))
+            if attempts > 0 and not retry_failed:
+                raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
+            video.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": "", "create_attempted_at": int(time.time())})
+            save_state(root, state)
+            write_event(root, {"kind": "video_create", "shot_id": shot_id, "attempt": video["attempts"]})
+            try:
+                task_id = video_client.create(prompt, seconds=seconds, size=size, references=references)
+            except Exception as error:
+                status = "failed" if isinstance(error, APIError) and error.status in {400, 401, 403, 404, 409, 422} else "submission_unknown"
+                video.update({"status": status, "error": str(error)[:1000]})
+                save_state(root, state)
+                write_event(root, {"kind": "video_create_failed", "shot_id": shot_id, "status": status, "error": str(error)[:1000]})
+                raise
+            video.update({"status": "queued", "task_id": task_id, "error": ""})
+            save_state(root, state)
+
+        def on_status(status: str, payload: dict[str, Any]) -> None:
+            video["status"] = status
+            video["last_polled_at"] = int(time.time())
+            save_state(root, state)
+
+        try:
+            status_payload = video_client.poll(task_id, timeout_seconds=poll_timeout, on_status=on_status)
+            output = root / "clips" / f"{shot_id}.mp4"
+            video_client.download(task_id, status_payload, output)
+            video.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "error": ""})
+            save_state(root, state)
+            write_event(root, {"kind": "video_completed", "shot_id": shot_id, "task_id": task_id, "bytes": output.stat().st_size})
+            completed.append(shot_id)
+        except TimeoutError as error:
+            video.update({"status": "poll_timeout", "error": str(error)[:1000]})
+            save_state(root, state)
+            raise SkillError(str(error)) from error
+        except Exception as error:
+            if video.get("status") not in {"poll_timeout", "submission_unknown"}:
+                video.update({"status": "failed", "error": str(error)[:1000]})
+            save_state(root, state)
+            write_event(root, {"kind": "video_failed", "shot_id": shot_id, "task_id": task_id, "error": str(error)[:1000]})
+            raise
+    return {"completed": completed, "skipped": skipped}
+
+
+def probe_media(path: Path) -> dict[str, Any]:
+    assert_mp4(path)
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise SkillError("ffprobe is required for media validation")
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise SkillError(f"ffprobe could not read {path.name}: {result.stderr.strip()[-500:]}")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SkillError(f"ffprobe returned invalid JSON for {path.name}") from error
+    streams = payload.get("streams", []) if isinstance(payload, dict) else []
+    video = next((item for item in streams if isinstance(item, dict) and item.get("codec_type") == "video"), None)
+    if not video:
+        raise SkillError(f"media has no video stream: {path}")
+    try:
+        duration = float((payload.get("format") or {}).get("duration") or video.get("duration") or 0)
+        width = int(video.get("width") or 0)
+        height = int(video.get("height") or 0)
+    except (TypeError, ValueError) as error:
+        raise SkillError(f"invalid media metadata: {path}") from error
+    if duration <= 0 or width <= 0 or height <= 0:
+        raise SkillError(f"media duration or dimensions are invalid: {path}")
+    return {
+        "duration": round(duration, 3),
+        "width": width,
+        "height": height,
+        "codec": str(video.get("codec_name") or ""),
+        "pixel_format": str(video.get("pix_fmt") or ""),
+        "has_audio": any(isinstance(item, dict) and item.get("codec_type") == "audio" for item in streams),
+    }
+
+
+def _run_ffmpeg(command: list[str], action: str) -> None:
+    result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise SkillError(f"ffmpeg failed while {action}: {detail}")
+
+
+def assemble_clips(clips: list[Path], output: Path, *, target_size: str) -> dict[str, Any]:
+    if not clips:
+        raise SkillError("at least one clip is required")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required to assemble clips")
+    inputs = [probe_media(path) for path in clips]
+    if target_size == "auto":
+        width, height = inputs[0]["width"], inputs[0]["height"]
+    else:
+        if not SIZE_RE.fullmatch(target_size):
+            raise SkillError("assembly target size must be WIDTHxHEIGHT or auto")
+        width, height = (int(value) for value in target_size.split("x", 1))
+    if width % 2 or height % 2:
+        raise SkillError("assembly target width and height must be even for H.264")
+    output = output.resolve()
+    if output.suffix.lower() != ".mp4":
+        raise SkillError("assembled output filename must end with .mp4")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".gvs-assemble-", dir=str(output.parent)) as temp_name:
+        temp_root = Path(temp_name)
+        normalized: list[Path] = []
+        filter_value = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30"
+        )
+        for index, clip in enumerate(clips, 1):
+            segment = temp_root / f"segment-{index:03d}.mp4"
+            _run_ffmpeg(
+                [
+                    ffmpeg,
+                    "-y",
+                    "-i",
+                    str(clip),
+                    "-map",
+                    "0:v:0",
+                    "-vf",
+                    filter_value,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "18",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-an",
+                    "-movflags",
+                    "+faststart",
+                    str(segment),
+                ],
+                f"normalizing clip {index}",
+            )
+            probe_media(segment)
+            normalized.append(segment)
+        concat = temp_root / "concat.txt"
+        concat.write_text(
+            "\n".join(f"file '{path.resolve().as_posix().replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'" for path in normalized) + "\n",
+            encoding="utf-8",
+        )
+        _run_ffmpeg(
+            [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", "-movflags", "+faststart", str(output)],
+            "concatenating normalized clips",
+        )
+    media = probe_media(output)
+    expected_duration = sum(float(item["duration"]) for item in inputs)
+    if media["width"] != width or media["height"] != height:
+        raise SkillError("assembled video dimensions do not match the requested target")
+    if media["codec"] != "h264" or media["pixel_format"] != "yuv420p":
+        raise SkillError("assembled video is not H.264 yuv420p")
+    if media["duration"] < expected_duration * 0.85:
+        raise SkillError("assembled video duration is unexpectedly shorter than its input clips")
+    return {"path": str(output), "bytes": output.stat().st_size, **media, "clip_count": len(clips)}
+
+
+def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
+    project = require_valid_project(root)
+    state = load_state(root)
+    clips: list[Path] = []
+    for shot in project["shots"]:
+        video = shot_state(state, str(shot["id"]))["video"]
+        if video.get("status") != "completed" or not video.get("path"):
+            raise SkillError(f"video is not complete for {shot['id']}")
+        clips.append(resolve_project_path(root, str(video["path"])))
+    output = root / "deliverables" / "final.mp4"
+    target_size = str(project.get("defaults", {}).get("video_size") or "auto")
+    media = assemble_clips(clips, output, target_size=target_size)
+    state.setdefault("deliverables", {})["final"] = {
+        "path": output.relative_to(root).as_posix(),
+        "bytes": output.stat().st_size,
+        "updated_at": int(time.time()),
+        "media": {key: value for key, value in media.items() if key not in {"path", "bytes"}},
+    }
+    save_state(root, state)
+    return output, media
+
+
+def plan_shot_durations(
+    workflow: dict[str, Any],
+    *,
+    shot_count: int | None,
+    seconds: int | None,
+    target_seconds: int | None,
+) -> list[int]:
+    preferred = seconds or int(workflow.get("preferred_clip_seconds", 6))
+    if preferred < 1 or preferred > MAX_VIDEO_SECONDS:
+        raise SkillError(f"clip seconds must be from 1 to {MAX_VIDEO_SECONDS}")
+    if target_seconds is None:
+        count = shot_count or int(workflow.get("default_shots", 1))
+        if count < 1 or count > 50:
+            raise SkillError("shot count must be from 1 to 50")
+        return [preferred] * count
+    if target_seconds < 1 or target_seconds > 50 * MAX_VIDEO_SECONDS:
+        raise SkillError(f"target duration must be from 1 to {50 * MAX_VIDEO_SECONDS} seconds")
+    count = shot_count or max(1, (target_seconds + preferred - 1) // preferred)
+    if count < 1 or count > 50:
+        raise SkillError("shot count must be from 1 to 50")
+    if target_seconds < count or target_seconds > count * MAX_VIDEO_SECONDS:
+        raise SkillError(f"target duration {target_seconds} cannot be distributed across {count} shots of 1 to {MAX_VIDEO_SECONDS} seconds")
+    base, remainder = divmod(target_seconds, count)
+    return [base + (1 if index < remainder else 0) for index in range(count)]
+
+
+def init_project(
+    root: Path,
+    title: str,
+    topic: str,
+    workflow_id: str,
+    shot_durations: list[int],
+    video_size: str,
+) -> Path:
+    root = root.resolve()
+    path = project_file(root)
+    if path.exists():
+        raise SkillError(f"project already exists: {path}")
+    workflow = get_workflow(workflow_id)
+    for folder in ("assets/references", "assets/keyframes", "clips", "deliverables", "logs"):
+        (root / folder).mkdir(parents=True, exist_ok=True)
+    shot_defaults = workflow.get("shot_defaults") if isinstance(workflow.get("shot_defaults"), dict) else {}
+    shots = [
+        {
+            "id": f"shot-{index:03d}",
+            "summary": "",
+            "image_prompt": "",
+            "video_prompt": "",
+            "generate_image": bool(shot_defaults.get("generate_image", True)),
+            "use_character_master": bool(shot_defaults.get("use_character_master", False)),
+            "image_references": [],
+            "video_references": [],
+            "seconds": shot_durations[index - 1],
+        }
+        for index in range(1, len(shot_durations) + 1)
+    ]
+    uses_master = bool(workflow.get("character_master", False))
+    project = {
+        "version": PROJECT_VERSION,
+        "title": title.strip(),
+        "topic": topic.strip(),
+        "workflow": workflow_id,
+        "workflow_title": workflow["title"],
+        "workflow_guidance": workflow.get("guidance", {}),
+        "target_duration_seconds": sum(shot_durations),
+        "story": "",
+        "character_bible": "",
+        "style_bible": "",
+        "character_master": {
+            "enabled": uses_master,
+            "mode": "single-sheet",
+            "generate": uses_master,
+            "path": "assets/references/character-master.png",
+            "prompt": "",
+            "source_references": [],
+            "image_size": "1024x1024",
+            "image_quality": "auto"
+        },
+        "defaults": {"image_size": "1024x1024", "image_quality": "auto", "video_size": video_size, "video_seconds": shot_durations[0]},
+        "limits": {
+            "max_image_requests": max(12, len(shot_durations) + int(uses_master)),
+            "max_video_requests": max(8, len(shot_durations)),
+            "max_total_video_seconds": max(60, sum(shot_durations)),
+            "max_reference_images": 9,
+            "max_prompt_chars": HARD_PROMPT_CHARS,
+        },
+        "shots": shots,
+    }
+    atomic_write_json(path, project)
+    save_state(root, fresh_state())
+    return path
+
+
+def doctor() -> tuple[int, dict[str, Any]]:
+    image_client, video_client, settings = clients()
+    result: dict[str, Any] = {
+        "ok": True,
+        "config": str(config_path()),
+        "providers": {},
+        "ffmpeg": shutil.which("ffmpeg") or "not_found",
+        "ffprobe": shutil.which("ffprobe") or "not_found",
+    }
+    if result["ffmpeg"] == "not_found" or result["ffprobe"] == "not_found":
+        result["ok"] = False
+    checks = [
+        ("quickai", image_client.list_models, settings["image_model"]),
+        ("quickainew", video_client.list_models, settings["video_model"]),
+    ]
+    for name, operation, configured_model in checks:
+        try:
+            models = operation()
+            present = configured_model in models
+            result["providers"][name] = {"ok": present, "configured_model": configured_model, "model_present": present, "model_count": len(models)}
+            if not present:
+                result["ok"] = False
+        except Exception as error:
+            result["providers"][name] = {"ok": False, "configured_model": configured_model, "error": str(error)[:1000]}
+            result["ok"] = False
+    return (0 if result["ok"] else 1), result
+
+
+def configure(args: argparse.Namespace) -> dict[str, Any]:
+    quickai_key = os.environ.get("GVS_QUICKAI_KEY", "").strip()
+    quickainew_key = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
+    if not quickai_key:
+        quickai_key = getpass.getpass("QuickAI image key: ").strip()
+    if not quickainew_key:
+        quickainew_key = getpass.getpass("QuickAI New video key: ").strip()
+    if not quickai_key or not quickainew_key:
+        raise SkillError("both provider keys are required")
+    config = {
+        "quickai_base_url": normalize_base_url(args.quickai_base_url),
+        "quickainew_base_url": normalize_base_url(args.quickainew_base_url),
+        "image_model": args.image_model.strip(),
+        "video_model": args.video_model.strip(),
+    }
+    connection: dict[str, Any] = {"quickai": "not_tested", "quickainew": "not_tested"}
+    if not args.skip_test:
+        image_models = QuickAIImageClient(config["quickai_base_url"], quickai_key, config["image_model"]).list_models()
+        video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_key, config["video_model"]).list_models()
+        if config["image_model"] not in image_models:
+            raise SkillError(f"configured image model is not advertised by QuickAI: {config['image_model']}")
+        if config["video_model"] not in video_models:
+            raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
+        connection = {"quickai": "ok", "quickainew": "ok"}
+    save_settings(config, quickai_key, quickainew_key, store_secrets=not args.environment_only)
+    return {"configured": str(config_path()), "secret_provider": "environment" if args.environment_only else "windows-dpapi", "connection": connection}
+
+
+def status_summary(root: Path) -> dict[str, Any]:
+    project = load_project(root)
+    state = load_state(root)
+    shots = []
+    for shot in project.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        runtime = shot_state(state, str(shot.get("id", "")))
+        shots.append(
+            {
+                "id": shot.get("id"),
+                "image": {key: runtime["image"].get(key) for key in ("status", "path", "attempts", "error") if runtime["image"].get(key) not in (None, "")},
+                "video": {key: runtime["video"].get(key) for key in ("status", "task_id", "path", "attempts", "error") if runtime["video"].get(key) not in (None, "")},
+            }
+        )
+    master = state.get("character_master", {})
+    return {
+        "project": str(root.resolve()),
+        "title": project.get("title", ""),
+        "workflow": project.get("workflow", "general-video"),
+        "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
+        "shots": shots,
+        "deliverables": state.get("deliverables", {}),
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("capabilities", help="List editable workflow titles for conversational selection.")
+    describe = commands.add_parser("describe", help="Show one workflow's planning and prompt guidance.")
+    describe.add_argument("workflow")
+
+    setup = commands.add_parser("configure", help="Securely configure direct provider credentials.")
+    setup.add_argument("--quickai-base-url", default=DEFAULT_QUICKAI_URL)
+    setup.add_argument("--quickainew-base-url", default=DEFAULT_QUICKAINEW_URL)
+    setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
+    setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
+    setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
+    setup.add_argument("--skip-test", action="store_true")
+
+    commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")
+
+    init = commands.add_parser("init", help="Create a project contract and durable state.")
+    init.add_argument("project", type=Path)
+    init.add_argument("--title", required=True)
+    init.add_argument("--topic", required=True)
+    init.add_argument("--workflow", default="general-video")
+    init.add_argument("--shots", type=int)
+    init.add_argument("--target-seconds", type=int)
+    init.add_argument("--video-size", default="1280x720")
+    init.add_argument("--seconds", type=int)
+
+    for name in ("validate", "preflight", "status", "assemble"):
+        command = commands.add_parser(name)
+        command.add_argument("project", type=Path)
+
+    character = commands.add_parser("generate-character")
+    character.add_argument("project", type=Path)
+    character.add_argument("--retry-failed", action="store_true")
+
+    images = commands.add_parser("generate-images")
+    images.add_argument("project", type=Path)
+    images.add_argument("--retry-failed", action="store_true")
+    images.add_argument("--shot", action="append", help="Generate only this shot id; repeat for multiple shots.")
+
+    for name in ("generate-videos", "resume"):
+        videos = commands.add_parser(name)
+        videos.add_argument("project", type=Path)
+        videos.add_argument("--retry-failed", action="store_true")
+        videos.add_argument("--poll-timeout", type=int, default=1800)
+        videos.add_argument("--shot", action="append", help="Process only this shot id; repeat for multiple shots.")
+
+    run = commands.add_parser("run")
+    run.add_argument("project", type=Path)
+    run.add_argument("--retry-failed", action="store_true")
+    run.add_argument("--poll-timeout", type=int, default=1800)
+    run.add_argument("--no-assemble", action="store_true")
+    run.add_argument("--shot", action="append", help="Process only this shot id; partial runs do not auto-assemble.")
+
+    assemble_files = commands.add_parser("assemble-files", help="Normalize and assemble existing MP4 clips in the supplied order.")
+    assemble_files.add_argument("output", type=Path)
+    assemble_files.add_argument("clips", type=Path, nargs="+")
+    assemble_files.add_argument("--target-size", default="auto")
+    return parser
+
+
+def main() -> int:
+    args = build_parser().parse_args()
+    try:
+        if args.command == "capabilities":
+            print_json({"ok": True, "workflows": workflow_catalog(), "selection": "Reply with a workflow id or title."})
+            return 0
+        if args.command == "describe":
+            print_json({"ok": True, "workflow": get_workflow(args.workflow)})
+            return 0
+        if args.command == "configure":
+            print_json({"ok": True, **configure(args)})
+            return 0
+        if args.command == "doctor":
+            code, result = doctor()
+            print_json(result)
+            return code
+        if args.command == "init":
+            workflow = get_workflow(args.workflow)
+            durations = plan_shot_durations(
+                workflow,
+                shot_count=args.shots,
+                seconds=args.seconds,
+                target_seconds=args.target_seconds,
+            )
+            if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
+                raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
+            path = init_project(args.project, args.title, args.topic, args.workflow, durations, args.video_size)
+            print_json({"ok": True, "project": str(path), "workflow": args.workflow, "shot_seconds": durations, "target_seconds": sum(durations)})
+            return 0
+        if args.command == "assemble-files":
+            clips = [path.resolve() for path in args.clips]
+            for clip in clips:
+                if not clip.is_file():
+                    raise SkillError(f"clip does not exist: {clip}")
+            media = assemble_clips(clips, args.output.resolve(), target_size=args.target_size)
+            print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
+            return 0
+        root = args.project.resolve()
+        if args.command in {"validate", "preflight"}:
+            project = load_project(root)
+            errors = validate_project(root, project)
+            print_json({"ok": not errors, "project": str(root), "errors": errors, "preflight": preflight_report(project)})
+            return 0 if not errors else 1
+        if args.command == "status":
+            print_json({"ok": True, **status_summary(root)})
+            return 0
+        if args.command == "generate-character":
+            print_json({"ok": True, "character_master": generate_character_master(root, retry_failed=args.retry_failed)})
+            return 0
+        if args.command == "generate-images":
+            print_json({"ok": True, "images": generate_images(root, retry_failed=args.retry_failed, shot_ids=args.shot)})
+            return 0
+        if args.command in {"generate-videos", "resume"}:
+            print_json(
+                {
+                    "ok": True,
+                    "videos": generate_videos(root, retry_failed=args.retry_failed, poll_timeout=args.poll_timeout, shot_ids=args.shot),
+                }
+            )
+            return 0
+        if args.command == "assemble":
+            output, media = assemble(root)
+            print_json({"ok": True, "output": str(output), "media": media})
+            return 0
+        if args.command == "run":
+            character_result = generate_character_master(root, retry_failed=args.retry_failed)
+            image_result = generate_images(root, retry_failed=args.retry_failed, shot_ids=args.shot)
+            video_result = generate_videos(root, retry_failed=args.retry_failed, poll_timeout=args.poll_timeout, shot_ids=args.shot)
+            assembled = None if args.no_assemble or args.shot else assemble(root)
+            print_json(
+                {
+                    "ok": True,
+                    "character_master": character_result,
+                    "images": image_result,
+                    "videos": video_result,
+                    "output": str(assembled[0]) if assembled else "",
+                    "media": assembled[1] if assembled else {},
+                }
+            )
+            return 0
+        raise SkillError("unknown command")
+    except (OSError, ValueError, SkillError, APIError, subprocess.SubprocessError) as error:
+        print_json({"ok": False, "error": str(error)}, stream=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

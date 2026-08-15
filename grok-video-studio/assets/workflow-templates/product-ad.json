@@ -1,0 +1,18 @@
+{
+  "id": "product-ad",
+  "title": "产品广告",
+  "summary": "用产品图制作展示、旋转、使用场景或多镜头广告。",
+  "default_shots": 3,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["产品卖点", "品牌视觉", "目标平台与比例", "是否已有产品图"],
+    "story": "按开场吸引、卖点展示和收尾记忆点组织镜头，数量随目标时长调整。",
+    "image_prompt": "需要生图时锁定产品结构、颜色、商标位置和材质。",
+    "video_prompt": "描述产品运动、镜头运动和光影变化，禁止结构变形、文字漂移和标志重绘。"
+  }
+}

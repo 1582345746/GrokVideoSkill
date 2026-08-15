@@ -1,0 +1,19 @@
+{
+  "id": "short-drama",
+  "title": "人物短剧与多镜头叙事",
+  "summary": "支持生活故事、创业故事、情感故事和轻剧情短片，并非默认优先流程。",
+  "default_shots": 6,
+  "preferred_clip_seconds": 10,
+  "character_master": true,
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": true
+  },
+  "guidance": {
+    "ask": ["故事类型与冲突", "角色数量", "目标总时长", "对白是否后期配音"],
+    "story": "先写简洁剧本，再按场景、动作和情绪变化动态拆分；不要固定为八个镜头。",
+    "character_master": "为每个主要人物分别生成一张角色设定总图；每张图在同一画布中展示该人物的正面、侧面和背面或全身视角。当前项目的 character_master 对应一名主角。",
+    "image_prompt": "从角色母版派生当前镜头关键帧，锁定身份、服装和场景连续性。",
+    "video_prompt": "单镜头只描述一个可连续完成的表演或镜头动作；对白、字幕、音乐和复杂剪辑留给后期。"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "scene-animation",
+  "title": "插画与风景动效",
+  "summary": "让插画、建筑、风景或海报中的局部元素产生层次化运动。",
+  "default_shots": 1,
+  "preferred_clip_seconds": 8,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["参考图", "前中后景运动", "镜头运动", "需要保持的构图与文字"],
+    "story": "优先使用轻微、分层、可循环的运动。",
+    "image_prompt": "默认使用用户图片；需要新画面时描述单一构图。",
+    "video_prompt": "分别描述前景、中景、背景和镜头的运动，锁定主体形状、文字和整体构图。"
+  }
+}
