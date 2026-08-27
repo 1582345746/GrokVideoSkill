@@ -5,15 +5,15 @@ description: Plan and build resumable AI video projects with QuickAI image gener
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.2.1`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.3.0`.
 
 ## Setup
 
-1. When the user supplies both provider keys in the installation conversation, Codex must perform configuration itself. Run `python scripts/grok_video_studio.py configure --credentials-stdin --skip-test` in a managed process and send exactly one JSON object through that process's stdin: `{"quickai_key":"...","quickainew_key":"..."}`. Do not ask the user to open PowerShell.
+1. When the user supplies provider keys in the installation conversation, Codex must perform configuration itself. Run `python scripts/grok_video_studio.py configure --credentials-stdin --skip-test` in a managed process and send exactly one JSON object through that process's stdin: `{"quickai_key":"...","quickainew_key":"..."}`. Either key may be omitted, but at least one is required. Do not ask the user to open PowerShell.
 2. Never place keys in command-line arguments, temporary files, `SKILL.md`, project files, source control, or terminal output. On Windows, configuration stores them with DPAPI under the current user's local application-data directory. The installed Skill directory remains secret-free and updateable.
 3. If the user has not supplied keys in the conversation, use the original hidden interactive `configure` flow instead of inventing credentials.
-4. Run `python scripts/grok_video_studio.py doctor` and resolve both provider and FFmpeg checks before paid generation. Skip `doctor` when the user asks to avoid all real upstream tests.
-5. Keep the default direct providers. QuickAI handles images; QuickAI New handles videos. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
+4. Run `python scripts/grok_video_studio.py doctor` and resolve the configured provider and FFmpeg checks before paid generation. A missing unused provider key is allowed. Skip `doctor` when the user asks to avoid all real upstream tests.
+5. Confirm the requested video mode before creating a project. Defaults are text-to-video -> QuickAI JSON and image-to-video -> QuickAI New multipart. A project-level `video_provider` may explicitly override this route when the corresponding key is configured. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
 6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
@@ -28,7 +28,7 @@ Run `python scripts/grok_video_studio.py describe <workflow-id>` for the selecte
 
 1. Initialize a local project:
 
-   `python scripts/grok_video_studio.py init <project-folder> --title "..." --topic "..." --workflow <id> --target-seconds <seconds>`
+   `python scripts/grok_video_studio.py init <project-folder> --title "..." --topic "..." --workflow <id> --target-seconds <seconds> --mode text-to-video --video-provider quickai --video-resolution 480p`
 
 2. Let the CLI plan a variable number of shots from the target duration, or override with `--shots`. Every shot must be 1-15 seconds; no project is fixed to eight clips.
 3. Fill `project.json`: story, concise identity and style bibles, and every shot's image and video prompts. Keep stable shot IDs.
@@ -65,6 +65,8 @@ Run `generate-character` independently or let `run` create it before shot keyfra
 Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. `--retry-failed` requires `--retry-reason "..."`; the reason and prior task state are preserved in history. Polling, model discovery, and content download may retry safely with bounded backoff and a circuit breaker.
 
 Keep every final composed image and video prompt at or below 4096 characters. Treat 3800 characters as the working ceiling. The preflight and API clients enforce this; do not silently truncate creative instructions.
+
+Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` or `image-to-video`; `video_provider` is `quickai` or `quickainew`; resolution is `480p`, `720p`, or `1080p`; aspect ratio is provider-supported. T2V never sends reference images, even when an old keyframe exists in state. I2V sends only explicit references or the current shot keyframe.
 
 ## Delivery Gate
 

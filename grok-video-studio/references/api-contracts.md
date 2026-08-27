@@ -5,7 +5,8 @@
 | Purpose | Base URL | Credential | Path |
 | --- | --- | --- | --- |
 | Model discovery and images | `https://quickai.hn.takin.cc` | QuickAI key | `/v1/models`, `/v1/images/*` |
-| Model discovery and videos | `https://quickainew.hn.takin.cc` | QuickAI New key | `/v1/models`, `/v1/videos/*` |
+| QuickAI JSON videos | `https://quickai.hn.takin.cc` | QuickAI key | `/v1/videos/generations*` |
+| Model discovery and QuickAI New videos | `https://quickainew.hn.takin.cc` | QuickAI New key | `/v1/models`, `/v1/videos/*` |
 
 Store the origin only. The client appends `/v1`; a configured trailing `/v1` is normalized away. Never send one provider's key to the other provider.
 
@@ -25,7 +26,15 @@ Accept image results from `data[].b64_json`, data URLs, or HTTPS URLs. Never for
 
 ## Video create
 
+Text-to-video defaults to QuickAI's JSON contract:
+
+`POST /v1/videos/generations` with `model`, `prompt`, `seconds`, `resolution`, `aspect_ratio`, optional `size`, and no image fields. Query and content paths are `/v1/videos/generations/{task_id}` and `/v1/videos/generations/{task_id}/content`.
+
+Image-to-video defaults to QuickAI New's multipart contract:
+
 `POST /v1/videos` as multipart with `model`, `prompt`, `seconds`, optional `size`, and zero or more repeated `input_reference` file parts. This Skill enforces 1-15 seconds and a final composed prompt of at most 4096 characters. For image-to-video, send the current shot keyframe; do not send a multi-view character sheet directly.
+
+Both adapters send `resolution` (`480p`, `720p`, or `1080p`) and `aspect_ratio`. A project-level provider override must use that provider's credential and protocol; providers are never selected implicitly from image presence.
 
 The expected model is configured, with `grok-imagine-video-1.5` as the default. Do not silently rename it to a preview model. The adapter searches common `data`, `result`, `output`, `response`, `task`, and `video` wrappers; it accepts snake_case and camelCase task IDs, status, progress, errors, and result URLs.
 

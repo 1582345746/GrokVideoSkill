@@ -30,12 +30,12 @@ from gvs_common import (
     print_json,
     save_settings,
 )
-from media_client import QuickAIImageClient, QuickAINewVideoClient, save_image_bytes
+from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
 from media_tools import extract_cover, postprocess_video, quality_report
 from provider_contracts import task_progress
 
 
-SKILL_VERSION = "1.2.1"
+SKILL_VERSION = "1.3.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -44,6 +44,7 @@ SAFE_PROMPT_CHARS = 3800
 MAX_CREDENTIAL_PAYLOAD_CHARS = 32768
 SHOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
+ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "3:2"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 TERMINAL_FAILURES = {"failed", "submission_unknown"}
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -179,6 +180,30 @@ def shot_value(project: dict[str, Any], shot: dict[str, Any], name: str, default
     return shot.get(name, defaults.get(default_name, default))
 
 
+def video_mode(project: dict[str, Any]) -> str:
+    value = str(project.get("video_mode", "")).strip()
+    if value:
+        return value
+    return "text-to-video" if project.get("workflow") == "text-to-video" else "image-to-video"
+
+
+def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
+    value = str(project.get("video_provider", "")).strip()
+    if value:
+        return value
+    return str((settings or {}).get("default_video_provider", "quickainew" if video_mode(project) == "image-to-video" else "quickai"))
+
+
+def video_resolution(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
+    return str(shot.get("video_resolution", defaults.get("video_resolution", "480p"))).strip()
+
+
+def video_aspect_ratio(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
+    return str(shot.get("video_aspect_ratio", defaults.get("video_aspect_ratio", "16:9"))).strip()
+
+
 def character_master_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("character_master")
     return value if isinstance(value, dict) else {}
@@ -308,6 +333,12 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"project.{field} is required")
     if _known_secret_field(project):
         errors.append("project contains a credential-like field; credentials must stay outside the project")
+    mode = video_mode(project)
+    provider = str(project.get("video_provider", "")).strip()
+    if mode not in {"text-to-video", "image-to-video"}:
+        errors.append("project.video_mode must be text-to-video or image-to-video")
+    if provider and provider not in {"quickai", "quickainew"}:
+        errors.append("project.video_provider must be quickai or quickainew")
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -435,6 +466,12 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.seconds must be an integer from 1 to {MAX_VIDEO_SECONDS}")
         else:
             total_seconds += seconds
+        resolution = video_resolution(project, raw_shot)
+        if resolution not in VIDEO_RESOLUTIONS:
+            errors.append(f"{prefix}.video_resolution must be one of 480p, 720p, 1080p")
+        aspect_ratio = video_aspect_ratio(project, raw_shot)
+        if aspect_ratio not in ASPECT_RATIOS:
+            errors.append(f"{prefix}.video_aspect_ratio must be one of {', '.join(sorted(ASPECT_RATIOS))}")
         for size_name, fallback in (("image_size", "1024x1024"), ("video_size", "1280x720")):
             size = str(shot_value(project, raw_shot, size_name, fallback))
             if size != "auto" and not SIZE_RE.fullmatch(size):
@@ -656,13 +693,25 @@ def write_event(root: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def clients() -> tuple[QuickAIImageClient, QuickAINewVideoClient, dict[str, Any]]:
-    settings = load_settings()
+def clients(*, require_secrets: bool = True) -> tuple[QuickAIImageClient, QuickAINewVideoClient, dict[str, Any]]:
+    settings = load_settings(require_secrets=require_secrets)
     return (
         QuickAIImageClient(settings["quickai_base_url"], settings["quickai_key"], settings["image_model"]),
         QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_key"], settings["video_model"]),
         settings,
     )
+
+
+def select_video_client(settings: dict[str, Any], provider: str) -> QuickAIVideoClient | QuickAINewVideoClient:
+    if provider == "quickai":
+        if not settings.get("quickai_key"):
+            raise SkillError("QuickAI key is required for video_provider=quickai")
+        return QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_key"], settings["video_model"])
+    if provider == "quickainew":
+        if not settings.get("quickainew_key"):
+            raise SkillError("QuickAI New key is required for video_provider=quickainew")
+        return QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_key"], settings["video_model"])
+    raise SkillError("video_provider must be quickai or quickainew")
 
 
 def resolved_character_master(root: Path, project: dict[str, Any], state: dict[str, Any]) -> Path:
@@ -693,6 +742,8 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         return {"status": "completed", "path": str(path), "source": "external", "skipped": True}
 
     image_client, _, settings = clients()
+    if not settings.get("quickai_key"):
+        raise SkillError("QuickAI key is required for image generation")
     references = [resolve_project_path(root, value) for value in master.get("source_references", [])]
     prompt = composed_character_prompt(project)
     size = str(master.get("image_size") or project.get("defaults", {}).get("image_size") or "1024x1024")
@@ -749,6 +800,8 @@ def generate_images(
     project = require_valid_project(root)
     state = load_state(root)
     image_client, _, settings = clients()
+    if not settings.get("quickai_key"):
+        raise SkillError("QuickAI key is required for image generation")
     completed: list[str] = []
     skipped: list[str] = []
     for shot in selected_shots(project, shot_ids):
@@ -820,18 +873,28 @@ def generate_videos(
     reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
     state = load_state(root)
-    _, video_client, settings = clients()
+    _, _, settings = clients()
+    mode = video_mode(project)
+    provider = video_provider(project, settings)
+    if mode not in {"text-to-video", "image-to-video"}:
+        raise SkillError("video_mode must be text-to-video or image-to-video")
+    video_client = select_video_client(settings, provider)
     completed: list[str] = []
     skipped: list[str] = []
     for shot in selected_shots(project, shot_ids):
         shot_id = str(shot["id"])
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
-        references = video_references(root, shot, runtime)
+        references = video_references(root, shot, runtime) if mode == "image-to-video" else []
         prompt = composed_video_prompt(project, shot)
         seconds = int(shot_value(project, shot, "seconds", 6))
         size = str(shot_value(project, shot, "video_size", "1280x720"))
-        current_signature = signature({"model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size}, references)
+        resolution = video_resolution(project, shot)
+        aspect_ratio = video_aspect_ratio(project, shot)
+        current_signature = signature(
+            {"mode": mode, "provider": provider, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio},
+            references,
+        )
         existing_path = str(video.get("path", ""))
         existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
         if video.get("status") == "completed" and existing and existing.is_file() and video.get("signature") == current_signature:
@@ -864,12 +927,34 @@ def generate_videos(
                     {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": video.get("task_id", ""), "reason": reason},
                 )
             record_budget_attempt(state, project, "video")
-            video.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": "", "create_attempted_at": int(time.time())})
+            video.update(
+                {
+                    "status": "submitting",
+                    "attempts": attempts + 1,
+                    "signature": current_signature,
+                    "mode": mode,
+                    "provider": provider,
+                    "model": settings["video_model"],
+                    "seconds": seconds,
+                    "resolution": resolution,
+                    "aspect_ratio": aspect_ratio,
+                    "reference_count": len(references),
+                    "error": "",
+                    "create_attempted_at": int(time.time()),
+                }
+            )
             save_state(root, state)
             write_event(root, {"kind": "video_create", "shot_id": shot_id, "attempt": video["attempts"]})
             emit_progress(progress, phase="video_create", shot_id=shot_id, status="submitting", attempt=video["attempts"])
             try:
-                task_id = video_client.create(prompt, seconds=seconds, size=size, references=references)
+                task_id = video_client.create(
+                    prompt,
+                    seconds=seconds,
+                    size=size,
+                    resolution=resolution,
+                    aspect_ratio=aspect_ratio,
+                    references=references,
+                )
             except Exception as error:
                 status = "failed" if isinstance(error, APIError) and error.status in {400, 401, 403, 404, 409, 422} else "submission_unknown"
                 video.update({"status": status, "error": str(error)[:1000]})
@@ -1148,6 +1233,10 @@ def init_project(
     workflow_id: str,
     shot_durations: list[int],
     video_size: str,
+    video_mode_value: str,
+    video_provider_value: str,
+    video_resolution_value: str,
+    video_aspect_ratio_value: str,
 ) -> Path:
     root = root.resolve()
     path = project_file(root)
@@ -1166,10 +1255,12 @@ def init_project(
             "continuity_notes": "",
             "image_prompt": "",
             "video_prompt": "",
-            "generate_image": bool(shot_defaults.get("generate_image", True)),
-            "use_character_master": bool(shot_defaults.get("use_character_master", False)),
+            "generate_image": False if video_mode_value == "text-to-video" else bool(shot_defaults.get("generate_image", True)),
+            "use_character_master": False if video_mode_value == "text-to-video" else bool(shot_defaults.get("use_character_master", False)),
             "image_references": [],
             "video_references": [],
+            "video_resolution": video_resolution_value,
+            "video_aspect_ratio": video_aspect_ratio_value,
             "seconds": shot_durations[index - 1],
         }
         for index in range(1, len(shot_durations) + 1)
@@ -1182,6 +1273,8 @@ def init_project(
         "workflow": workflow_id,
         "workflow_title": workflow["title"],
         "workflow_guidance": workflow.get("guidance", {}),
+        "video_mode": video_mode_value,
+        "video_provider": video_provider_value,
         "target_duration_seconds": sum(shot_durations),
         "story": "",
         "character_bible": "",
@@ -1197,7 +1290,14 @@ def init_project(
             "image_size": "1024x1024",
             "image_quality": "auto"
         },
-        "defaults": {"image_size": "1024x1024", "image_quality": "auto", "video_size": video_size, "video_seconds": shot_durations[0]},
+        "defaults": {
+            "image_size": "1024x1024",
+            "image_quality": "auto",
+            "video_size": video_size,
+            "video_seconds": shot_durations[0],
+            "video_resolution": video_resolution_value,
+            "video_aspect_ratio": video_aspect_ratio_value,
+        },
         "limits": {
             "max_image_requests": max(12, len(shot_durations) + int(uses_master)),
             "max_video_requests": max(8, len(shot_durations)),
@@ -1237,20 +1337,33 @@ def doctor() -> tuple[int, dict[str, Any]]:
     }
     if result["ffmpeg"] == "not_found" or result["ffprobe"] == "not_found":
         result["ok"] = False
-    checks = [
-        ("quickai", image_client.list_models, settings["image_model"]),
-        ("quickainew", video_client.list_models, settings["video_model"]),
-    ]
-    for name, operation, configured_model in checks:
+    checks = []
+    if settings.get("quickai_key"):
+        checks.append(("quickai", image_client.list_models, image_client))
+    else:
+        result["providers"]["quickai"] = {"ok": False, "configured_model": settings["image_model"], "skipped": True, "reason": "key_not_configured"}
+    if settings.get("quickainew_key"):
+        checks.append(("quickainew", video_client.list_models, video_client))
+    else:
+        result["providers"]["quickainew"] = {"ok": False, "configured_model": settings["video_model"], "skipped": True, "reason": "key_not_configured"}
+    for name, operation, client in checks:
         started = time.perf_counter()
         try:
             models = operation()
-            present = configured_model in models
-            client = image_client if name == "quickai" else video_client
+            image_present = settings["image_model"] in models if name == "quickai" else None
+            video_present = settings["video_model"] in models if name == settings.get("default_video_provider") else None
+            configured_models = [settings["image_model"]] if name == "quickai" else []
+            if name == settings.get("default_video_provider"):
+                configured_models.append(settings["video_model"])
+            present = video_present if name == settings.get("default_video_provider") else True
             result["providers"][name] = {
                 "ok": present,
-                "configured_model": configured_model,
+                "configured_model": settings["video_model"] if name == settings.get("default_video_provider") else settings["image_model"],
+                "configured_models": configured_models,
+                "models": models,
                 "model_present": present,
+                "image_model_present": image_present,
+                "video_model_present": video_present,
                 "model_count": len(models),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "circuit": client.health_snapshot(),
@@ -1261,12 +1374,14 @@ def doctor() -> tuple[int, dict[str, Any]]:
             client = image_client if name == "quickai" else video_client
             result["providers"][name] = {
                 "ok": False,
-                "configured_model": configured_model,
+                "configured_model": settings["video_model"] if name == settings.get("default_video_provider") else settings["image_model"],
+                "configured_models": [settings["image_model"]] if name == "quickai" else [settings["video_model"]],
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "error": str(error)[:1000],
                 "circuit": client.health_snapshot(),
             }
-            result["ok"] = False
+            if name == settings.get("default_video_provider") or name == "quickai" and settings.get("quickai_key") or name == "quickainew" and settings.get("quickainew_key"):
+                result["ok"] = False
     return (0 if result["ok"] else 1), result
 
 
@@ -1283,8 +1398,12 @@ def read_credentials_payload() -> tuple[str, str]:
         raise SkillError("credential payload must be one JSON object")
     quickai_key = payload.get("quickai_key")
     quickainew_key = payload.get("quickainew_key")
+    if quickai_key is None:
+        quickai_key = ""
+    if quickainew_key is None:
+        quickainew_key = ""
     if not isinstance(quickai_key, str) or not isinstance(quickainew_key, str):
-        raise SkillError("credential payload requires string fields quickai_key and quickainew_key")
+        raise SkillError("credential payload fields quickai_key and quickainew_key must be strings when provided")
     return quickai_key.strip(), quickainew_key.strip()
 
 
@@ -1302,23 +1421,28 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
         if not quickainew_key:
             quickainew_key = getpass.getpass("QuickAI New video key: ").strip()
         credential_source = "environment-or-interactive"
-    if not quickai_key or not quickainew_key:
-        raise SkillError("both provider keys are required")
+    if not quickai_key and not quickainew_key:
+        raise SkillError("at least one provider key is required")
     config = {
         "quickai_base_url": normalize_base_url(args.quickai_base_url),
         "quickainew_base_url": normalize_base_url(args.quickainew_base_url),
         "image_model": args.image_model.strip(),
         "video_model": args.video_model.strip(),
+        "default_video_provider": args.video_provider.strip(),
     }
     connection: dict[str, Any] = {"quickai": "not_tested", "quickainew": "not_tested"}
     if not args.skip_test:
-        image_models = QuickAIImageClient(config["quickai_base_url"], quickai_key, config["image_model"]).list_models()
-        video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_key, config["video_model"]).list_models()
-        if config["image_model"] not in image_models:
-            raise SkillError(f"configured image model is not advertised by QuickAI: {config['image_model']}")
-        if config["video_model"] not in video_models:
-            raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
-        connection = {"quickai": "ok", "quickainew": "ok"}
+        connection = {"quickai": "not_configured", "quickainew": "not_configured"}
+        if quickai_key:
+            image_models = QuickAIImageClient(config["quickai_base_url"], quickai_key, config["image_model"]).list_models()
+            if config["image_model"] not in image_models:
+                raise SkillError(f"configured image model is not advertised by QuickAI: {config['image_model']}")
+            connection["quickai"] = "ok"
+        if quickainew_key:
+            video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_key, config["video_model"]).list_models()
+            if config["video_model"] not in video_models:
+                raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
+            connection["quickainew"] = "ok"
     save_settings(config, quickai_key, quickainew_key, store_secrets=not args.environment_only)
     return {
         "configured": str(config_path()),
@@ -1342,7 +1466,7 @@ def status_summary(root: Path) -> dict[str, Any]:
                 "image": {key: runtime["image"].get(key) for key in ("status", "path", "attempts", "error") if runtime["image"].get(key) not in (None, "")},
                 "video": {
                     key: runtime["video"].get(key)
-                    for key in ("status", "task_id", "path", "attempts", "progress", "qa", "history", "error")
+                    for key in ("status", "task_id", "path", "attempts", "progress", "mode", "provider", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "qa", "history", "error")
                     if runtime["video"].get(key) not in (None, "")
                 },
             }
@@ -1352,6 +1476,8 @@ def status_summary(root: Path) -> dict[str, Any]:
         "project": str(root.resolve()),
         "title": project.get("title", ""),
         "workflow": project.get("workflow", "general-video"),
+        "video_mode": video_mode(project),
+        "video_provider": str(project.get("video_provider", "")) or None,
         "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
         "shots": shots,
         "deliverables": state.get("deliverables", {}),
@@ -1373,6 +1499,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--quickainew-base-url", default=DEFAULT_QUICKAINEW_URL)
     setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
+    setup.add_argument("--video-provider", choices=("quickai", "quickainew"), default="quickai")
     setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
     setup.add_argument(
         "--credentials-stdin",
@@ -1391,6 +1518,10 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--shots", type=int)
     init.add_argument("--target-seconds", type=int)
     init.add_argument("--video-size", default="1280x720")
+    init.add_argument("--mode", choices=("text-to-video", "image-to-video"))
+    init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     init.add_argument("--seconds", type=int)
 
     for name in ("validate", "preflight", "status", "assemble", "audit"):
@@ -1481,7 +1612,20 @@ def main() -> int:
             )
             if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
                 raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
-            path = init_project(args.project, args.title, args.topic, args.workflow, durations, args.video_size)
+            selected_mode = args.mode or ("text-to-video" if args.workflow == "text-to-video" else "image-to-video")
+            selected_provider = args.video_provider or ("quickai" if selected_mode == "text-to-video" else "quickainew")
+            path = init_project(
+                args.project,
+                args.title,
+                args.topic,
+                args.workflow,
+                durations,
+                args.video_size,
+                selected_mode,
+                selected_provider,
+                args.video_resolution,
+                args.aspect_ratio,
+            )
             print_json({"ok": True, "project": str(path), "workflow": args.workflow, "shot_seconds": durations, "target_seconds": sum(durations)})
             return 0
         if args.command == "assemble-files":

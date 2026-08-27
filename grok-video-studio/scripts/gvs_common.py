@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 USER_AGENT = "GrokVideoStudioSkill/1.1"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
@@ -179,14 +179,17 @@ def save_settings(config: dict[str, Any], quickai_key: str, quickainew_key: str,
         "quickainew_base_url": normalize_base_url(str(config["quickainew_base_url"])),
         "image_model": str(config["image_model"]).strip(),
         "video_model": str(config["video_model"]).strip(),
+        "default_video_provider": str(config.get("default_video_provider", "quickai")).strip() or "quickai",
         "secret_provider": "windows-dpapi" if store_secrets else "environment",
     }
     if not normalized["image_model"] or not normalized["video_model"]:
         raise SkillError("image and video models are required")
+    if normalized["default_video_provider"] not in {"quickai", "quickainew"}:
+        raise SkillError("default_video_provider must be quickai or quickainew")
     atomic_write_json(config_path(), normalized)
     if store_secrets:
-        if not quickai_key.strip() or not quickainew_key.strip():
-            raise SkillError("both provider keys are required")
+        if not quickai_key.strip() and not quickainew_key.strip():
+            raise SkillError("at least one provider key is required")
         secret_payload = json.dumps(
             {"version": 1, "quickai_key": quickai_key.strip(), "quickainew_key": quickainew_key.strip()},
             separators=(",", ":"),
@@ -201,7 +204,7 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     if not path.is_file():
         raise SkillError(f"configuration not found: {path}; run configure first")
     config = read_json(path)
-    if config.get("version") != CONFIG_VERSION:
+    if config.get("version") not in {1, CONFIG_VERSION}:
         raise SkillError("unsupported configuration version")
     result = {
         "version": CONFIG_VERSION,
@@ -209,6 +212,7 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
         "quickainew_base_url": normalize_base_url(str(config.get("quickainew_base_url", ""))),
         "image_model": str(config.get("image_model", "")).strip(),
         "video_model": str(config.get("video_model", "")).strip(),
+        "default_video_provider": str(config.get("default_video_provider", "quickai")).strip() or "quickai",
         "secret_provider": str(config.get("secret_provider", "")),
     }
     stored: dict[str, Any] = {}
@@ -221,8 +225,8 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
             raise SkillError("encrypted secret file is invalid") from error
     result["quickai_key"] = os.environ.get("GVS_QUICKAI_KEY", "").strip() or str(stored.get("quickai_key", "")).strip()
     result["quickainew_key"] = os.environ.get("GVS_QUICKAINEW_KEY", "").strip() or str(stored.get("quickainew_key", "")).strip()
-    if require_secrets and (not result["quickai_key"] or not result["quickainew_key"]):
-        raise SkillError("provider keys are unavailable; run configure or set GVS_QUICKAI_KEY and GVS_QUICKAINEW_KEY")
+    if require_secrets and not result["quickai_key"] and not result["quickainew_key"]:
+        raise SkillError("provider keys are unavailable; run configure or set GVS_QUICKAI_KEY or GVS_QUICKAINEW_KEY")
     return result
 
 

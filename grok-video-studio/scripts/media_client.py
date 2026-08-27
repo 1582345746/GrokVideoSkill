@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import time
 import urllib.parse
 from pathlib import Path
@@ -36,6 +37,7 @@ from provider_contracts import (
 
 MAX_PROMPT_CHARS = 4096
 MAX_VIDEO_SECONDS = 15
+VIDEO_RESOLUTIONS = {"480p", "720p", "1080p"}
 
 
 def _validate_prompt(prompt: str) -> None:
@@ -190,11 +192,28 @@ class QuickAINewVideoClient:
     def health_snapshot(self) -> dict[str, Any]:
         return self.breaker.snapshot()
 
-    def create(self, prompt: str, *, seconds: int, size: str, references: Iterable[Path]) -> str:
+    def create(
+        self,
+        prompt: str,
+        *,
+        seconds: int,
+        size: str,
+        resolution: str = "480p",
+        aspect_ratio: str = "16:9",
+        references: Iterable[Path],
+    ) -> str:
         _validate_prompt(prompt)
         if seconds < 1 or seconds > MAX_VIDEO_SECONDS:
             raise SkillError(f"video seconds must be from 1 to {MAX_VIDEO_SECONDS}")
-        fields = [("model", self.model), ("prompt", prompt), ("seconds", str(seconds))]
+        if resolution not in VIDEO_RESOLUTIONS:
+            raise SkillError("video resolution must be one of 480p, 720p, 1080p")
+        fields = [
+            ("model", self.model),
+            ("prompt", prompt),
+            ("seconds", str(seconds)),
+            ("resolution", resolution),
+            ("aspect_ratio", aspect_ratio),
+        ]
         if size and size != "auto":
             fields.append(("size", size))
         files = [("input_reference", path) for path in references]
@@ -267,6 +286,135 @@ class QuickAINewVideoClient:
                 lambda: download_file(content_url, destination, key=self.key, timeout=300),
                 breaker=self.breaker,
             )
+            assert_mp4(destination)
+            return
+        except (APIError, SkillError) as error:
+            content_error = error
+            if destination.exists():
+                destination.unlink()
+        for result_url in result_urls(status_payload):
+            try:
+                safe_operation(lambda: download_file(result_url, destination, timeout=300), breaker=self.breaker)
+                assert_mp4(destination)
+                return
+            except (APIError, SkillError) as error:
+                content_error = error
+                if destination.exists():
+                    destination.unlink()
+        raise SkillError(f"video content is unavailable: {content_error}")
+
+
+class QuickAIVideoClient:
+    """QuickAI JSON video adapter; its endpoints differ from QuickAI New."""
+
+    def __init__(self, base_url: str, key: str, model: str) -> None:
+        self.base_url = base_url
+        self.key = key
+        self.model = model
+        self.breaker = CircuitBreaker()
+
+    def list_models(self) -> list[str]:
+        return safe_operation(
+            lambda: _model_ids(request_json("GET", api_url(self.base_url, "/v1/models"), key=self.key, timeout=60)),
+            breaker=self.breaker,
+        )
+
+    def health_snapshot(self) -> dict[str, Any]:
+        return self.breaker.snapshot()
+
+    @staticmethod
+    def _data_url(path: Path) -> str:
+        payload = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+
+    def create(
+        self,
+        prompt: str,
+        *,
+        seconds: int,
+        size: str,
+        resolution: str = "480p",
+        aspect_ratio: str = "16:9",
+        references: Iterable[Path],
+    ) -> str:
+        _validate_prompt(prompt)
+        if seconds < 1 or seconds > MAX_VIDEO_SECONDS:
+            raise SkillError(f"video seconds must be from 1 to {MAX_VIDEO_SECONDS}")
+        if resolution not in VIDEO_RESOLUTIONS:
+            raise SkillError("video resolution must be one of 480p, 720p, 1080p")
+        reference_paths = list(references)
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "seconds": seconds,
+            "resolution": resolution,
+            "aspect_ratio": aspect_ratio,
+        }
+        if size and size != "auto":
+            payload["size"] = size
+        if len(reference_paths) == 1:
+            payload["input_reference"] = self._data_url(reference_paths[0])
+        elif reference_paths:
+            payload["reference_images"] = [{"url": self._data_url(path)} for path in reference_paths]
+        response = request_json(
+            "POST",
+            api_url(self.base_url, "/v1/videos/generations"),
+            key=self.key,
+            value=payload,
+            timeout=120,
+        )
+        created_task_id = task_id(response)
+        if not created_task_id:
+            raise SkillError("video provider returned no task ID")
+        return created_task_id
+
+    def query(self, task_id: str) -> tuple[str, dict[str, Any]]:
+        encoded = urllib.parse.quote(task_id, safe="")
+        payload = safe_operation(
+            lambda: request_json("GET", api_url(self.base_url, f"/v1/videos/generations/{encoded}"), key=self.key, timeout=60),
+            breaker=self.breaker,
+        )
+        status = task_status(payload)
+        if not status and is_completed(payload):
+            status = "completed"
+        return status or "unknown", payload
+
+    def poll(self, task_id: str, *, timeout_seconds: int, on_status: Any = None) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_seconds
+        delay = 4.0
+        last_status = "unknown"
+        while True:
+            try:
+                status, payload = self.query(task_id)
+            except APIError as error:
+                if error.status not in {408, 425, 429, 500, 502, 503, 504}:
+                    raise
+                status, payload = last_status, {"warning": str(error)}
+            except SkillError as error:
+                message = str(error)
+                if "circuit is open" not in message and "cannot connect" not in message:
+                    raise
+                status, payload = last_status, {"warning": message}
+            last_status = status
+            if on_status:
+                on_status(status, payload)
+            if status in COMPLETED_STATES or is_completed(payload):
+                return payload
+            if status in FAILED_STATES:
+                raise SkillError(task_error(payload))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"video task polling timed out: {task_id}")
+            time.sleep(min(delay, remaining))
+            delay = min(15.0, delay * 1.35)
+
+    def download(self, task_id: str, status_payload: dict[str, Any], destination: Path) -> None:
+        encoded = urllib.parse.quote(task_id, safe="")
+        content_url = api_url(self.base_url, f"/v1/videos/generations/{encoded}/content")
+        content_error: Exception | None = None
+        try:
+            safe_operation(lambda: download_file(content_url, destination, key=self.key, timeout=300), breaker=self.breaker)
             assert_mp4(destination)
             return
         except (APIError, SkillError) as error:

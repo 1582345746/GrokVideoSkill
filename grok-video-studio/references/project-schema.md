@@ -10,6 +10,8 @@
   "workflow": "character-consistent-story",
   "workflow_title": "角色一致性故事",
   "workflow_guidance": {},
+  "video_mode": "image-to-video",
+  "video_provider": "quickainew",
   "target_duration_seconds": 18,
   "story": "Short screenplay",
   "character_bible": "Concise stable identity, clothing, and props",
@@ -35,7 +37,9 @@
     "image_size": "1024x1024",
     "image_quality": "auto",
     "video_size": "1280x720",
-    "video_seconds": 6
+    "video_seconds": 6,
+    "video_resolution": "480p",
+    "video_aspect_ratio": "16:9"
   },
   "limits": {
     "max_image_requests": 12,
@@ -66,6 +70,8 @@
     "video_references": [],
     "image_size": "1024x1024",
     "video_size": "1280x720",
+    "video_resolution": "480p",
+    "video_aspect_ratio": "16:9",
     "seconds": 6
   }]
 }
@@ -80,6 +86,8 @@
 ## Limits and state
 
 Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed 4096 characters; 3800 is the recommended working ceiling. Limits are hard preflight gates and request counts include a generated character master.
+
+`video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`. New text-to-video projects default to QuickAI and do not generate keyframes. New image-to-video projects default to QuickAI New. Projects created before these fields existed retain the legacy image-to-video plus QuickAI New interpretation. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
 
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 

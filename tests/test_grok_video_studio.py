@@ -46,6 +46,8 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     image_creates = 0
     video_creates = 0
     last_video_body = b""
+    json_video_creates = 0
+    last_json_video: dict[str, object] = {}
     image_requests: list[tuple[str, bytes]] = []
     video_payload = FAKE_MP4
     fail_video_create = False
@@ -77,6 +79,15 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/videos/task-1/content":
             self.send_bytes(type(self).video_payload, "video/mp4")
             return
+        if self.path == "/v1/videos/generations/task-1":
+            payload: dict[str, object] = {"id": "task-1", "status": type(self).video_status}
+            if type(self).video_status == "failed":
+                payload["error"] = {"message": "provider capacity is full"}
+            self.send_json(payload)
+            return
+        if self.path == "/v1/videos/generations/task-1/content":
+            self.send_bytes(type(self).video_payload, "video/mp4")
+            return
         self.send_json({"error": {"message": "not found"}}, 404)
 
     def do_POST(self) -> None:
@@ -93,6 +104,14 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             if type(self).fail_video_create:
                 self.send_json({"error": {"message": "temporary upstream failure"}}, 502)
                 return
+            self.send_json({"data": {"id": "task-1", "status": "queued"}})
+            return
+        if self.path == "/v1/videos/generations":
+            type(self).json_video_creates += 1
+            try:
+                type(self).last_json_video = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                type(self).last_json_video = {}
             self.send_json({"data": {"id": "task-1", "status": "queued"}})
             return
         self.send_json({"error": {"message": "not found"}}, 404)
@@ -144,6 +163,8 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.image_creates = 0
         FakeProviderHandler.video_creates = 0
         FakeProviderHandler.last_video_body = b""
+        FakeProviderHandler.json_video_creates = 0
+        FakeProviderHandler.last_json_video = {}
         FakeProviderHandler.image_requests = []
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
@@ -532,7 +553,7 @@ class SkillIntegrationTests(unittest.TestCase):
             self.assertEqual(loaded["quickai_key"], image_secret)
             self.assertEqual(loaded["quickainew_key"], video_secret)
 
-    def test_credentials_stdin_rejects_invalid_payload_before_storage(self) -> None:
+    def test_credentials_stdin_accepts_single_provider_key(self) -> None:
         secure_dir = self.root / "invalid-config"
         environment = self.env.copy()
         environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
@@ -545,9 +566,45 @@ class SkillIntegrationTests(unittest.TestCase):
             encoding="utf-8",
             timeout=30,
         )
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("requires string fields quickai_key and quickainew_key", result.stderr)
-        self.assertFalse((secure_dir / "config.json").exists())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((secure_dir / "config.json").exists())
+
+    def test_text_to_video_uses_quickai_json_without_references(self) -> None:
+        project = self.root / "t2v"
+        self.run_cli(
+            "init", str(project), "--title", "T2V", "--topic", "Text", "--workflow", "text-to-video",
+            "--shots", "1", "--seconds", "1", "--video-resolution", "480p", "--aspect-ratio", "9:16",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "A short text-only video."
+        value["shots"][0]["video_prompt"] = "A bright paper kite rises gently into the sky."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertTrue(result["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.last_json_video["resolution"], "480p")
+        self.assertEqual(FakeProviderHandler.last_json_video["aspect_ratio"], "9:16")
+        self.assertNotIn("input_reference", FakeProviderHandler.last_json_video)
+        self.assertNotIn("reference_images", FakeProviderHandler.last_json_video)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video_state = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video_state["mode"], "text-to-video")
+        self.assertEqual(video_state["provider"], "quickai")
+        self.assertEqual(video_state["resolution"], "480p")
+
+    def test_quickainew_text_to_video_has_no_input_reference(self) -> None:
+        project = self.create_project("new-t2v", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["video_mode"] = "text-to-video"
+        value["video_provider"] = "quickainew"
+        value["shots"][0]["video_resolution"] = "720p"
+        value["shots"][0]["video_aspect_ratio"] = "16:9"
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertTrue(result["ok"])
+        self.assertIn(b'name="resolution"\r\n\r\n720p', FakeProviderHandler.last_video_body)
+        self.assertIn(b'name="aspect_ratio"', FakeProviderHandler.last_video_body)
+        self.assertNotIn(b'name="input_reference"', FakeProviderHandler.last_video_body)
 
 
 if __name__ == "__main__":
