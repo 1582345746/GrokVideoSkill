@@ -1,132 +1,165 @@
 # Grok Video Studio
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.8.0`，提供四个视频入口、五种音频模式和五个可选安装档位：
+[![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-- 文生视频：QuickAI 文生视频，支持单镜头和多镜头项目。
-- 图生视频：QuickAI 生图生成角色母版/镜头关键帧，再由 QuickAI New 动画；用户现成图片也走同一路线。
-- 连续剧：先规划整季，再逐集预检、审批、生成和验收，保留跨集人物与剧情连续性。
-- 新闻视频：Codex 先检索当前网络信息，记录来源、事实主张和逐镜头引用关系，通过事实门禁后才能生成。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v1.8.0`，仓库只使用 `main` 分支。
 
-技能同时支持上游原生人物对白、本地 CosyVoice 精确配音、可选 MuseTalk 口型同步、SRT 字幕、FFmpeg 混音/字幕烧录、断点恢复、请求预算、干净画面约束和音视频 QA。
+它把剧本、分镜、付费请求、断点恢复、连续性、字幕、对白、口型和交付 QA 放进同一个可审计项目，而不是让 Codex 临时拼接若干不可恢复的生成命令。
 
-安装档位：`basic`（基础）、`upstream-dialogue`（上游原声对白）、`precise-subtitles`（精确字幕）、`precise-voice`（精确对白）、`lip-sync`（精确对白 + 口型同步）。旧组件名 `core`、`native-dialogue`、`local-voice`、`full-dialogue` 继续兼容。
+## 产品路线
 
-## 安装
+| 路线 | 适用场景 | 默认生成链路 |
+| --- | --- | --- |
+| 文生视频 | 单条视频、多镜头故事、无参考图创作 | QuickAI 文生视频 |
+| 图生视频 | 用户现成图片动画、产品图、角色母版和镜头关键帧 | QuickAI 生图 + QuickAI New 图生视频 |
+| 连续剧 | 多集共享角色、世界观和剧情连续性 | 每集使用文生视频或图生视频，逐集审批与验收 |
+| 新闻视频 | 当前热点、来源核验、旁白型资讯视频 | Codex 联网检索并建立证据合同，再进入标准视频链路 |
 
-推荐直接把下面的话发给 Codex，由 Codex 完成安装、DPAPI 凭据保存和诊断；不要把 Key 写入仓库文件：
+用户现成图片的动画属于图生视频，不是第五条产品路线。
+
+## 核心能力
+
+- 先展示剧本、分镜、提示词、请求数量和预算，用户批准后才付费生成。
+- 每次创建任务前写入 `state.json`，支持轮询恢复、断点续跑和指定镜头重试。
+- 默认禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸。
+- 图生视频可复用单张角色母版，并为每个镜头派生关键帧。
+- 连续剧保存整季设定、逐集审批状态和上一集实际结尾。
+- 新闻视频保存来源、发布时间、事实主张和逐镜头引用关系。
+- 生成干净母版，再通过 FFmpeg 输出对白版、字幕版、混音版和封面。
+- QA 检查格式、时长、方向、黑帧、冻结、音量和静音占比，并要求人工查看每个镜头的审阅帧。
+
+## 推荐安装方式
+
+推荐直接让 Codex 从仓库安装或更新。独立安装器路线已经冻结，代码仍保留，但不再作为优先分发方式。
+
+### 新用户安装话术
+
+把下面内容连同自己的 Key 发给 Codex。不要把真实 Key 提交到 GitHub、项目 JSON 或文档中。
 
 ```text
-请安装 Grok Video Studio 技能：
+请从 main 分支安装 Grok Video Studio 技能：
 仓库：https://github.com/1582345746/GrokVideoSkill.git
+
 QuickAI 生图 Key：<QUICKAI_IMAGE_KEY>
 QuickAI 文生视频 Key：<QUICKAI_VIDEO_KEY>
 QuickAI New 图生视频 Key：<QUICKAINEW_VIDEO_KEY>
 
-请通过标准输入配置凭据，在 Windows 上使用 DPAPI 保存，不要把 Key 写入源码、项目文件或命令行。安装后运行 version 和 doctor；不要发起付费生成测试，除非我明确授权。
-
-安装前先运行 `install-plan --profile <档位>` 展示依赖和磁盘计划。默认不装本地 AI；`precise-voice`/`lip-sync` 只有在我明确同意后才下载模型、构建 Docker 镜像或启动服务。
+要求：
+1. 使用仓库根目录 install.ps1 安装 basic 档位。
+2. 通过标准输入把三个 Key 配置给技能；Windows 使用 DPAPI 保存。
+3. 不得把 Key 写入源码、项目文件、临时文件、命令行参数或终端输出。
+4. 安装后运行 version、install.ps1 -Check 和 doctor。
+5. doctor 可以访问模型列表，但不要发起任何付费生图或生视频测试。
+6. 不要安装 CosyVoice、MuseTalk、Docker 模型或其他可选组件，除非我之后明确批准。
 ```
 
-也可以只安装仓库内容：
+### 已安装旧版时的升级话术
+
+```text
+请把这台机器已经安装过的 Grok Video Studio 更新到仓库 main 分支最新版：
+仓库：https://github.com/1582345746/GrokVideoSkill.git
+
+先检查现有仓库和安装目录。工作区干净时使用 fast-forward 拉取 main；如果发现本地未提交修改，先报告，不要覆盖。然后使用 install.ps1 -Repair -Force 更新技能。
+
+要求保留已有 Windows DPAPI 凭据、安装档位、项目、CosyVoice/MuseTalk 源码和模型，不要要求我重新输入 Key，不要重新下载已有模型。完成后运行 version、install.ps1 -Check、doctor 和 capabilities，并报告版本、凭据角色、FFmpeg、可选组件状态；不要发起付费生成测试。
+```
+
+手动安装只需：
 
 ```powershell
-git clone https://github.com/1582345746/GrokVideoSkill.git
+git clone --branch main --single-branch https://github.com/1582345746/GrokVideoSkill.git
 cd GrokVideoSkill
-.\install.ps1 -Force
+.\install.ps1 -Force -InstallProfile basic
 ```
 
-需要独立向导时运行：
-
-```powershell
-.\install.ps1 -Force -Interactive
-```
-
-向导会询问档位、密钥、系统依赖安装和本地服务下载授权。自动化安装使用 `-InstallProfile`；允许 winget 安装 FFmpeg/Docker 时额外传 `-InstallSystemDependencies -AcceptSystemDependencyChanges`；涉及本地服务模型时还必须传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。NVIDIA 驱动由用户手动安装，安装器只检测不替换。
-
-维护命令：`.\install.ps1 -Check` 只检查当前安装；`.\install.ps1 -Repair -Force` 修复安装并在失败时回滚；`.\install.ps1 -Uninstall` 只移除技能目录，不删除 Key、项目、组件源码或模型。升级/修复时如果没有显式传入 `-InstallProfile`，安装器会保留当前档位。
-
-仓库维护者可运行 `.\build-release.ps1` 生成 ZIP、版本清单和 SHA-256 校验文件；发布前应使用 `-SigningCertificateThumbprint <thumbprint>` 对安装脚本做 Authenticode 签名。用户可用 `Get-FileHash .\GrokVideoSkill-v1.8.0.zip -Algorithm SHA256` 与同名 `.sha256` 文件核对下载完整性；校验和用于防止传输损坏，只有有效的 Authenticode 签名才能验证发布者身份。
-
-配置完成后，凭据按职责分开使用：
+## 凭据职责
 
 | 凭据 | 用途 |
 | --- | --- |
 | QuickAI 生图 Key | 角色母版和镜头关键帧 |
-| QuickAI 文生视频 Key | Prompt-only 文生视频 |
-| QuickAI New 图生视频 Key | 参考图/关键帧动画 |
+| QuickAI 文生视频 Key | 无参考图的文生视频 |
+| QuickAI New 图生视频 Key | 用户图片或当前镜头关键帧的动画 |
 
-旧版 QuickAI/QuickAI New 配置仍可兼容迁移。Windows 凭据保存在当前用户本地应用数据目录的 DPAPI 加密文件中，不进入技能目录。
+Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，不进入技能目录。旧版 `quickai_key` 和 `quickainew_key` 配置仍可迁移，但新安装应按职责分开配置。
 
-本地服务是可选组件。`core` 和 `native-dialogue` 不增加安装负担；`local-voice`/`full-dialogue` 需要 Docker Desktop、NVIDIA GPU 支持和较大的模型下载。Codex 会先运行 `components-plan` 展示来源、固定提交、目录和服务端口，获得同意后才运行安装。服务只发布到本机 `127.0.0.1`，不用时可停止，项目和模型不会被删除。
+## 安装档位
 
-按当前固定模型实测，`precise-voice` 需要约 10 GB 模型空间，`lip-sync` 需要约 17 GB（含安全余量）；实际安装还应预留 Docker 镜像和临时下载空间，以 `install-plan` 输出为准。模型安装会在 `models/.gvs-model-state.json` 保存 revision、必需文件、大小和 SHA-256 状态；中断后可继续，发现文件损坏会重新下载对应模型。
+| 档位 | 能力 | 本地要求 |
+| --- | --- | --- |
+| `basic` | 生成、恢复、拼接、QA，保留上游或源音频 | FFmpeg |
+| `upstream-dialogue` | 让视频上游生成对白和口型 | FFmpeg，无本地 AI |
+| `precise-subtitles` | 从已批准剧本/时间轴导出 SRT 并烧录字幕副本 | FFmpeg |
+| `precise-voice` | CosyVoice 精确配音、时间轴、混音和字幕 | Docker、NVIDIA GPU、约 10 GB 模型空间 |
+| `lip-sync` | 精确配音并使用 MuseTalk 修正人物口型 | Docker、NVIDIA GPU、约 17 GB 模型空间 |
 
-字幕来源和音频路线独立选择：`audio.subtitle_source=upstream` 保留上游/原片字幕，`project` 生成可审校的确定性 SRT，`none` 不输出字幕。`subtitles --source project` 可在审阅后从上游默认切换到本地字幕；失败时始终保留干净母版，不需要重新付费生成。
+`precise-subtitles` 根据项目中的对白、旁白或字幕时间轴生成确定性字幕，不等同于对任意视频执行语音识别。可选组件必须先展示安装计划，并在用户明确批准后才下载或启动；服务只监听 `127.0.0.1`。
 
-新建项目时可用 `--install-profile precise-voice` 或 `--install-profile lip-sync` 继承安装档位的对白/字幕默认值；也可以用显式 `--audio-mode`、`--subtitle-source` 覆盖，已有项目不会被安装器改写。
+## 音频与字幕
 
-## 使用话术
+音频路线和字幕来源是两个独立选择。
 
-文生视频：
+| 音频模式 | 说明 |
+| --- | --- |
+| `preserve` | 保留上游或用户源视频音频 |
+| `mute` | 明确交付静音版本 |
+| `native-dialogue` | 上游生成对白、声音和口型，速度快但逐字内容与内嵌字幕不可控 |
+| `local-voice` | CosyVoice 按批准文本生成精确对白，FFmpeg 对齐、混音和归一化 |
+| `local-lipsync` | 在精确对白基础上调用 MuseTalk 做口型同步 |
 
-```text
-使用 $grok-video-studio 做一个 30 秒竖屏文生视频。先给我看完整故事、分镜提示词、请求数量和预算；我批准后再生成。画面不要出现字幕、点赞、评论、弹幕、按钮、Logo 或水印。
-```
+字幕来源：
 
-图生视频：
+- `upstream`：保留上游或源画面中已有字幕，不生成本地 SRT。
+- `project`：根据批准的对白、旁白或字幕提示生成可审校 SRT，可烧录为独立副本。
+- `none`：不交付字幕。
 
-```text
-使用 $grok-video-studio 把这张图片生成 8 秒竖屏视频。锁定人物身份、服装、构图和背景，只让人物自然眨眼并轻微转头。先预检，我批准后再调用上游。
-```
+始终保留 `deliverables/final.mp4` 干净母版。字幕样式不满意时重新烧录即可，不需要重新付费生成视频。上游原生对白可能自行把字幕画进视频，烧录本地字幕前必须先人工确认源画面干净。
 
-连续剧：
+## 四个最常用话术
 
-```text
-使用 $grok-video-studio 规划一部 20 集连续短剧，每集 1-2 分钟。先创建系列项目，写完整季大纲、角色设定、每集剧情和分镜提示词供我审核，不要生成。审核后只生成第一集；以后我说“生成下一集”时，先读取前集成片、验收后的实际结尾和连续性状态，再预检并等待批准。
-```
-
-新闻视频：
-
-```text
-使用 $grok-video-studio 检索最近 24 小时的热点新闻，选择一个至少有两个独立可靠来源支持的主题。先给我看来源链接、发布时间、事实主张和旁白脚本；我确认后再生成 60 秒新闻视频。AI 画面必须标明为示意，不要把生成画面冒充现场素材。
-```
-
-字幕交付：
-
-```text
-为当前项目生成 SRT，并用本地 FFmpeg 输出带字幕副本。先让我选择 clean、cinematic 或 news 样式；始终保留原始 final.mp4。native-dialogue 必须先人工确认源视频没有模型自带字幕，再允许烧录。字幕效果不好时换样式重烧或直接使用干净母版，不要重新付费生成视频，也不要让视频模型直接绘制字幕。
-```
-
-人物原生说话（轻量、生成式）：
+### 文生视频
 
 ```text
-使用 $grok-video-studio 做一个 10 秒文生视频，让原创AI主持人说“你好，这是今天的重点新闻”。使用 native-dialogue，先给我看对白时间轴和提示词再生成。生成后检查真实音量、口型、逐字内容和是否意外烧入字幕；不要把有音轨等同于有可听对白。
+使用 $grok-video-studio 做一个 30 秒 9:16 文生视频。先给我完整故事、人物设定、分镜提示词、请求数量和预算，不要立即生成。画面默认禁止字幕、点赞、评论、弹幕、按钮、Logo 和水印。我确认后再生成，完成后运行 QA 并逐镜头检查审阅帧。
 ```
 
-精确配音（推荐可控路线）：
+### 图生视频
 
 ```text
-使用 $grok-video-studio 为当前项目做人物对白。对白文字必须逐字准确，作为字幕唯一来源；使用 local-voice，先检查我的合成/自有/已授权声音素材和 reference_text，再生成逐句音频、混音、SRT 和带字幕副本。保留干净 final.mp4。
+使用 $grok-video-studio 把我提供的图片制作成 8 秒 9:16 图生视频。不要重新生图，锁定人物身份、服装、构图和背景，只增加自然眨眼、呼吸和轻微转头。先预检并等我批准，再调用 QuickAI New；完成后交付原片和 QA 报告。
 ```
 
-精确配音和口型：
+### 连续剧
 
 ```text
-使用 $grok-video-studio 的 full-dialogue 档位，为原创AI人物生成精确中文对白并做口型同步。先展示组件下载和磁盘计划，等我明确批准后再安装 CosyVoice、MuseTalk 和模型；服务只监听本机。完成后交付干净母版、对白版、字幕版和 QA 报告。
+使用 $grok-video-studio 规划一部 20 集连续短剧，每集 60-90 秒。先创建系列项目，写完整季大纲、角色设定、每集剧情和分镜提示词供我审核，不要生成。审核后只预检并生成第一集；以后我说“生成下一集”时，先读取上一集验收后的实际结尾和连续性状态，再等待我批准。
 ```
+
+### 新闻视频
+
+```text
+使用 $grok-video-studio 检索最近 24 小时热点新闻，选择一个至少有两个独立可靠来源支持的主题。先展示来源链接、发布时间、事实主张、冲突项、旁白和分镜，不要生成。通过 news-validate 且我确认后，再制作 60 秒新闻视频；AI 画面必须标为示意，不能冒充现场素材。
+```
+
+## 测试与使用文档
+
+逐模块标准话术、费用边界、操作顺序和验收标准见：
+
+- [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
+- [产品化验收清单](docs/productization-checklist.md)
+- [技能运行说明](grok-video-studio/SKILL.md)
+- [项目字段规范](grok-video-studio/references/project-schema.md)
+- [连续剧字段规范](grok-video-studio/references/series-schema.md)
+- [新闻证据规范](grok-video-studio/references/news-schema.md)
+- [对白和本地组件](grok-video-studio/references/dialogue-and-components.md)
+- [错误处理矩阵](grok-video-studio/references/error-matrix.md)
 
 ## 产品边界
 
-- FFmpeg 可以生成/烧录字幕、时间拉伸、对白混音、背景声压低和响度归一；这些基础交付不需要额外剪辑技能。
-- `native-dialogue` 已验证能从 QuickAI 得到可听 AAC 人声，但上游可能自行烧入字幕，声音、逐字准确性和口型仍是生成式结果。
-- `native-dialogue` 可以先单独导出 SRT；只有人工确认源视频无内嵌字幕后，才可用 `subtitles --burn --confirm-source-clean` 生成字幕副本，防止重复字幕。
-- `local-voice` 用可选 CosyVoice 服务保证对白文本和字幕来自同一合同；`local-lipsync` 再调用 MuseTalk。两者不会随默认技能静默安装。
-- `full-dialogue` 在 8GB 显卡上按阶段运行：先 `components-start --profile full-dialogue --component cosyvoice` 合成并缓存对白，再切换 `--component musetalk` 做口型；已缓存对白不会重复请求 CosyVoice。
-- QA 会检查平均/峰值音量和静音占比；`has_audio=true` 仍只代表存在音轨，不能替代听审或可选 ASR 核对。
-- 声音参考必须是合成、自有或已授权素材，并填写准确参考文本；不支持无授权克隆第三方或公众人物声音。
-- 新闻热点检索由运行技能的 Codex 使用实时网络完成，CLI 负责保存证据合同并在生成前验证，不能把模型记忆当作新闻来源。
-- 技术 QA 不能替代人工观片。角色漂移、异常肢体、意外 UI、字幕、Logo 和水印必须逐镜头检查。
-
-详细工作流和命令见 [`grok-video-studio/SKILL.md`](grok-video-studio/SKILL.md)。
-
-产品化架构、权限、安全、升级和发布验收项见 [`docs/productization-checklist.md`](docs/productization-checklist.md)。
+- 图像和视频创建请求可能收费；预检、状态查询、下载、FFmpeg 处理和本地 QA 不会创建新的上游生成任务。
+- 提示词硬上限为 4096 字符，建议把最终合成提示词控制在 3800 字符以内。
+- 文生视频的人物一致性是文本约束下的尽力而为；严格一致性应使用角色母版、逐镜头关键帧和图生视频。
+- `native-dialogue` 的声音、逐字内容、内嵌字幕和口型是生成式结果，不能承诺完全准确。
+- CosyVoice 和 MuseTalk 是可选本地组件，不随基础技能静默安装。
+- 精确字幕来自批准文本与时间轴；当前没有把任意带声音视频自动转写成精确字幕的 ASR 产品入口。
+- 技术 QA 不能代替人工观片和听审。人物漂移、异常肢体、意外界面元素、错误对白和不自然口型必须人工确认。
+- 新闻事实必须来自当前网络来源；AI 生成画面不得冒充真实新闻现场。
