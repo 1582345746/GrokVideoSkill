@@ -25,6 +25,7 @@ FAKE_PCM = b"".join(struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * in
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from gvs_common import load_settings  # noqa: E402
+from component_manager import _docker  # noqa: E402
 from grok_video_studio import composed_video_prompt  # noqa: E402
 from provider_contracts import is_completed, result_urls, task_error, task_id, task_progress, task_status  # noqa: E402
 
@@ -954,6 +955,27 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(resumed["dialogue"]["rendered"][0]["skipped"])
         self.assertEqual(FakeProviderHandler.tts_creates, 1)
 
+        value["audio"]["mode"] = "local-lipsync"
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        failed_lipsync = self.run_cli(
+            "dialogue-render",
+            str(project),
+            "--source-video",
+            str(source),
+            "--cosyvoice-url",
+            "http://127.0.0.1:1",
+            "--musetalk-url",
+            self.base_url,
+            expected=1,
+        )
+        self.assertNotIn("CosyVoice service is unavailable", failed_lipsync["error"])
+        self.assertEqual(FakeProviderHandler.tts_creates, 1)
+
+    def test_cached_dialogue_can_resume_without_cosyvoice(self) -> None:
+        source = (SKILL_ROOT / "scripts" / "dialogue_workflow.py").read_text(encoding="utf-8")
+        self.assertIn("cosy_available = health.get(\"ok\") is not False", source)
+        self.assertIn("is unavailable and dialogue line", source)
+
     def test_native_dialogue_adds_exact_prompt_and_generate_audio_flag(self) -> None:
         project = self.create_project("native-dialogue", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
@@ -1094,6 +1116,100 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(len(configured["plan"]["components"]), 1)
         blocked = self.run_cli("components-install", "--profile", "local-voice", expected=1)
         self.assertIn("--accept-downloads", blocked["error"])
+
+    def test_full_dialogue_start_requires_an_explicit_gpu_stage(self) -> None:
+        configured = self.run_cli(
+            "components-configure",
+            "--profile",
+            "full-dialogue",
+            "--source-root",
+            str(self.root / "component-src"),
+            "--models-root",
+            str(self.root / "component-models"),
+        )
+        self.assertEqual(configured["settings"]["profile"], "full-dialogue")
+        blocked = self.run_cli("components-start", "--profile", "full-dialogue", expected=1)
+        self.assertIn("--component", blocked["error"])
+        self.assertIn("8 GB", blocked["error"])
+
+    def test_stage_switch_removes_exited_sibling_without_stopping_it(self) -> None:
+        source = (SKILL_ROOT / "scripts" / "component_manager.py").read_text(encoding="utf-8")
+        self.assertIn('running = _docker("inspect", "-f", "{{.State.Running}}", container)', source)
+        self.assertIn('if running:', source)
+
+    def test_installer_requires_explicit_stage_for_full_dialogue_start(self) -> None:
+        source = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn('[ValidateSet("cosyvoice", "musetalk", "all")]', source)
+        self.assertIn("-StartComponents with full-dialogue requires -StartComponent", source)
+
+    def test_component_docker_output_is_decoded_as_utf8_with_replacement(self) -> None:
+        completed = subprocess.CompletedProcess(["docker", "version"], 0, stdout="ok", stderr="")
+        with mock.patch("component_manager.subprocess.run", return_value=completed) as run:
+            result = _docker("version")
+        self.assertEqual(result.stdout, "ok")
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+
+    def test_cosyvoice_runtime_pins_legacy_build_tooling(self) -> None:
+        dockerfile = (SKILL_ROOT / "assets" / "docker" / "cosyvoice.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('"setuptools==69.5.1"', dockerfile)
+        self.assertIn('"numpy==1.26.4"', dockerfile)
+        self.assertIn("grep -vE '^(openai-whisper|pyworld)=='", dockerfile)
+        self.assertIn('"openai-whisper==20231117"', dockerfile)
+        self.assertIn("--no-build-isolation --no-deps", dockerfile)
+        self.assertIn("-r /tmp/cosyvoice-requirements.txt", dockerfile)
+        self.assertIn("FunAudioLLM/CosyVoice-ttsfrd", dockerfile)
+        self.assertIn("8c0f9244a4f7622bf8017cad347ed334f0b8f735", dockerfile)
+
+    def test_musetalk_runtime_handles_legacy_chumpy_build(self) -> None:
+        dockerfile = (SKILL_ROOT / "assets" / "docker" / "musetalk.Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('"pip==24.3.1"', dockerfile)
+        self.assertIn('"setuptools==69.5.1"', dockerfile)
+        self.assertIn('--no-build-isolation "chumpy==0.70"', dockerfile)
+        self.assertLess(dockerfile.index("chumpy==0.70"), dockerfile.index('mim install "mmpose==1.1.0"'))
+
+    def test_component_models_are_revision_pinned_and_use_python_downloads(self) -> None:
+        manifest = json.loads((SKILL_ROOT / "assets" / "components.json").read_text(encoding="utf-8"))
+        for component in manifest["components"].values():
+            for model in component["models"]:
+                self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
+                self.assertFalse(Path(model["destination"]).is_absolute())
+        musetalk_models = manifest["components"]["musetalk"]["models"]
+        self.assertTrue(all(model.get("allow_patterns") for model in musetalk_models))
+        self.assertEqual(musetalk_models[0]["allow_patterns"], ["musetalkV15/musetalk.json", "musetalkV15/unet.pth"])
+        repositories = {model["repository"] for model in musetalk_models}
+        self.assertNotIn("ByteDance/LatentSync", repositories)
+        self.assertIn("ManyOtherFunctions/face-parse-bisent", repositories)
+        source = (SKILL_ROOT / "scripts" / "component_manager.py").read_text(encoding="utf-8")
+        self.assertIn("snapshot_download", source)
+        self.assertIn("allow_patterns=", source)
+        self.assertNotIn('image, "hf", "download"', source)
+
+    def test_musetalk_models_are_mounted_at_official_relative_path(self) -> None:
+        source = (SKILL_ROOT / "scripts" / "component_manager.py").read_text(encoding="utf-8")
+        self.assertIn('f"{model}:/workspace/MuseTalk/models:ro"', source)
+
+    def test_musetalk_health_is_complete_and_stays_responsive_during_inference(self) -> None:
+        source = (SKILL_ROOT / "scripts" / "services" / "musetalk_server.py").read_text(encoding="utf-8")
+        self.assertIn('models_root / "dwpose" / "dw-ll_ucoco_384.pth"', source)
+        self.assertIn('models_root / "face-parse-bisent" / "79999_iter.pth"', source)
+        self.assertIn('models_root / "whisper" / "pytorch_model.bin"', source)
+        self.assertIn("def lipsync(", source)
+        self.assertNotIn("async def lipsync(", source)
+        self.assertIn("X-GVS-Inference-Seconds", source)
+
+    def test_local_service_wrappers_resolve_fastapi_annotations_eagerly(self) -> None:
+        services = SKILL_ROOT / "scripts" / "services"
+        for name in ("cosyvoice_server.py", "musetalk_server.py"):
+            source = (services / name).read_text(encoding="utf-8")
+            self.assertNotIn("from __future__ import annotations", source, name)
+
+    def test_cosyvoice_wrapper_preserves_reference_as_a_file(self) -> None:
+        source = (SKILL_ROOT / "scripts" / "services" / "cosyvoice_server.py").read_text(encoding="utf-8")
+        self.assertIn("MAX_PROMPT_BYTES", source)
+        self.assertIn("_store_prompt(prompt_wav)", source)
+        self.assertNotIn("load_wav(prompt_wav.file", source)
+        self.assertIn("<|endofprompt|>", source)
 
     def test_voice_reference_requires_rights_and_transcript(self) -> None:
         project = self.create_project("voice-rights", generate_image=False)

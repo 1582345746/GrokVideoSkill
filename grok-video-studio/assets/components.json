@@ -14,7 +14,14 @@
       "submodules": true,
       "service_url": "http://127.0.0.1:9880",
       "gpu_vram_gb": 4,
-      "purpose": "Generate deterministic local dialogue audio from text and an owned or licensed voice reference."
+      "purpose": "Generate deterministic local dialogue audio from text and an owned or licensed voice reference.",
+      "models": [
+        {
+          "repository": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
+          "revision": "29e01c4e8d000f4bcd70751be16fa94bf3d85a18",
+          "destination": "cosyvoice/Fun-CosyVoice3-0.5B-2512"
+        }
+      ]
     },
     "musetalk": {
       "title": "MuseTalk local lip sync",
@@ -23,7 +30,39 @@
       "submodules": false,
       "service_url": "http://127.0.0.1:9881",
       "gpu_vram_gb": 4,
-      "purpose": "Synchronize an AI character's mouth motion to a rendered dialogue track."
+      "purpose": "Synchronize an AI character's mouth motion to a rendered dialogue track.",
+      "models": [
+        {
+          "repository": "TMElyralab/MuseTalk",
+          "revision": "3ef28bc5cff08c90ad8178a25f1b570cd800170f",
+          "destination": "musetalk",
+          "allow_patterns": ["musetalkV15/musetalk.json", "musetalkV15/unet.pth"]
+        },
+        {
+          "repository": "stabilityai/sd-vae-ft-mse",
+          "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+          "destination": "musetalk/sd-vae",
+          "allow_patterns": ["config.json", "diffusion_pytorch_model.bin"]
+        },
+        {
+          "repository": "openai/whisper-tiny",
+          "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
+          "destination": "musetalk/whisper",
+          "allow_patterns": ["config.json", "pytorch_model.bin", "preprocessor_config.json"]
+        },
+        {
+          "repository": "yzd-v/DWPose",
+          "revision": "1a7144101628d69ee7a3768d1ee3a094070dc388",
+          "destination": "musetalk/dwpose",
+          "allow_patterns": ["dw-ll_ucoco_384.pth"]
+        },
+        {
+          "repository": "ManyOtherFunctions/face-parse-bisent",
+          "revision": "0073b233a5a3c4b1377d4dbf49245017938a72b5",
+          "destination": "musetalk/face-parse-bisent",
+          "allow_patterns": ["79999_iter.pth", "resnet18-5c106cde.pth"]
+        }
+      ]
     }
   }
 }

@@ -278,8 +278,8 @@ def render_local_dialogue(
     cosy_url = service_url or str(services.get("cosyvoice", "http://127.0.0.1:9880"))
     tts = CosyVoiceClient(cosy_url)
     health = tts.health()
-    if health.get("ok") is False:
-        raise SkillError(f"CosyVoice service is unavailable: {health.get('error', health)}")
+    cosy_available = health.get("ok") is not False
+    unavailable_detail = health.get("error", health)
     state = _load_state(root)
     state_path = root / "dialogue-state.json"
     characters = {str(item.get("id", "")): item for item in project.get("characters", []) if isinstance(item, dict)}
@@ -290,7 +290,7 @@ def render_local_dialogue(
         voice = character["voice"]
         reference_value = str(voice.get("reference_audio", "")).strip()
         reference = project_path(root, reference_value) if reference_value else None
-        available_speakers = health.get("speakers")
+        available_speakers = health.get("speakers") if cosy_available else None
         voice_id = str(voice.get("voice_id", "")).strip()
         if reference is None and isinstance(available_speakers, list) and voice_id not in available_speakers:
             raise SkillError(
@@ -314,6 +314,10 @@ def render_local_dialogue(
             result = dict(runtime)
             result["skipped"] = True
         else:
+            if not cosy_available:
+                raise SkillError(
+                    f"CosyVoice service is unavailable and dialogue line {line_id} is not cached: {unavailable_detail}"
+                )
             result = tts.synthesize(
                 str(line["text"]),
                 output,

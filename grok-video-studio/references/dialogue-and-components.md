@@ -88,6 +88,8 @@ python scripts/grok_video_studio.py components-start --profile local-voice
 python scripts/grok_video_studio.py components-doctor --profile local-voice
 ```
 
-Managed host ports bind only to `127.0.0.1`. CosyVoice uses port `9880`; MuseTalk uses `9881`. Containers run one GPU-heavy stage at a time on an 8 GB card. `components-stop` stops and removes only the named `gvs-*-service` containers; sources, model weights, and generated media remain.
+Managed host ports bind only to `127.0.0.1`. CosyVoice uses port `9880`; MuseTalk uses `9881`. On an 8 GB card, start one full-dialogue stage at a time with `components-start --profile full-dialogue --component cosyvoice`, then switch with `--component musetalk`; the switch stops the sibling managed container before starting the selected service. `--component all` is an explicit opt-in for machines with enough VRAM. `components-stop` stops and removes only the selected `gvs-*-service` containers; sources, model weights, and generated media remain.
+
+For `local-lipsync` on an 8 GB card, render once with CosyVoice online so `dialogue-state.json` and the per-line WAV files are complete, stop/switch to MuseTalk, then rerun `dialogue-render`; cached lines are reused and the second pass only invokes lip sync.
 
 Source commits are pinned in `assets/components.json`. An existing checkout with local changes or another origin is never overwritten. Docker images isolate CUDA/Python dependencies from the host and the installed Skill directory remains small and updateable.

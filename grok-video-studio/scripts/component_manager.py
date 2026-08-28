@@ -116,7 +116,15 @@ def component_plan(profile: str, settings: dict[str, Any] | None = None) -> dict
 
 
 def _git_output(*args: str, cwd: Path | None = None) -> str:
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=600)
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1000:]
         raise SkillError(f"git command failed: {detail}")
@@ -165,11 +173,56 @@ def install_component_sources(profile: str, *, accept_downloads: bool) -> dict[s
 
 
 def _docker(*args: str, timeout: int = 14400, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(
+        ["docker", *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
     if check and result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-2000:]
         raise SkillError(f"docker command failed: {detail}")
     return result
+
+
+def _download_component_models(
+    name: str,
+    component: dict[str, Any],
+    *,
+    image: str,
+    models_root: Path,
+) -> list[dict[str, str]]:
+    python = "/opt/conda/envs/cosyvoice/bin/python" if name == "cosyvoice" else "python3.10"
+    root = models_root.resolve()
+    downloaded = []
+    for model in component.get("models", []):
+        repository = str(model["repository"])
+        revision = str(model["revision"])
+        target = (root / str(model["destination"])).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as error:
+            raise SkillError(f"model destination escapes the configured models root: {target}") from error
+        target.mkdir(parents=True, exist_ok=True)
+        allow_patterns = model.get("allow_patterns")
+        if allow_patterns is not None and (
+            not isinstance(allow_patterns, list) or not all(isinstance(value, str) and value for value in allow_patterns)
+        ):
+            raise SkillError(f"model allow_patterns is invalid for {repository}")
+        script = (
+            "from huggingface_hub import snapshot_download; "
+            f"snapshot_download(repo_id={repository!r}, revision={revision!r}, "
+            f"local_dir='/models', allow_patterns={allow_patterns!r})"
+        )
+        _docker("run", "--rm", "-v", f"{target}:/models", image, python, "-c", script)
+        if allow_patterns:
+            missing = [pattern for pattern in allow_patterns if not (target / pattern).is_file()]
+            if missing:
+                raise SkillError(f"model download completed without required files for {repository}: {', '.join(missing)}")
+        downloaded.append({"repository": repository, "revision": revision, "destination": str(target)})
+    return downloaded
 
 
 def setup_component_runtimes(profile: str, *, accept_downloads: bool, include_models: bool) -> dict[str, Any]:
@@ -194,35 +247,9 @@ def setup_component_runtimes(profile: str, *, accept_downloads: bool, include_mo
         dockerfile = SKILL_ROOT / "assets" / "docker" / f"{name}.Dockerfile"
         image = f"gvs-{name}:{str(item['commit'])[:12]}"
         _docker("build", "-f", str(dockerfile), "-t", image, str(source))
-        model_result = "skipped"
-        if include_models and name == "cosyvoice":
-            target = models_root / "cosyvoice" / "Fun-CosyVoice3-0.5B-2512"
-            target.parent.mkdir(parents=True, exist_ok=True)
-            _docker(
-                "run",
-                "--rm",
-                "-v",
-                f"{target.parent}:/models",
-                image,
-                "/opt/conda/envs/cosyvoice/bin/python",
-                "-c",
-                "from huggingface_hub import snapshot_download; snapshot_download('FunAudioLLM/Fun-CosyVoice3-0.5B-2512', local_dir='/models/Fun-CosyVoice3-0.5B-2512')",
-            )
-            model_result = str(target)
-        elif include_models and name == "musetalk":
-            target = models_root / "musetalk"
-            target.mkdir(parents=True, exist_ok=True)
-            downloads = [
-                ("TMElyralab/MuseTalk", "/models"),
-                ("stabilityai/sd-vae-ft-mse", "/models/sd-vae"),
-                ("openai/whisper-tiny", "/models/whisper"),
-                ("yzd-v/DWPose", "/models/dwpose"),
-                ("ByteDance/LatentSync", "/models/syncnet"),
-                ("ManyOtherFunctions/face-parse-bisent", "/models/face-parse-bisent"),
-            ]
-            for repository, destination in downloads:
-                _docker("run", "--rm", "-v", f"{target}:/models", image, "hf", "download", repository, "--local-dir", destination)
-            model_result = str(target)
+        model_result: str | list[dict[str, str]] = "skipped"
+        if include_models:
+            model_result = _download_component_models(name, item, image=image, models_root=models_root)
         results.append({"id": name, "image": image, "models": model_result})
     return {"profile": profile, "runtimes": results, "models_downloaded": include_models, "next": "Run components-start, then components-doctor."}
 
@@ -245,15 +272,48 @@ def _prepare_container(name: str, image: str) -> bool:
     return False
 
 
-def start_components(profile: str) -> dict[str, Any]:
+def _select_component_items(plan: dict[str, Any], component: str | None, *, require_explicit_multi: bool) -> list[dict[str, Any]]:
+    items = list(plan["components"])
+    if component == "all":
+        return items
+    if component:
+        selected = [item for item in items if item["id"] == component]
+        if not selected:
+            raise SkillError(f"component {component} is not included in profile {plan['profile']}")
+        return selected
+    if require_explicit_multi and len(items) > 1:
+        choices = ", ".join(str(item["id"]) for item in items)
+        raise SkillError(
+            f"profile {plan['profile']} contains multiple GPU-heavy services ({choices}); "
+            "pass --component with one service for staged 8 GB operation, or --component all after confirming sufficient VRAM"
+        )
+    return items
+
+
+def start_components(profile: str, component: str | None = None) -> dict[str, Any]:
     settings = load_component_settings()
     plan = component_plan(profile, settings)
+    selected_items = _select_component_items(plan, component, require_explicit_multi=True)
     models_root = Path(str(settings["models_root"])).resolve()
     services_root = SKILL_ROOT / "scripts" / "services"
     started = []
     started_now: list[str] = []
+    stopped_for_vram = []
     try:
-        for item in plan["components"]:
+        if len(selected_items) == 1 and len(plan["components"]) > 1:
+            selected_id = str(selected_items[0]["id"])
+            for sibling in plan["components"]:
+                sibling_id = str(sibling["id"])
+                if sibling_id == selected_id:
+                    continue
+                container = _container_name(sibling_id)
+                if _docker("inspect", container, check=False).returncode == 0:
+                    running = _docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip().lower() == "true"
+                    if running:
+                        _docker("stop", "--time", "20", container)
+                    _docker("rm", container)
+                    stopped_for_vram.append(container)
+        for item in selected_items:
             name = str(item["id"])
             image = f"gvs-{name}:{str(item['commit'])[:12]}"
             container = _container_name(name)
@@ -297,6 +357,8 @@ def start_components(profile: str) -> dict[str, Any]:
                     "-v",
                     f"{model}:/models:ro",
                     "-v",
+                    f"{model}:/workspace/MuseTalk/models:ro",
+                    "-v",
                     f"{wrapper}:/opt/gvs/musetalk_server.py:ro",
                     image,
                     "python3.10",
@@ -318,13 +380,14 @@ def start_components(profile: str) -> dict[str, Any]:
             _docker("stop", "--time", "10", container, check=False)
             _docker("rm", container, check=False)
         raise
-    return {"profile": profile, "started": started}
+    return {"profile": profile, "component": component or "auto", "stopped_for_vram": stopped_for_vram, "started": started}
 
 
-def stop_components(profile: str) -> dict[str, Any]:
+def stop_components(profile: str, component: str | None = None) -> dict[str, Any]:
     plan = component_plan(profile)
+    selected_items = _select_component_items(plan, component, require_explicit_multi=False)
     stopped = []
-    for item in plan["components"]:
+    for item in selected_items:
         name = _container_name(str(item["id"]))
         inspected = _docker("inspect", name, check=False)
         if inspected.returncode != 0:
@@ -332,7 +395,7 @@ def stop_components(profile: str) -> dict[str, Any]:
         _docker("stop", "--time", "20", name)
         _docker("rm", name)
         stopped.append(name)
-    return {"profile": profile, "stopped": stopped}
+    return {"profile": profile, "component": component or "all", "stopped": stopped}
 
 
 def _service_health(base_url: str) -> dict[str, Any]:
@@ -351,12 +414,13 @@ def _service_health(base_url: str) -> dict[str, Any]:
         return {"ok": False, "error": str(error)[:500]}
 
 
-def component_status(profile: str | None = None) -> dict[str, Any]:
+def component_status(profile: str | None = None, component: str | None = None) -> dict[str, Any]:
     settings = load_component_settings()
     selected = profile or str(settings.get("profile", "core"))
     plan = component_plan(selected, settings)
+    selected_items = _select_component_items(plan, component, require_explicit_multi=False)
     components = []
-    for item in plan["components"]:
+    for item in selected_items:
         target = Path(item["source"])
         actual = ""
         if (target / ".git").is_dir():
@@ -378,6 +442,7 @@ def component_status(profile: str | None = None) -> dict[str, Any]:
     return {
         "ok": all(item["source_ready"] and item["service"]["ok"] for item in components),
         "profile": selected,
+        "component": component or "all",
         "config": str(component_settings_path()),
         "components": components,
         "ffmpeg": shutil.which("ffmpeg") or "not_found",

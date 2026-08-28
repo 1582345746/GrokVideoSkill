@@ -13,7 +13,9 @@ param(
     [switch]$InstallComponents,
     [switch]$IncludeComponentModels,
     [switch]$AcceptComponentDownloads,
-    [switch]$StartComponents
+    [switch]$StartComponents,
+    [ValidateSet("cosyvoice", "musetalk", "all")]
+    [string]$StartComponent
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,7 +115,14 @@ if ($StartComponents) {
     if (-not $InstallComponents -or -not $IncludeComponentModels) {
         throw "-StartComponents requires -InstallComponents and -IncludeComponentModels."
     }
-    & $Python $cli components-start --profile $ComponentProfile
+    if ($ComponentProfile -eq "full-dialogue" -and [string]::IsNullOrWhiteSpace($StartComponent)) {
+        throw "-StartComponents with full-dialogue requires -StartComponent cosyvoice, musetalk, or all."
+    }
+    $startArguments = @($cli, "components-start", "--profile", $ComponentProfile)
+    if (-not [string]::IsNullOrWhiteSpace($StartComponent)) {
+        $startArguments += @("--component", $StartComponent)
+    }
+    & $Python @startArguments
     if ($LASTEXITCODE -ne 0) {
         throw "Optional component services failed to start."
     }

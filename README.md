@@ -1,6 +1,6 @@
 # Grok Video Studio
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.6.1`，提供四个视频入口和五种音频模式：
+面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.6.2`，提供四个视频入口和五种音频模式：
 
 - 文生视频：QuickAI 文生视频，支持单镜头和多镜头项目。
 - 图生视频：QuickAI 生图生成角色母版/镜头关键帧，再由 QuickAI New 动画；用户现成图片也走同一路线。
@@ -101,6 +101,7 @@ cd GrokVideoSkill
 - `native-dialogue` 已验证能从 QuickAI 得到可听 AAC 人声，但上游可能自行烧入字幕，声音、逐字准确性和口型仍是生成式结果。
 - `native-dialogue` 可以先单独导出 SRT；只有人工确认源视频无内嵌字幕后，才可用 `subtitles --burn --confirm-source-clean` 生成字幕副本，防止重复字幕。
 - `local-voice` 用可选 CosyVoice 服务保证对白文本和字幕来自同一合同；`local-lipsync` 再调用 MuseTalk。两者不会随默认技能静默安装。
+- `full-dialogue` 在 8GB 显卡上按阶段运行：先 `components-start --profile full-dialogue --component cosyvoice` 合成并缓存对白，再切换 `--component musetalk` 做口型；已缓存对白不会重复请求 CosyVoice。
 - QA 会检查平均/峰值音量和静音占比；`has_audio=true` 仍只代表存在音轨，不能替代听审或可选 ASR 核对。
 - 声音参考必须是合成、自有或已授权素材，并填写准确参考文本；不支持无授权克隆第三方或公众人物声音。
 - 新闻热点检索由运行技能的 Codex 使用实时网络完成，CLI 负责保存证据合同并在生成前验证，不能把模型记忆当作新闻来源。

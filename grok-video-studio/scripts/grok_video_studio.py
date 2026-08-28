@@ -78,7 +78,7 @@ from series_workflow import (
 )
 
 
-SKILL_VERSION = "1.6.1"
+SKILL_VERSION = "1.6.2"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -1971,14 +1971,17 @@ def build_parser() -> argparse.ArgumentParser:
     components_install.add_argument("--accept-downloads", action="store_true")
     components_doctor = commands.add_parser("components-doctor", help="Check optional source pins and localhost services.")
     components_doctor.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"))
+    components_doctor.add_argument("--component", choices=("cosyvoice", "musetalk", "all"))
     components_setup = commands.add_parser("components-setup", help="Build isolated Docker runtimes and optionally download model weights.")
     components_setup.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
     components_setup.add_argument("--accept-downloads", action="store_true")
     components_setup.add_argument("--include-models", action="store_true")
     components_start = commands.add_parser("components-start", help="Start user-approved localhost AI media services.")
     components_start.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
+    components_start.add_argument("--component", choices=("cosyvoice", "musetalk", "all"))
     components_stop = commands.add_parser("components-stop", help="Stop and remove only Grok Video Studio managed service containers.")
     components_stop.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
+    components_stop.add_argument("--component", choices=("cosyvoice", "musetalk", "all"))
 
     init = commands.add_parser("init", help="Create a project contract and durable state.")
     init.add_argument("project", type=Path)
@@ -2221,7 +2224,7 @@ def main() -> int:
             print_json({"ok": True, **install_component_sources(args.profile, accept_downloads=args.accept_downloads)})
             return 0
         if args.command == "components-doctor":
-            result = component_status(args.profile)
+            result = component_status(args.profile, args.component)
             print_json(result)
             return 0 if result["ok"] else 1
         if args.command == "components-setup":
@@ -2237,10 +2240,10 @@ def main() -> int:
             )
             return 0
         if args.command == "components-start":
-            print_json({"ok": True, **start_components(args.profile)})
+            print_json({"ok": True, **start_components(args.profile, args.component)})
             return 0
         if args.command == "components-stop":
-            print_json({"ok": True, **stop_components(args.profile)})
+            print_json({"ok": True, **stop_components(args.profile, args.component)})
             return 0
         if args.command == "series-init":
             workflow = get_workflow(args.workflow)

@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.6.1`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.6.2`.
 
 ## Setup
 
@@ -16,7 +16,7 @@ Create the creative plan with Codex. Use the bundled scripts for credentials, pa
 5. Confirm the requested video mode before creating a project. Defaults are text-to-video -> QuickAI JSON and image-to-video -> QuickAI New multipart. A project-level `video_provider` may explicitly override this route when the corresponding key is configured. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
 6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
 7. Ask whether the user needs character speech and lip sync. Keep the default `core` profile for silent/source-audio work. `native-dialogue` adds no local dependency. `local-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `full-dialogue` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
-8. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. Stop them with `components-stop` when not needed.
+8. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 

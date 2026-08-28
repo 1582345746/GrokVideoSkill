@@ -1,11 +1,43 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 
 import argparse
 import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Iterator
+
+
+MAX_PROMPT_BYTES = 64 * 1024 * 1024
+
+
+def _store_prompt(upload: Any) -> Path:
+    handle = tempfile.NamedTemporaryFile(prefix="gvs-cosyvoice-", suffix=".wav", delete=False)
+    path = Path(handle.name)
+    total = 0
+    try:
+        with handle:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_PROMPT_BYTES:
+                    raise ValueError("voice reference exceeds 64 MB")
+                handle.write(chunk)
+        return path
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def _cosyvoice3_prompt(text: str, *, instruction: bool = False) -> str:
+    value = text.strip()
+    if "<|endofprompt|>" in value:
+        return value
+    if instruction:
+        return f"You are a helpful assistant. {value}<|endofprompt|>"
+    return f"You are a helpful assistant.<|endofprompt|>{value}"
 
 
 def build_app(source_root: Path, model_dir: str) -> tuple[Any, Any]:
@@ -16,29 +48,36 @@ def build_app(source_root: Path, model_dir: str) -> tuple[Any, Any]:
     from fastapi import FastAPI, File, Form, UploadFile
     from fastapi.responses import StreamingResponse
     from cosyvoice.cli.cosyvoice import AutoModel
-    from cosyvoice.utils.file_utils import load_wav
 
     model = AutoModel(model_dir=model_dir)
+    is_cosyvoice3 = model.__class__.__name__ == "CosyVoice3"
     app = FastAPI(title="Grok Video Studio CosyVoice", docs_url=None, redoc_url=None)
 
-    def stream(output: Any) -> Iterator[bytes]:
-        for item in output:
-            yield (item["tts_speech"].numpy() * (2**15)).astype(np.int16).tobytes()
+    def stream(output: Any, cleanup: Path | None = None) -> Iterator[bytes]:
+        try:
+            for item in output:
+                yield (item["tts_speech"].numpy() * (2**15)).astype(np.int16).tobytes()
+        finally:
+            if cleanup is not None:
+                cleanup.unlink(missing_ok=True)
 
-    def response(output: Any) -> StreamingResponse:
+    def response(output: Any, cleanup: Path | None = None) -> StreamingResponse:
         return StreamingResponse(
-            stream(output),
+            stream(output, cleanup),
             media_type="audio/L16",
             headers={"X-Sample-Rate": str(model.sample_rate), "Cache-Control": "no-store"},
         )
 
     @app.get("/health")
     async def health() -> dict[str, Any]:
+        frontend = str(getattr(model.frontend, "text_frontend", ""))
         return {
-            "ok": True,
+            "ok": bool(frontend),
             "service": "cosyvoice",
             "sample_rate": model.sample_rate,
             "model": model_dir,
+            "model_type": model.__class__.__name__,
+            "text_frontend": frontend or "unavailable",
             "speakers": model.list_available_spks(),
         }
 
@@ -50,7 +89,9 @@ def build_app(source_root: Path, model_dir: str) -> tuple[Any, Any]:
     async def inference_zero_shot(
         tts_text: str = Form(), prompt_text: str = Form(), prompt_wav: UploadFile = File()
     ) -> StreamingResponse:
-        return response(model.inference_zero_shot(tts_text, prompt_text, load_wav(prompt_wav.file, 16000)))
+        prompt_path = _store_prompt(prompt_wav)
+        normalized_prompt = _cosyvoice3_prompt(prompt_text) if is_cosyvoice3 else prompt_text
+        return response(model.inference_zero_shot(tts_text, normalized_prompt, str(prompt_path)), prompt_path)
 
     @app.post("/inference_instruct")
     async def inference_instruct(tts_text: str = Form(), spk_id: str = Form(), instruct_text: str = Form()) -> StreamingResponse:
@@ -60,7 +101,9 @@ def build_app(source_root: Path, model_dir: str) -> tuple[Any, Any]:
     async def inference_instruct2(
         tts_text: str = Form(), instruct_text: str = Form(), prompt_wav: UploadFile = File()
     ) -> StreamingResponse:
-        return response(model.inference_instruct2(tts_text, instruct_text, load_wav(prompt_wav.file, 16000)))
+        prompt_path = _store_prompt(prompt_wav)
+        normalized_instruction = _cosyvoice3_prompt(instruct_text, instruction=True) if is_cosyvoice3 else instruct_text
+        return response(model.inference_instruct2(tts_text, normalized_instruction, str(prompt_path)), prompt_path)
 
     return app, model
 

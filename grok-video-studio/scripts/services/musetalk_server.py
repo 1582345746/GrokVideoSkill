@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 
 import argparse
 import json
@@ -8,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,13 @@ def build_app(source_root: Path, models_root: Path, python: str, timeout: int) -
         models_root / "musetalkV15" / "unet.pth",
         models_root / "musetalkV15" / "musetalk.json",
         models_root / "whisper" / "config.json",
+        models_root / "whisper" / "pytorch_model.bin",
+        models_root / "whisper" / "preprocessor_config.json",
         models_root / "sd-vae" / "config.json",
+        models_root / "sd-vae" / "diffusion_pytorch_model.bin",
+        models_root / "dwpose" / "dw-ll_ucoco_384.pth",
+        models_root / "face-parse-bisent" / "79999_iter.pth",
+        models_root / "face-parse-bisent" / "resnet18-5c106cde.pth",
     ]
 
     @app.get("/health")
@@ -50,9 +56,10 @@ def build_app(source_root: Path, models_root: Path, python: str, timeout: int) -
         return {"ok": not missing, "service": "musetalk", "busy": lock.locked(), "missing_models": missing}
 
     @app.post("/v1/lipsync")
-    async def lipsync(video: UploadFile = File(), audio: UploadFile = File()) -> Response:
+    def lipsync(video: UploadFile = File(), audio: UploadFile = File()) -> Response:
         if not lock.acquire(blocking=False):
             raise HTTPException(status_code=409, detail="MuseTalk is busy; retry after the current render finishes")
+        started_at = time.monotonic()
         try:
             missing = [str(path) for path in required if not path.is_file()]
             if missing:
@@ -103,7 +110,17 @@ def build_app(source_root: Path, models_root: Path, python: str, timeout: int) -
                 payload = result.read_bytes()
                 if len(payload) > MAX_UPLOAD_BYTES or b"ftyp" not in payload[:64]:
                     raise HTTPException(status_code=500, detail="MuseTalk produced an invalid MP4")
-                return Response(payload, media_type="video/mp4", headers={"Cache-Control": "no-store"})
+                elapsed = time.monotonic() - started_at
+                print(f"MuseTalk inference completed in {elapsed:.2f}s; output_bytes={len(payload)}", flush=True)
+                return Response(
+                    payload,
+                    media_type="video/mp4",
+                    headers={
+                        "Cache-Control": "no-store",
+                        "X-GVS-Inference-Seconds": f"{elapsed:.2f}",
+                        "X-GVS-Output-Bytes": str(len(payload)),
+                    },
+                )
         except ValueError as error:
             raise HTTPException(status_code=413, detail=str(error)) from error
         finally:
