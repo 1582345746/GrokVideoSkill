@@ -1,5 +1,8 @@
 # GrokVideoSkill 文生视频与图生视频开发交接文档
 
+> [!WARNING]
+> 本文档是 v1.2 左右的早期协议适配交接，其中大量“待实现”已在 v1.8.0 完成。新会话必须优先阅读 [`HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md`](HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md)，本文档仅保留为历史背景。
+
 > 交接日期：2026-08-27  
 > 交接目标：在新的 Codex 工作区中继续开发、测试并发布 `GrokVideoSkill`。  
 > 当前工作区根目录应设置为：`E:\MyFiles\ToolSkills\GrokVideoSkill`

@@ -145,6 +145,7 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 逐模块标准话术、费用边界、操作顺序和验收标准见：
 
 - [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
+- [v1.8.0 开发交接文档](HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md)
 - [产品化验收清单](docs/productization-checklist.md)
 - [技能运行说明](grok-video-studio/SKILL.md)
 - [项目字段规范](grok-video-studio/references/project-schema.md)
