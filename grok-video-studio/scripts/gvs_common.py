@@ -6,6 +6,7 @@ import ctypes
 import json
 import os
 import secrets
+import sys
 import tempfile
 import urllib.error
 import urllib.parse
@@ -16,7 +17,7 @@ from typing import Any, Iterable
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/1.1"
+USER_AGENT = "GrokVideoStudioSkill/1.6.1"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
@@ -456,7 +457,16 @@ def download_file(url: str, destination: Path, *, key: str = "", timeout: int = 
             temp.unlink()
 
 
+def configure_utf8_stdio() -> None:
+    for target in (sys.stdout, sys.stderr):
+        reconfigure = getattr(target, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
+
+
 def print_json(value: Any, *, stream: Any = None) -> None:
-    import sys
 
     print(json.dumps(value, ensure_ascii=False, indent=2), file=stream or sys.stdout)

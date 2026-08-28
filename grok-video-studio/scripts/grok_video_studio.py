@@ -25,6 +25,7 @@ from gvs_common import (
     assert_mp4,
     atomic_write_bytes,
     atomic_write_json,
+    configure_utf8_stdio,
     config_path,
     load_settings,
     normalize_base_url,
@@ -77,7 +78,7 @@ from series_workflow import (
 )
 
 
-SKILL_VERSION = "1.6.0"
+SKILL_VERSION = "1.6.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -795,6 +796,20 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
         shot_id = str(shot.get("id", ""))
         if bool(shot.get("generate_image", True)):
             image_requests += 1
+            image_size = str(shot_value(project, shot, "image_size", "1024x1024"))
+            aspect_ratio = video_aspect_ratio(project, shot)
+            if image_size != "auto" and SIZE_RE.fullmatch(image_size) and aspect_ratio in ASPECT_RATIOS:
+                width, height = (int(item) for item in image_size.split("x", 1))
+                expected = image_size_for_aspect_ratio(aspect_ratio)
+                expected_width, expected_height = (int(item) for item in expected.split("x", 1))
+                orientation_matches = (width > height) == (expected_width > expected_height) and (width < height) == (
+                    expected_width < expected_height
+                )
+                if not orientation_matches:
+                    warnings.append(
+                        f"{shot_id}: image_size {image_size} orientation does not match video aspect ratio {aspect_ratio}; "
+                        f"use {expected} to reduce keyframe cropping and composition drift"
+                    )
         if str(shot.get("image_prompt", "")).strip():
             value = composed_image_prompt(project, shot)
             characters = len(value)
@@ -1478,6 +1493,14 @@ def plan_shot_durations(
     return [base + (1 if index < remainder else 0) for index in range(count)]
 
 
+def image_size_for_aspect_ratio(aspect_ratio: str) -> str:
+    if aspect_ratio in {"16:9", "4:3", "3:2"}:
+        return "1536x1024"
+    if aspect_ratio in {"9:16", "3:4", "2:3"}:
+        return "1024x1536"
+    return "1024x1024"
+
+
 def init_project(
     root: Path,
     title: str,
@@ -1553,7 +1576,7 @@ def init_project(
             "image_quality": "auto"
         },
         "defaults": {
-            "image_size": "1024x1024",
+            "image_size": image_size_for_aspect_ratio(video_aspect_ratio_value),
             "image_quality": "auto",
             "video_size": video_size,
             "video_seconds": shot_durations[0],
@@ -1587,6 +1610,20 @@ def init_project(
     atomic_write_json(path, project)
     save_state(root, fresh_state())
     return path
+
+
+MODEL_DISPLAY_SUFFIXES = ("（按次）", "（按量）", "（计费）")
+
+
+def provider_model_match(configured_model: str, models: list[str]) -> str:
+    if configured_model in models:
+        return configured_model
+    for candidate in models:
+        normalized = candidate.strip()
+        for suffix in MODEL_DISPLAY_SUFFIXES:
+            if normalized.endswith(suffix) and normalized[: -len(suffix)].strip() == configured_model:
+                return candidate
+    return ""
 
 
 def doctor() -> tuple[int, dict[str, Any]]:
@@ -1641,12 +1678,14 @@ def doctor() -> tuple[int, dict[str, Any]]:
         started = time.perf_counter()
         try:
             models = client.list_models()
-            present = model in models
+            matched_model = provider_model_match(model, models)
+            present = bool(matched_model)
             result["providers"][name] = {
                 "ok": present,
                 "configured_model": model,
                 "models": models,
                 "model_present": present,
+                "matched_model": matched_model,
                 "required": required,
                 "model_count": len(models),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -2087,6 +2126,11 @@ def build_parser() -> argparse.ArgumentParser:
     subtitles.add_argument("--source-video", type=Path)
     subtitles.add_argument("--output-video", type=Path)
     subtitles.add_argument("--style", choices=tuple(SUBTITLE_STYLES), default="clean")
+    subtitles.add_argument(
+        "--confirm-source-clean",
+        action="store_true",
+        help="Allow subtitle burning for native-dialogue only after visual review confirms the source has no baked captions.",
+    )
 
     dialogue = commands.add_parser("dialogue-render", help="Render local TTS dialogue, deterministic timing, mixing, and optional lip sync.")
     dialogue.add_argument("project", type=Path)
@@ -2106,6 +2150,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    configure_utf8_stdio()
     args = build_parser().parse_args()
     try:
         if args.command == "version":
@@ -2575,6 +2620,11 @@ def main() -> int:
             project = require_valid_project(root)
             if args.output_video and not args.burn:
                 raise SkillError("--output-video requires --burn")
+            if args.burn and audio_config(project)["mode"] == "native-dialogue" and not args.confirm_source_clean:
+                raise SkillError(
+                    "native-dialogue providers may bake captions into pixels; inspect the source video first, then re-run with "
+                    "--confirm-source-clean only when the source is visually caption-free"
+                )
             srt_output = args.output_srt.resolve() if args.output_srt else root / "deliverables" / "subtitles.srt"
             subtitle_result = export_subtitles(root, project, srt_output)
             video_result: dict[str, Any] | None = None

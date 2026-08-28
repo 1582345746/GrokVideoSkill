@@ -678,6 +678,7 @@ def series_context(root: Path, episode_id: str | None = None) -> dict[str, Any]:
     state = load_series_state(root, series)
     episode = get_episode(series, episode_id) if episode_id else select_next_episode(root)[0]
     project_root = episode_root(root, episode)
+    current_project = sync_episode_contract(root, series, episode)
     planned = [
         {
             "id": item.get("id"),
@@ -746,7 +747,7 @@ def series_context(root: Path, episode_id: str | None = None) -> dict[str, Any]:
         "planned_episodes": planned,
         "previous_episodes": previous,
         "current_episode": episode,
-        "current_project": read_json(project_root / "project.json"),
+        "current_project": current_project,
         "current_project_path": str(project_root / "project.json"),
     }
 

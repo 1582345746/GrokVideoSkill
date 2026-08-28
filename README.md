@@ -1,6 +1,6 @@
 # Grok Video Studio
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.6.0`，提供四个视频入口和五种音频模式：
+面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.6.1`，提供四个视频入口和五种音频模式：
 
 - 文生视频：QuickAI 文生视频，支持单镜头和多镜头项目。
 - 图生视频：QuickAI 生图生成角色母版/镜头关键帧，再由 QuickAI New 动画；用户现成图片也走同一路线。
@@ -74,7 +74,7 @@ cd GrokVideoSkill
 字幕交付：
 
 ```text
-为当前项目生成 SRT，并用本地 FFmpeg 输出带字幕副本。先让我选择 clean、cinematic 或 news 样式；始终保留原始 final.mp4。字幕效果不好时换样式重烧或直接使用干净母版，不要重新付费生成视频，也不要让视频模型直接绘制字幕。
+为当前项目生成 SRT，并用本地 FFmpeg 输出带字幕副本。先让我选择 clean、cinematic 或 news 样式；始终保留原始 final.mp4。native-dialogue 必须先人工确认源视频没有模型自带字幕，再允许烧录。字幕效果不好时换样式重烧或直接使用干净母版，不要重新付费生成视频，也不要让视频模型直接绘制字幕。
 ```
 
 人物原生说话（轻量、生成式）：
@@ -99,6 +99,7 @@ cd GrokVideoSkill
 
 - FFmpeg 可以生成/烧录字幕、时间拉伸、对白混音、背景声压低和响度归一；这些基础交付不需要额外剪辑技能。
 - `native-dialogue` 已验证能从 QuickAI 得到可听 AAC 人声，但上游可能自行烧入字幕，声音、逐字准确性和口型仍是生成式结果。
+- `native-dialogue` 可以先单独导出 SRT；只有人工确认源视频无内嵌字幕后，才可用 `subtitles --burn --confirm-source-clean` 生成字幕副本，防止重复字幕。
 - `local-voice` 用可选 CosyVoice 服务保证对白文本和字幕来自同一合同；`local-lipsync` 再调用 MuseTalk。两者不会随默认技能静默安装。
 - QA 会检查平均/峰值音量和静音占比；`has_audio=true` 仍只代表存在音轨，不能替代听审或可选 ASR 核对。
 - 声音参考必须是合成、自有或已授权素材，并填写准确参考文本；不支持无授权克隆第三方或公众人物声音。

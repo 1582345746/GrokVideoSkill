@@ -48,7 +48,7 @@
     "image_quality": "auto"
   },
   "defaults": {
-    "image_size": "1024x1024",
+    "image_size": "1536x1024",
     "image_quality": "auto",
     "video_size": "1280x720",
     "video_seconds": 6,
@@ -96,7 +96,7 @@
     "use_character_master": true,
     "image_references": [],
     "video_references": [],
-    "image_size": "1024x1024",
+    "image_size": "1536x1024",
     "video_size": "1280x720",
     "video_resolution": "480p",
     "video_aspect_ratio": "16:9",
@@ -119,6 +119,8 @@ Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed
 
 `video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`. New text-to-video projects default to QuickAI and do not generate keyframes. New image-to-video projects default to QuickAI New. Projects created before these fields existed retain the legacy image-to-video plus QuickAI New interpretation. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
 
+New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536x1024`, `9:16`/`3:4`/`2:3` use `1024x1536`, and `1:1` uses `1024x1024`. Character master sheets remain square. Preflight warns when a generated keyframe's orientation conflicts with its target video aspect ratio because that mismatch increases cropping and composition drift.
+
 `defaults.audio_policy` is `preserve` by default. Assembly preserves source audio and inserts silent AAC audio for clips that have no audio, keeping the final timeline stream-compatible. Set it to `mute` only when a silent delivery is intentional. `allow_ui_elements` defaults to `false`; a shot may set it to `true` only when the script explicitly shows an app or social-video interface. The clean-frame rule is a prompt constraint and still requires visual QA because an upstream model can hallucinate overlays.
 
 `audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
@@ -129,7 +131,7 @@ Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `comple
 
 `narration` and `subtitle` are optional strings. `subtitle` is a one-cue shorthand covering most of the shot. For precise timing, use `subtitles` and provide non-overlapping `start`/`end` seconds relative to that shot; do not use `subtitle` and `subtitles` together. Each cue must fit within the shot duration.
 
-The `subtitles` command prefers precise cues, then `subtitle`, then `narration`, then sourced-news narration. It exports UTF-8 SRT. With `--burn`, local FFmpeg creates `final-subtitled.mp4` while preserving clean `final.mp4`.
+The `subtitles` command prefers precise cues, then `subtitle`, then `narration`, then sourced-news narration. It exports UTF-8 SRT. With `--burn`, local FFmpeg creates `final-subtitled.mp4` while preserving clean `final.mp4`. Native-dialogue sources must first be visually checked for provider-baked captions; the CLI requires `--confirm-source-clean` before burning another subtitle layer.
 
 When a shot has `dialogue`, it cannot also use `subtitle` or `subtitles`. Dialogue lines are preferred for SRT and define the TTS/mix timeline. IDs are unique project-wide, speakers reference known characters, lines do not overlap, and each `0 <= start < end <= shot.seconds`. `dialogue-render` keeps generated line assets under `assets/dialogue/` and resumable signatures in `dialogue-state.json`.
 

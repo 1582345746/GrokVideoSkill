@@ -121,7 +121,7 @@ Only an approved episode can start. Approval stores a digest of the reviewed ser
 
 ## Continuity context
 
-`series-context` returns the whole season outline, compact records for previous episodes, their final video paths and reviewed continuity summaries, plus the full current `project.json`. The immediately previous reviewed end state is also synchronized into `project.json.series_context` and injected into current image and video prompts.
+`series-context` returns the whole season outline, compact records for previous episodes, their final video paths and reviewed continuity summaries, plus the full current `project.json`. Calling it also synchronizes the immediately previous reviewed end state into `project.json.series_context`, so a separate `series-sync` step is not required before composing the next episode's image and video prompts.
 
 Do not treat a planned `intended_continuity_out` as fact. Only `series-accept --continuity-summary` records what visibly survived generation and review.
 

@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.6.0`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.6.1`.
 
 ## Setup
 
@@ -131,4 +131,4 @@ Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` 
 
 Use `postprocess <input.mp4> <output.mp4>` for optional background music, voice-over, burned SRT subtitles, and fades. Use `cover <input.mp4> <cover.jpg>` to export a publishing cover. These commands cover lightweight delivery; use a dedicated editing skill for complex transitions, motion graphics, dialogue editing, or a full timeline.
 
-Use `subtitles <project-folder>` to export `deliverables/subtitles.srt`. Timed dialogue is preferred, then explicit subtitle cues, a shot's `subtitle`/`narration`, or news narration. Add `--burn --style clean|cinematic|news` to create `deliverables/final-subtitled.mp4` with local FFmpeg. This always preserves the clean `final.mp4`; a rejected subtitle design can be re-burned or omitted without another provider request. Never ask the generative video model to draw ordinary subtitles. `dialogue-render` reuses the declared dialogue windows for exact TTS/SRT alignment.
+Use `subtitles <project-folder>` to export `deliverables/subtitles.srt`. Timed dialogue is preferred, then explicit subtitle cues, a shot's `subtitle`/`narration`, or news narration. Add `--burn --style clean|cinematic|news` to create `deliverables/final-subtitled.mp4` with local FFmpeg. For `native-dialogue`, first inspect the source for provider-baked captions; burning is blocked until `--confirm-source-clean` is supplied. This always preserves the clean `final.mp4`; a rejected subtitle design can be re-burned or omitted without another provider request. Never ask the generative video model to draw ordinary subtitles. `dialogue-render` reuses the declared dialogue windows for exact TTS/SRT alignment.

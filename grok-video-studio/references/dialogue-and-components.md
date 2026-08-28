@@ -22,7 +22,7 @@ python scripts/grok_video_studio.py dialogue-render <project> --burn-subtitles
 
 The command synthesizes one WAV per line, resumes unchanged lines from `dialogue-state.json`, fits each line to its declared time window, builds `deliverables/dialogue-track.wav`, ducks source audio during speech, normalizes delivery loudness, writes `dialogue.srt`, and creates a separate dialogue video. It never overwrites `final.mp4`.
 
-Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SRT, then choose `--style clean`, `cinematic`, or `news` when burning. If the result is not approved, re-burn another style or deliver the clean master; no paid video regeneration is needed.
+Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SRT, then choose `--style clean`, `cinematic`, or `news` when burning. For `native-dialogue`, first inspect the source for provider-baked captions; the CLI requires `--confirm-source-clean` before it will burn another subtitle layer. If the result is not approved, re-burn another style or deliver the clean master; no paid video regeneration is needed.
 
 ## Project fields
 

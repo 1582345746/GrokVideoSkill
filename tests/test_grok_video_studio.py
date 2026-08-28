@@ -61,6 +61,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     fail_video_create = False
     video_status = "completed"
     tts_creates = 0
+    model_ids = ["gpt-image-2", "grok-imagine-video-1.5"]
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -80,7 +81,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "service": "fake-local-media"})
             return
         if self.path == "/v1/models":
-            self.send_json({"data": [{"id": "gpt-image-2"}, {"id": "grok-imagine-video-1.5"}]})
+            self.send_json({"data": [{"id": model_id} for model_id in type(self).model_ids]})
             return
         if self.path == "/v1/videos/task-1":
             payload: dict[str, object] = {"id": "task-1", "status": type(self).video_status}
@@ -226,6 +227,7 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
         FakeProviderHandler.tts_creates = 0
+        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5"]
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.config_dir = self.root / "config"
@@ -312,6 +314,16 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(resumed["ok"])
         self.assertEqual(FakeProviderHandler.video_creates, 1)
         self.assertTrue((project / "clips" / "shot-001.mp4").is_file())
+
+    def test_doctor_accepts_known_billing_suffix_without_fuzzy_model_matching(self) -> None:
+        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5（按次）"]
+        doctor = self.run_cli("doctor")
+        self.assertTrue(doctor["ok"])
+        self.assertEqual(doctor["providers"]["quickainew_video"]["matched_model"], "grok-imagine-video-1.5（按次）")
+
+        FakeProviderHandler.model_ids = ["gpt-image-2", "prefix-grok-imagine-video-1.5-other"]
+        blocked = self.run_cli("doctor", expected=1)
+        self.assertFalse(blocked["providers"]["quickainew_video"]["model_present"])
 
     def test_multiple_video_references_use_repeated_field(self) -> None:
         project = self.root / "multi"
@@ -414,6 +426,69 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(sum(created["shot_seconds"]), 37)
         self.assertNotEqual(len(created["shot_seconds"]), 8)
+
+    def test_i2v_init_aligns_keyframe_orientation_and_warns_for_legacy_square_size(self) -> None:
+        landscape = self.root / "landscape-i2v"
+        self.run_cli(
+            "init",
+            str(landscape),
+            "--title",
+            "Landscape",
+            "--topic",
+            "Aspect alignment",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+            "--mode",
+            "image-to-video",
+            "--aspect-ratio",
+            "16:9",
+        )
+        value = json.loads((landscape / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(value["defaults"]["image_size"], "1536x1024")
+        self.assertEqual(value["character_master"]["image_size"], "1024x1024")
+        value["story"] = "A landscape image-to-video test."
+        value["shots"][0]["image_prompt"] = "One landscape keyframe."
+        value["shots"][0]["video_prompt"] = "One continuous movement."
+        value["defaults"]["image_size"] = "1024x1024"
+        (landscape / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        report = self.run_cli("preflight", str(landscape))
+        self.assertTrue(any("orientation does not match" in warning for warning in report["preflight"]["warnings"]))
+
+        portrait = self.root / "portrait-i2v"
+        self.run_cli(
+            "init",
+            str(portrait),
+            "--title",
+            "Portrait",
+            "--topic",
+            "Aspect alignment",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+            "--mode",
+            "image-to-video",
+            "--aspect-ratio",
+            "9:16",
+        )
+        portrait_value = json.loads((portrait / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(portrait_value["defaults"]["image_size"], "1024x1536")
+
+    def test_cli_forces_utf8_json_even_when_parent_requests_legacy_encoding(self) -> None:
+        env = self.env.copy()
+        env.update({"PYTHONUTF8": "0", "PYTHONIOENCODING": "cp936"})
+        result = subprocess.run(
+            [sys.executable, str(CLI), "capabilities"],
+            env=env,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", "replace"))
+        decoded = result.stdout.decode("utf-8")
+        self.assertIn("文生视频", decoded)
+        self.assertTrue(json.loads(decoded)["ok"])
 
     def test_news_video_requires_verified_sourced_claims(self) -> None:
         project = self.root / "news"
@@ -795,6 +870,29 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(subtitled.is_file())
         self.assertEqual(clean.read_bytes(), clean_digest)
         self.assertTrue(result["burned_video"]["has_audio"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_native_dialogue_requires_clean_source_confirmation_before_subtitle_burn(self) -> None:
+        project = self.create_project("native-subtitle-guard", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["characters"] = [{"id": "lead", "name": "Lead", "identity": "Original AI presenter.", "references": []}]
+        value["shots"][0]["character_ids"] = ["lead"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "Source review required.", "start": 0.05, "end": 0.9}
+        ]
+        value["shots"][0]["seconds"] = 1
+        value["audio"] = {"mode": "native-dialogue", "generate_audio": True}
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        source = project / "deliverables" / "final.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(FakeProviderHandler.video_payload)
+
+        blocked = self.run_cli("subtitles", str(project), "--burn", expected=1)
+        self.assertIn("may bake captions", blocked["error"])
+        self.assertFalse((project / "deliverables" / "final-subtitled.mp4").exists())
+        allowed = self.run_cli("subtitles", str(project), "--burn", "--confirm-source-clean")
+        self.assertGreater(allowed["burned_video"]["duration"], 0)
+        self.assertTrue((project / "deliverables" / "final-subtitled.mp4").is_file())
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_local_dialogue_renders_tts_timeline_audio_and_subtitles(self) -> None:
@@ -1211,8 +1309,10 @@ class SkillIntegrationTests(unittest.TestCase):
         context = self.run_cli("series-context", str(series_root), "--episode", "ep-002")
         self.assertEqual(context["previous_episodes"][0]["id"], "ep-001")
         self.assertIn("denim jacket", context["previous_episodes"][0]["continuity_summary"])
+        self.assertIn("denim jacket", context["current_project"]["series_context"]["previous_episode_continuity"])
         episode_two = series_root / "episodes" / "ep-002"
         project_two = json.loads((episode_two / "project.json").read_text(encoding="utf-8"))
+        self.assertIn("denim jacket", project_two["series_context"]["previous_episode_continuity"])
         project_two["story"] = "Chen continues from the reviewed restaurant ending."
         project_two["shots"][0].update(
             {
@@ -1222,7 +1322,6 @@ class SkillIntegrationTests(unittest.TestCase):
             }
         )
         (episode_two / "project.json").write_text(json.dumps(project_two), encoding="utf-8")
-        self.run_cli("series-sync", str(series_root))
         synced_two = json.loads((episode_two / "project.json").read_text(encoding="utf-8"))
         self.assertIn("Reviewed previous episode end state", composed_video_prompt(synced_two, synced_two["shots"][0]))
 
