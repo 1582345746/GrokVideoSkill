@@ -1054,6 +1054,10 @@ class SkillIntegrationTests(unittest.TestCase):
             encoding="utf-8",
             timeout=30,
         )
+        if os.name != "nt":
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+            self.assertIn("requires Windows DPAPI", result.stdout + result.stderr)
+            return
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((secure_dir / "config.json").exists())
 
@@ -1185,6 +1189,30 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(value["audio"]["mode"], "local-voice")
         self.assertFalse(value["audio"]["generate_audio"])
         self.assertEqual(value["audio"]["subtitle_source"], "project")
+
+    def test_saved_install_profile_is_the_default_for_new_projects(self) -> None:
+        self.run_cli("install-configure", "--profile", "upstream-dialogue")
+        project = self.root / "saved-profile-contract"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Saved profile contract",
+            "--topic",
+            "Upstream dialogue",
+            "--workflow",
+            "text-to-video",
+            "--mode",
+            "text-to-video",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(value["audio"]["mode"], "native-dialogue")
+        self.assertTrue(value["audio"]["generate_audio"])
+        self.assertEqual(value["audio"]["subtitle_source"], "upstream")
 
     def test_full_dialogue_start_requires_an_explicit_gpu_stage(self) -> None:
         configured = self.run_cli(

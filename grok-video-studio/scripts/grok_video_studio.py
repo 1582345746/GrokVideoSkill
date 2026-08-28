@@ -1955,8 +1955,14 @@ def resolve_project_audio_options(
     """Resolve explicit project options, optionally inheriting an install profile."""
     selected_mode = str(audio_mode or "").strip().lower()
     selected_source = str(subtitle_source or "").strip().lower()
-    if install_profile:
-        plan = install_profile_plan(install_profile)
+    selected_profile = str(install_profile or "").strip()
+    # An installer-selected profile is the default for new projects. A
+    # command-line profile still wins, and an isolated test/portable checkout
+    # with no profile file retains the historical project-subtitle default.
+    if not selected_profile and install_profile_settings_path().is_file():
+        selected_profile = str(load_install_profile().get("profile", "")).strip()
+    if selected_profile:
+        plan = install_profile_plan(selected_profile)
         if not selected_mode:
             selected_mode = str(plan["audio_mode"])
         if not selected_source:
