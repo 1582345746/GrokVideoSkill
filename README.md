@@ -41,7 +41,7 @@ cd GrokVideoSkill
 .\install.ps1 -Force -Interactive
 ```
 
-向导会询问档位、密钥和本地服务下载授权。自动化安装使用 `-InstallProfile`；涉及本地服务时必须额外传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。
+向导会询问档位、密钥、系统依赖安装和本地服务下载授权。自动化安装使用 `-InstallProfile`；允许 winget 安装 FFmpeg/Docker 时额外传 `-InstallSystemDependencies -AcceptSystemDependencyChanges`；涉及本地服务模型时还必须传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。NVIDIA 驱动由用户手动安装，安装器只检测不替换。
 
 维护命令：`.\install.ps1 -Check` 只检查当前安装；`.\install.ps1 -Repair -Force` 修复安装并在失败时回滚；`.\install.ps1 -Uninstall` 只移除技能目录，不删除 Key、项目、组件源码或模型。
 
@@ -124,3 +124,5 @@ cd GrokVideoSkill
 - 技术 QA 不能替代人工观片。角色漂移、异常肢体、意外 UI、字幕、Logo 和水印必须逐镜头检查。
 
 详细工作流和命令见 [`grok-video-studio/SKILL.md`](grok-video-studio/SKILL.md)。
+
+产品化架构、权限、安全、升级和发布验收项见 [`docs/productization-checklist.md`](docs/productization-checklist.md)。

@@ -1,0 +1,61 @@
+# Grok Video Studio Productization Checklist
+
+This checklist is the release contract for the two supported distribution paths.
+
+## Distribution Contracts
+
+- [x] Codex-managed installation is documented in `grok-video-studio/SKILL.md`.
+- [x] Provider keys are accepted through one stdin JSON payload and stored with Windows DPAPI.
+- [x] The Skill directory and project contracts reject credential-like fields.
+- [x] `install-plan` is side-effect free and reports profile, dependencies, key roles, GPU requirement, model storage, and consent.
+- [x] User-facing profiles are `basic`, `upstream-dialogue`, `precise-subtitles`, `precise-voice`, and `lip-sync`.
+- [x] Legacy component names remain accepted as aliases.
+- [x] Standalone `install.ps1 -Interactive` selects a profile, prompts for keys without echo, and asks before local model downloads.
+- [x] `install.ps1 -Check`, `-Repair -Force`, and `-Uninstall` have explicit, bounded behavior.
+- [x] Skill upgrades preserve a timestamped previous copy and restore it when the copy/validation phase fails.
+
+## Media Capability Contracts
+
+- [x] Text-to-video and image-to-video remain separate provider routes.
+- [x] Supplied-image animation is an image-to-video project, not a third route.
+- [x] Character master sheets and per-shot keyframes are reusable in standalone and episodic projects.
+- [x] Series projects keep season canon, episode approval, and accepted continuity state.
+- [x] News projects require sources and claim mappings before paid generation.
+- [x] `audio.subtitle_source=upstream|project|none` is independent from audio mode.
+- [x] Local subtitle burn creates a derivative and never overwrites `final.mp4`.
+- [x] Native provider dialogue is explicitly labeled generative and requires visual/listening review.
+- [x] Local voice and lip-sync are optional and can resume from cached line audio.
+- [x] Clean-frame prompts default to no UI, comments, captions, logos, watermarks, or stickers.
+
+## Security And Permissions
+
+- [x] No provider key is present in source, documentation examples, project JSON, command-line arguments, or Git history introduced by this release.
+- [x] Optional service URLs are restricted to host loopback.
+- [x] Component sources and model revisions are pinned.
+- [x] Docker/model downloads require explicit `--accept-downloads` approval.
+- [x] Uninstall preserves credentials, projects, component checkouts, and model weights.
+- [ ] Release artifacts are code-signed and published with checksums.
+- [ ] A secret-scanning job runs in CI for every release.
+
+## Dependency And Upgrade Work
+
+- [x] FFmpeg/ffprobe, Docker, and NVIDIA availability are reported before optional setup.
+- [x] CosyVoice and MuseTalk Docker builds are isolated from the host Python environment.
+- [x] 8 GB GPU staged startup is documented and enforced for the full-dialogue profile.
+- [x] Optional FFmpeg/Docker system dependency installation through a separately approved winget step; NVIDIA drivers remain manual.
+- [ ] Disk-space preflight, resumable model downloads, and per-file integrity verification.
+- [ ] Component source/runtime migration and rollback after a failed upgrade.
+- [ ] A signed standalone release bundle that includes the installer and version manifest.
+
+## Release Acceptance
+
+- [x] Python unit/integration suite: 53 tests passing on Windows development machine.
+- [x] Installed copy reports version `1.7.0` and passes `-Check`.
+- [x] Real QuickAI provider and real CosyVoice/MuseTalk GPU acceptance artifacts exist from the preceding release gate.
+- [x] No local service is started by the default `basic` installation.
+- [ ] Interactive installer end-to-end test with redacted test credentials in a clean Windows profile.
+- [ ] Fresh-machine acceptance for each of the five profiles.
+- [ ] Reinstall/repair/uninstall acceptance with a locked file and a failed component download.
+- [ ] Final release on `main` plus GitHub Release notes, installation wording, and user usage wording.
+
+The unchecked items are release-blocking for a signed public installer, but they do not prevent Codex-managed use of the current Skill or the transparent PowerShell installer.

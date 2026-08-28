@@ -55,6 +55,12 @@ def resolve_install_profile(profile: str) -> tuple[str, dict[str, Any]]:
 def _dependency_status(dependency: str) -> dict[str, Any]:
     executable = {"ffmpeg": "ffmpeg", "docker": "docker", "nvidia-gpu": "nvidia-smi"}.get(dependency)
     installed = bool(executable and shutil.which(executable))
+    packages = {
+        "ffmpeg": {"manager": "winget", "id": "Gyan.FFmpeg", "installable": True},
+        "docker": {"manager": "winget", "id": "Docker.DockerDesktop", "installable": True},
+        "nvidia-gpu": {"manager": None, "id": None, "installable": False},
+    }
+    package = packages.get(dependency, {"manager": None, "id": None, "installable": False})
     methods = {
         "ffmpeg": "Install FFmpeg and ffprobe, or expose them on PATH.",
         "docker": "Install Docker Desktop with the WSL2 backend.",
@@ -64,6 +70,9 @@ def _dependency_status(dependency: str) -> dict[str, Any]:
         "id": dependency,
         "installed": installed,
         "required": True,
+        "package_manager": package["manager"],
+        "package_id": package["id"],
+        "auto_installable": package["installable"],
         "install_hint": methods.get(dependency, "Install the dependency before using this profile."),
     }
 

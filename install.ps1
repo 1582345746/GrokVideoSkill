@@ -19,6 +19,8 @@ param(
     [switch]$InstallComponents,
     [switch]$IncludeComponentModels,
     [switch]$AcceptComponentDownloads,
+    [switch]$InstallSystemDependencies,
+    [switch]$AcceptSystemDependencyChanges,
     [switch]$StartComponents,
     [ValidateSet("cosyvoice", "musetalk", "all")]
     [string]$StartComponent
@@ -131,6 +133,20 @@ if ($Interactive -and $selectedInstallProfile -in @("precise-voice", "lip-sync")
         $AcceptComponentDownloads = $true
     }
 }
+if ($Interactive) {
+    $needsDocker = $selectedInstallProfile -in @("precise-voice", "lip-sync") -and -not (Get-Command docker -ErrorAction SilentlyContinue)
+    $needsFfmpeg = -not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)
+    if ($needsDocker -or $needsFfmpeg) {
+        $systemChoice = Read-Host "Install missing FFmpeg/Docker system dependencies through winget? (y/N)"
+        if ($systemChoice.Trim().ToLowerInvariant() -in @("y", "yes")) {
+            $InstallSystemDependencies = $true
+            $AcceptSystemDependencyChanges = $true
+        }
+    }
+}
+if ($InstallSystemDependencies -and -not $AcceptSystemDependencyChanges) {
+    throw "System dependency installation requires -AcceptSystemDependencyChanges after the user approves package-manager changes."
+}
 if ($Interactive -and $InstallComponents -and $selectedInstallProfile -eq "lip-sync") {
     $startChoice = Read-Host "Start a local service after installation? Use cosyvoice, musetalk, all, or N (default: N)"
     if ($startChoice.Trim().ToLowerInvariant() -in @("cosyvoice", "musetalk", "all")) {
@@ -174,6 +190,35 @@ try {
 & $Python $cli install-plan --profile $selectedInstallProfile
 if ($LASTEXITCODE -ne 0) {
     throw "Install profile plan check failed."
+}
+if ($InstallSystemDependencies) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        throw "winget is required for approved system dependency installation. Install App Installer or install dependencies manually."
+    }
+    $systemDependencies = @()
+    if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+        $systemDependencies += "ffmpeg"
+    }
+    if ($selectedInstallProfile -in @("precise-voice", "lip-sync") -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        $systemDependencies += "docker"
+    }
+    if ($selectedInstallProfile -in @("precise-voice", "lip-sync") -and -not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        throw "NVIDIA GPU dependency is not installed; install a compatible NVIDIA driver manually before using this profile."
+    }
+    foreach ($dependency in $systemDependencies) {
+        $packageId = if ($dependency -eq "ffmpeg") { "Gyan.FFmpeg" } else { "Docker.DockerDesktop" }
+        Write-Host "Installing $dependency through winget package $packageId"
+        & winget install --id $packageId --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
+        if ($LASTEXITCODE -ne 0) {
+            throw "winget failed while installing $packageId."
+        }
+    }
+    if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue) -or -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+        throw "FFmpeg was installed but is not visible in this PowerShell session; restart the shell and run the installer again."
+    }
+    if ($selectedInstallProfile -in @("precise-voice", "lip-sync") -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        throw "Docker Desktop was installed but is not visible in this PowerShell session; restart the shell and run the installer again."
+    }
 }
 if ($Configure -or $ConfigureFromStdin) {
     $arguments = @($cli, "configure")

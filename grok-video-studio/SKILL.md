@@ -29,7 +29,7 @@ The repository also contains a transparent standalone PowerShell installer:
 .\install.ps1 -Force -Interactive
 ```
 
-The wizard asks for a capability profile, prompts for keys through the CLI's hidden input, and asks separately before downloading optional services and models. For automation, use `-InstallProfile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`; local downloads additionally require `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`. `-ConfigureFromStdin` remains the non-echoed JSON path for managed Codex installs.
+The wizard asks for a capability profile, prompts for keys through the CLI's hidden input, and asks separately before installing system dependencies or downloading optional services and models. For automation, use `-InstallProfile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`; approved system package installation additionally requires `-InstallSystemDependencies -AcceptSystemDependencyChanges`, while local model downloads require `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`. `-ConfigureFromStdin` remains the non-echoed JSON path for managed Codex installs.
 
 The selected profile is saved as non-secret metadata in the per-user config directory and is exposed by `capabilities`; project files still need an explicit `audio.mode` and `audio.subtitle_source` so one installation can produce both clean and dialogue deliveries.
 
