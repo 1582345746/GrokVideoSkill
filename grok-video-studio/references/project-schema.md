@@ -39,8 +39,10 @@
     "video_size": "1280x720",
     "video_seconds": 6,
     "video_resolution": "480p",
-    "video_aspect_ratio": "16:9"
+    "video_aspect_ratio": "16:9",
+    "audio_policy": "preserve"
   },
+  "allow_ui_elements": false,
   "limits": {
     "max_image_requests": 12,
     "max_video_requests": 8,
@@ -88,6 +90,8 @@
 Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed 4096 characters; 3800 is the recommended working ceiling. Limits are hard preflight gates and request counts include a generated character master.
 
 `video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`. New text-to-video projects default to QuickAI and do not generate keyframes. New image-to-video projects default to QuickAI New. Projects created before these fields existed retain the legacy image-to-video plus QuickAI New interpretation. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+
+`defaults.audio_policy` is `preserve` by default. Assembly preserves source audio and inserts silent AAC audio for clips that have no audio, keeping the final timeline stream-compatible. Set it to `mute` only when a silent delivery is intentional. `allow_ui_elements` defaults to `false`; a shot may set it to `true` only when the script explicitly shows an app or social-video interface. The clean-frame rule is a prompt constraint and still requires visual QA because an upstream model can hallucinate overlays.
 
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 

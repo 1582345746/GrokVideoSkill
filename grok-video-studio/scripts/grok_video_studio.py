@@ -31,11 +31,11 @@ from gvs_common import (
     save_settings,
 )
 from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
-from media_tools import extract_cover, postprocess_video, quality_report
+from media_tools import export_review_frames, extract_cover, postprocess_video, quality_report
 from provider_contracts import task_progress
 
 
-SKILL_VERSION = "1.3.0"
+SKILL_VERSION = "1.4.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -45,6 +45,7 @@ MAX_CREDENTIAL_PAYLOAD_CHARS = 32768
 SHOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "3:2"}
+VIDEO_AUDIO_POLICIES = {"preserve", "mute"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 TERMINAL_FAILURES = {"failed", "submission_unknown"}
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -204,6 +205,17 @@ def video_aspect_ratio(project: dict[str, Any], shot: dict[str, Any]) -> str:
     return str(shot.get("video_aspect_ratio", defaults.get("video_aspect_ratio", "16:9"))).strip()
 
 
+def allow_ui_elements(project: dict[str, Any], shot: dict[str, Any] | None = None) -> bool:
+    if shot is not None and "allow_ui_elements" in shot:
+        return bool(shot.get("allow_ui_elements"))
+    return bool(project.get("allow_ui_elements", False))
+
+
+def audio_policy(project: dict[str, Any]) -> str:
+    defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
+    return str(defaults.get("audio_policy", "preserve")).strip().lower()
+
+
 def character_master_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("character_master")
     return value if isinstance(value, dict) else {}
@@ -339,6 +351,10 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("project.video_mode must be text-to-video or image-to-video")
     if provider and provider not in {"quickai", "quickainew"}:
         errors.append("project.video_provider must be quickai or quickainew")
+    if project.get("allow_ui_elements") is not None and not isinstance(project.get("allow_ui_elements"), bool):
+        errors.append("project.allow_ui_elements must be a boolean")
+    if audio_policy(project) not in VIDEO_AUDIO_POLICIES:
+        errors.append("defaults.audio_policy must be preserve or mute")
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -453,6 +469,8 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.scene_id must use lowercase letters, digits, and hyphens")
         if raw_shot.get("wardrobe") is not None and not isinstance(raw_shot.get("wardrobe"), dict):
             errors.append(f"{prefix}.wardrobe must map character ids to wardrobe descriptions")
+        if raw_shot.get("allow_ui_elements") is not None and not isinstance(raw_shot.get("allow_ui_elements"), bool):
+            errors.append(f"{prefix}.allow_ui_elements must be a boolean")
         if str(raw_shot.get("image_prompt", "")).strip():
             image_prompt = composed_image_prompt(project, raw_shot)
             if len(image_prompt) > max_prompt_chars:
@@ -571,6 +589,11 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     structured = structured_shot_context(project, shot)
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
+    if not allow_ui_elements(project, shot):
+        sections.append(
+            "[CLEAN FRAME POLICY]\n"
+            "Clean filmed scene. No app UI, controls, overlays, text, logos, watermarks, captions, counters, comments, or stickers anywhere in frame."
+        )
     sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
     return "\n\n".join(sections)
 
@@ -580,23 +603,47 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     character = str(project.get("character_bible", "")).strip()
     style = str(project.get("style_bible", "")).strip()
     if character:
-        sections.append("[IDENTITY LOCK]\n" + character)
+        sections.append(
+            "[IDENTITY LOCK]\n"
+            "Same character every shot; preserve face, hair, body, clothes, props, and colors.\n" + character
+        )
     if style:
         sections.append("[STYLE LOCK]\n" + style)
     structured = structured_shot_context(project, shot)
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
+    if not allow_ui_elements(project, shot):
+        sections.append(
+            "[CLEAN FRAME POLICY]\n"
+            "Clean cinematic frame. No app UI, controls, overlays, text, logos, watermarks, captions, counters, comments, or stickers anywhere in frame."
+        )
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
     return "\n\n".join(sections)
 
 
 def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
     master = character_master_config(project)
+    limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
+    try:
+        prompt_limit = min(int(limits.get("max_prompt_chars", HARD_PROMPT_CHARS)), HARD_PROMPT_CHARS)
+    except (TypeError, ValueError):
+        prompt_limit = HARD_PROMPT_CHARS
     prompts: list[dict[str, Any]] = []
     warnings: list[str] = []
     if bool(master.get("enabled", False)) and bool(master.get("generate", False)) and str(master.get("prompt", "")).strip():
         value = composed_character_prompt(project)
-        prompts.append({"kind": "character_master", "id": "character-master", "characters": len(value)})
+        characters = len(value)
+        prompts.append(
+            {
+                "kind": "character_master",
+                "id": "character-master",
+                "characters": characters,
+                "hard_limit": prompt_limit,
+                "safe_limit": SAFE_PROMPT_CHARS,
+                "remaining": prompt_limit - characters,
+                "within_hard_limit": characters <= prompt_limit,
+            }
+        )
     total_seconds = 0
     image_requests = int(bool(master.get("enabled", False)) and bool(master.get("generate", False)))
     for shot in project.get("shots", []):
@@ -607,10 +654,32 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
             image_requests += 1
         if str(shot.get("image_prompt", "")).strip():
             value = composed_image_prompt(project, shot)
-            prompts.append({"kind": "image", "id": shot_id, "characters": len(value)})
+            characters = len(value)
+            prompts.append(
+                {
+                    "kind": "image",
+                    "id": shot_id,
+                    "characters": characters,
+                    "hard_limit": prompt_limit,
+                    "safe_limit": SAFE_PROMPT_CHARS,
+                    "remaining": prompt_limit - characters,
+                    "within_hard_limit": characters <= prompt_limit,
+                }
+            )
         if str(shot.get("video_prompt", "")).strip():
             value = composed_video_prompt(project, shot)
-            prompts.append({"kind": "video", "id": shot_id, "characters": len(value)})
+            characters = len(value)
+            prompts.append(
+                {
+                    "kind": "video",
+                    "id": shot_id,
+                    "characters": characters,
+                    "hard_limit": prompt_limit,
+                    "safe_limit": SAFE_PROMPT_CHARS,
+                    "remaining": prompt_limit - characters,
+                    "within_hard_limit": characters <= prompt_limit,
+                }
+            )
         seconds = shot_value(project, shot, "seconds", 6)
         if isinstance(seconds, int) and not isinstance(seconds, bool):
             total_seconds += seconds
@@ -621,7 +690,12 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
             warnings.append(
                 f"{item['kind']} prompt {item['id']} uses {item['characters']} characters; keep it at or below {SAFE_PROMPT_CHARS} for provider headroom"
             )
-    video_requests = len([shot for shot in project.get("shots", []) if isinstance(shot, dict)])
+    shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    if video_mode(project) == "text-to-video" and len(shots) > 1 and (str(project.get("character_bible", "")).strip() or project_characters(project)):
+        warnings.append(
+            "multi-shot text-to-video identity continuity is prompt-only; use image-to-video with a character master and per-shot keyframes when strict identity is required"
+        )
+    video_requests = len(shots)
     try:
         cost = estimated_project_cost(project, image_requests=image_requests, video_requests=video_requests)
     except SkillError as error:
@@ -636,7 +710,8 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
         },
         "total_video_seconds": total_seconds,
         "max_clip_seconds": MAX_VIDEO_SECONDS,
-        "prompt_hard_limit": HARD_PROMPT_CHARS,
+        "prompt_hard_limit": prompt_limit,
+        "prompt_safe_limit": SAFE_PROMPT_CHARS,
         "prompts": prompts,
         "budget": cost,
         "warnings": warnings,
@@ -673,6 +748,7 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
             "character identity and wardrobe across adjacent shots",
             "screen direction, eyeline, prop placement, and scene lighting",
             "hands, limbs, facial anatomy, and motion naturalness",
+            "clean frame: no unintended app UI, captions, logos, watermarks, or overlay text",
         ],
     }
 
@@ -1062,9 +1138,11 @@ def _run_ffmpeg(command: list[str], action: str) -> None:
         raise SkillError(f"ffmpeg failed while {action}: {detail}")
 
 
-def assemble_clips(clips: list[Path], output: Path, *, target_size: str) -> dict[str, Any]:
+def assemble_clips(clips: list[Path], output: Path, *, target_size: str, audio_policy: str = "preserve") -> dict[str, Any]:
     if not clips:
         raise SkillError("at least one clip is required")
+    if audio_policy not in {"preserve", "mute"}:
+        raise SkillError("audio policy must be preserve or mute")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise SkillError("ffmpeg is required to assemble clips")
@@ -1090,31 +1168,18 @@ def assemble_clips(clips: list[Path], output: Path, *, target_size: str) -> dict
         )
         for index, clip in enumerate(clips, 1):
             segment = temp_root / f"segment-{index:03d}.mp4"
-            _run_ffmpeg(
-                [
-                    ffmpeg,
-                    "-y",
-                    "-i",
-                    str(clip),
-                    "-map",
-                    "0:v:0",
-                    "-vf",
-                    filter_value,
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    "medium",
-                    "-crf",
-                    "18",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-an",
-                    "-movflags",
-                    "+faststart",
-                    str(segment),
-                ],
-                f"normalizing clip {index}",
-            )
+            command = [ffmpeg, "-y", "-i", str(clip)]
+            source_audio_index = 0
+            if audio_policy == "preserve" and not inputs[index - 1]["has_audio"]:
+                command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
+                source_audio_index = 1
+            command.extend(["-map", "0:v:0", "-vf", filter_value, "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"])
+            if audio_policy == "preserve":
+                command.extend(["-map", f"{source_audio_index}:a:0", "-af", "apad", "-t", f"{inputs[index - 1]['duration']:.3f}", "-c:a", "aac", "-ar", "48000", "-ac", "2"])
+            else:
+                command.append("-an")
+            command.extend(["-movflags", "+faststart", str(segment)])
+            _run_ffmpeg(command, f"normalizing clip {index}")
             probe_media(segment)
             normalized.append(segment)
         concat = temp_root / "concat.txt"
@@ -1132,9 +1197,13 @@ def assemble_clips(clips: list[Path], output: Path, *, target_size: str) -> dict
         raise SkillError("assembled video dimensions do not match the requested target")
     if media["codec"] != "h264" or media["pixel_format"] != "yuv420p":
         raise SkillError("assembled video is not H.264 yuv420p")
+    if audio_policy == "preserve" and not media["has_audio"]:
+        raise SkillError("assembled video did not preserve or synthesize an audio track")
+    if audio_policy == "mute" and media["has_audio"]:
+        raise SkillError("assembled video contains audio despite mute policy")
     if media["duration"] < expected_duration * 0.85:
         raise SkillError("assembled video duration is unexpectedly shorter than its input clips")
-    return {"path": str(output), "bytes": output.stat().st_size, **media, "clip_count": len(clips)}
+    return {"path": str(output), "bytes": output.stat().st_size, **media, "clip_count": len(clips), "audio_policy": audio_policy}
 
 
 def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
@@ -1148,7 +1217,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
         clips.append(resolve_project_path(root, str(video["path"])))
     output = root / "deliverables" / "final.mp4"
     target_size = str(project.get("defaults", {}).get("video_size") or "auto")
-    media = assemble_clips(clips, output, target_size=target_size)
+    media = assemble_clips(clips, output, target_size=target_size, audio_policy=audio_policy(project))
     qa = quality_report(output, expected_size=target_size, expected_duration=sum(probe_media(path)["duration"] for path in clips))
     state.setdefault("deliverables", {})["final"] = {
         "path": output.relative_to(root).as_posix(),
@@ -1165,6 +1234,7 @@ def qa_project(root: Path) -> dict[str, Any]:
     project = require_valid_project(root)
     state = load_state(root)
     reports: list[dict[str, Any]] = []
+    review_root = root / "deliverables" / "qa-frames"
     for shot in project["shots"]:
         shot_id = str(shot["id"])
         runtime = shot_state(state, shot_id)["video"]
@@ -1177,6 +1247,10 @@ def qa_project(root: Path) -> dict[str, Any]:
             expected_size=str(shot_value(project, shot, "video_size", "1280x720")),
             expected_duration=float(shot_value(project, shot, "seconds", 6)),
         )
+        review_frames = export_review_frames(path, review_root, stem=shot_id)
+        report["review_frames"] = [
+            {**frame, "path": Path(str(frame["path"])).relative_to(root).as_posix()} for frame in review_frames
+        ]
         runtime["qa"] = portable_qa(report)
         reports.append({"kind": "clip", "id": shot_id, **report})
     final = state.get("deliverables", {}).get("final", {})
@@ -1187,6 +1261,17 @@ def qa_project(root: Path) -> dict[str, Any]:
             expected_size=str(project.get("defaults", {}).get("video_size") or "auto"),
             expected_duration=float(preflight_report(project)["total_video_seconds"]),
         )
+        expected_audio_policy = audio_policy(project)
+        if expected_audio_policy == "preserve" and not report["media"]["has_audio"]:
+            report["errors"].append("final delivery has no audio track while defaults.audio_policy is preserve")
+            report["ok"] = False
+        elif expected_audio_policy == "mute" and report["media"]["has_audio"]:
+            report["errors"].append("final delivery contains audio while defaults.audio_policy is mute")
+            report["ok"] = False
+        review_frames = export_review_frames(final_path, review_root, stem="final")
+        report["review_frames"] = [
+            {**frame, "path": Path(str(frame["path"])).relative_to(root).as_posix()} for frame in review_frames
+        ]
         final["qa"] = portable_qa(report)
         reports.append({"kind": "deliverable", "id": "final", **report})
     save_state(root, state)
@@ -1196,6 +1281,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         "technical_ok": technical_ok,
         "reports": reports,
         "project_audit": audit_project(root, project),
+        "visual_review_required": True,
         "manual_review_complete": False,
     }
 
@@ -1297,7 +1383,9 @@ def init_project(
             "video_seconds": shot_durations[0],
             "video_resolution": video_resolution_value,
             "video_aspect_ratio": video_aspect_ratio_value,
+            "audio_policy": "preserve",
         },
+        "allow_ui_elements": False,
         "limits": {
             "max_image_requests": max(12, len(shot_durations) + int(uses_master)),
             "max_video_requests": max(8, len(shot_durations)),
@@ -1567,6 +1655,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_files.add_argument("output", type=Path)
     assemble_files.add_argument("clips", type=Path, nargs="+")
     assemble_files.add_argument("--target-size", default="auto")
+    assemble_files.add_argument("--audio-policy", choices=("preserve", "mute"), default="preserve")
 
     postprocess = commands.add_parser("postprocess", help="Add optional music, voice, burned subtitles, and fades to an MP4.")
     postprocess.add_argument("input", type=Path)
@@ -1633,7 +1722,7 @@ def main() -> int:
             for clip in clips:
                 if not clip.is_file():
                     raise SkillError(f"clip does not exist: {clip}")
-            media = assemble_clips(clips, args.output.resolve(), target_size=args.target_size)
+            media = assemble_clips(clips, args.output.resolve(), target_size=args.target_size, audio_policy=args.audio_policy)
             print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
             return 0
         if args.command == "postprocess":

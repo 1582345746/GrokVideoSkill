@@ -1,11 +1,11 @@
 ---
 name: grok-video-studio
-description: Plan and build resumable AI video projects with QuickAI image generation, QuickAI New Grok video generation, editable workflow templates, single-sheet character masters, dynamic shot planning, validated MP4 downloads, and arbitrary clip assembly. Use for text-to-video, image-to-video, single-image animation, character consistency, dance or comedy motion, product ads, scene animation, multi-shot narratives, short drama, screenplay or shot-list creation, batch generation, or requests such as 写剧本、生图、生视频、图生视频、分镜视频、角色一致性视频、人物三视图、短剧、批量生成视频 or 合并视频.
+description: Plan and build resumable AI video projects with QuickAI and QuickAI New image/video generation, editable workflow templates, character masters, dynamic shot planning, clean-frame review, audio-preserving assembly, validated MP4 downloads, and lightweight post-production. Use for text-to-video, image-to-video, single-image animation, character consistency, product ads, scene animation, multi-shot narratives, short drama, screenplay or shot-list creation, batch generation, or requests such as 写剧本、生图、生视频、图生视频、分镜视频、角色一致性视频、人物三视图、短剧、批量生成视频 or 合并视频.
 ---
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.3.0`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.4.0`.
 
 ## Setup
 
@@ -64,7 +64,9 @@ Run `generate-character` independently or let `run` create it before shot keyfra
 
 Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. `--retry-failed` requires `--retry-reason "..."`; the reason and prior task state are preserved in history. Polling, model discovery, and content download may retry safely with bounded backoff and a circuit breaker.
 
-Keep every final composed image and video prompt at or below 4096 characters. Treat 3800 characters as the working ceiling. The preflight and API clients enforce this; do not silently truncate creative instructions.
+Keep every final composed image and video prompt at or below 4096 characters. This is the tested QuickAI boundary inclusive; treat 3800 characters as the working ceiling. Preflight reports the final length and remaining budget, and the preflight/API clients enforce the hard limit without silently truncating creative instructions.
+
+Projects default to a clean frame (`allow_ui_elements=false`): generated footage must not contain accidental app controls, counters, comments, captions, logos, watermarks, or stickers. Set the project or shot override to `true` only when the script intentionally depicts an interface, then review that shot visually.
 
 Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` or `image-to-video`; `video_provider` is `quickai` or `quickainew`; resolution is `480p`, `720p`, or `1080p`; aspect ratio is provider-supported. T2V never sends reference images, even when an old keyframe exists in state. I2V sends only explicit references or the current shot keyframe.
 
@@ -72,9 +74,9 @@ Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` 
 
 1. Require the single-sheet character master when enabled and every requested keyframe when `generate_image` is true.
 2. Require every video to have a `.mp4` filename, MP4 signature, readable video stream, positive duration, and valid dimensions.
-3. Normalize assembled output to H.264, `yuv420p`, 30 fps, and the requested canvas; core assembly intentionally omits audio.
+3. Normalize assembled output to H.264, `yuv420p`, 30 fps, and the requested canvas. Assembly preserves source audio by default and inserts silent AAC for clips without audio; set `defaults.audio_policy` to `mute` only for an intentional silent delivery.
 4. Check `deliverables/final.mp4` and its recorded media metadata.
-5. Run `qa <project-folder>`. Treat orientation/dimension errors as technical failures; review black/freeze warnings. Identity, wardrobe, hands, limbs, facial anatomy, and motion naturalness always require human or visual-model review.
+5. Run `qa <project-folder>`. Treat orientation/dimension errors as technical failures and review black/freeze warnings. Open every image listed under `review_frames`, including the end frame of every shot; reject unintended UI, captions, logos, watermarks, identity drift, anatomy defects, and unnatural motion before delivery. Technical QA never marks this visual review complete automatically.
 6. Report failed or unresolved task IDs without exposing credentials.
 7. Preserve `state.json`; it is the resume contract and contains no secrets.
 

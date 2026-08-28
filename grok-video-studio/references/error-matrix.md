@@ -18,6 +18,9 @@
 | Completed status but no playable file | Result retrieval | Retry `/content`, then an advertised HTTPS result URL; verify MP4 bytes. |
 | QA orientation or dimensions mismatch | Provider output contract | Regenerate the affected shot or deliberately normalize it during assembly; review cropping before delivery. |
 | Resolution downgraded by upstream | Provider output contract | Record requested and observed resolution in state/QA; do not report it as an exact match. |
+| Final assembly has no audio | Local assembly policy | Keep `defaults.audio_policy=preserve`; assembly retains source audio and adds silent AAC to clips without audio. Use `mute` only intentionally. |
+| App controls, likes, comments, captions, or watermarks appear | Generative visual artifact | Keep `allow_ui_elements=false`, regenerate the affected shot, and inspect every exported QA review frame before delivery. Do not crop blindly when overlays cover story content. |
+| Character appearance changes between T2V shots | Model continuity limit | Use concise identity locks for best effort. For strict continuity, switch to image-to-video with one character master and a per-shot keyframe. |
 | I2V reference field rejected | Provider contract | Verify QuickAI JSON uses `input_reference` for one image or `reference_images` for multiple; QuickAI New uses repeated multipart `input_reference`. |
 | `ffprobe` or assembly validation fails | Local media QA | Install FFmpeg/FFprobe, inspect the reported stream metadata, and normalize clips before assembling. |
 | Browser history lacks the task | Expected direct mode behavior | The local project is the source of truth; direct Skill tasks do not enter Canvas IndexedDB. |

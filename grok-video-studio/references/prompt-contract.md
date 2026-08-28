@@ -6,7 +6,7 @@ Write a concise story, then split it into shots that can each be represented by 
 
 ## Prompt budget
 
-The provider limit applies after `character_bible`, `style_bible`, and shot text are composed. Keep each final prompt at or below 4096 characters, with 3800 as the working ceiling. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt.
+The provider limit applies after `character_bible`, `style_bible`, structured continuity, clean-frame policy, and shot text are composed. The tested QuickAI boundary is 4096 characters inclusive; keep each final prompt at or below 4096 characters, with 3800 as the working ceiling. Preflight reports the final length, hard-limit remainder, and safe-limit status. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt.
 
 ## Single-sheet character master
 
@@ -24,7 +24,7 @@ Combine character identity, environment, framing, lighting, visual style, and co
 
 ## Video prompt
 
-Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Do not put dialogue, subtitles, music, or multiple scene cuts into a single generation prompt unless the provider explicitly supports them.
+Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Unless the script explicitly calls for an interface, keep the frame clean: no app UI, controls, counters, comments, captions, logos, watermarks, or stickers. Do not put dialogue, subtitles, music, or multiple scene cuts into a single generation prompt unless the provider explicitly supports them.
 
 ## Multi-reference use
 

@@ -118,9 +118,35 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
         "manual_review_required": [
             "character identity and wardrobe continuity",
             "hands, fingers, limbs, and facial anatomy",
-            "motion naturalness, camera continuity, text, logos, and watermarks",
+            "motion naturalness and camera continuity",
+            "clean frame: reject unintended app UI, buttons, counters, comments, captions, logos, and watermarks",
         ],
     }
+
+
+def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count: int = 3) -> list[dict[str, Any]]:
+    if count < 1 or count > 9:
+        raise SkillError("review frame count must be from 1 to 9")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required to export review frames")
+    media = probe_media(input_path)
+    safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", stem).strip("-") or "video"
+    fractions = [0.5] if count == 1 else [0.05 + index * 0.95 / (count - 1) for index in range(count)]
+    output_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[dict[str, Any]] = []
+    for index, fraction in enumerate(fractions, 1):
+        at = max(0.0, min(media["duration"] * fraction, max(0.0, media["duration"] - 0.05)))
+        output = output_dir / f"{safe_stem}-review-{index:02d}.jpg"
+        _run(
+            [ffmpeg, "-y", "-ss", f"{at:.3f}", "-i", str(input_path), "-frames:v", "1", "-update", "1", "-q:v", "2", str(output)],
+            f"exporting review frame {index}",
+            timeout=120,
+        )
+        if not output.is_file() or output.stat().st_size == 0:
+            raise SkillError(f"review frame export produced no image: {output.name}")
+        frames.append({"path": str(output.resolve()), "at_seconds": round(at, 3), "bytes": output.stat().st_size})
+    return frames
 
 
 def _subtitle_filter(path: Path) -> str:
