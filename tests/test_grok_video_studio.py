@@ -1156,6 +1156,31 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(value["audio"]["generate_audio"])
         self.assertEqual(value["audio"]["subtitle_source"], "upstream")
 
+    def test_init_can_inherit_user_facing_install_profile(self) -> None:
+        project = self.root / "profile-contract"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Profile contract",
+            "--topic",
+            "Precise voice",
+            "--workflow",
+            "text-to-video",
+            "--mode",
+            "text-to-video",
+            "--install-profile",
+            "precise-voice",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(value["audio"]["mode"], "local-voice")
+        self.assertFalse(value["audio"]["generate_audio"])
+        self.assertEqual(value["audio"]["subtitle_source"], "project")
+
     def test_full_dialogue_start_requires_an_explicit_gpu_stage(self) -> None:
         configured = self.run_cli(
             "components-configure",
@@ -1181,6 +1206,10 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("InstallProfile", source)
         self.assertIn("Interactive", source)
         self.assertIn("install-plan", source)
+        self.assertIn("$Check", source)
+        self.assertIn("$Repair", source)
+        self.assertIn("$Uninstall", source)
+        self.assertIn("Previous installation preserved", source)
         self.assertIn('[ValidateSet("cosyvoice", "musetalk", "all")]', source)
         self.assertIn("-StartComponents with full-dialogue requires -StartComponent", source)
 

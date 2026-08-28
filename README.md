@@ -43,6 +43,8 @@ cd GrokVideoSkill
 
 向导会询问档位、密钥和本地服务下载授权。自动化安装使用 `-InstallProfile`；涉及本地服务时必须额外传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。
 
+维护命令：`.\install.ps1 -Check` 只检查当前安装；`.\install.ps1 -Repair -Force` 修复安装并在失败时回滚；`.\install.ps1 -Uninstall` 只移除技能目录，不删除 Key、项目、组件源码或模型。
+
 配置完成后，凭据按职责分开使用：
 
 | 凭据 | 用途 |
@@ -56,6 +58,8 @@ cd GrokVideoSkill
 本地服务是可选组件。`core` 和 `native-dialogue` 不增加安装负担；`local-voice`/`full-dialogue` 需要 Docker Desktop、NVIDIA GPU 支持和较大的模型下载。Codex 会先运行 `components-plan` 展示来源、固定提交、目录和服务端口，获得同意后才运行安装。服务只发布到本机 `127.0.0.1`，不用时可停止，项目和模型不会被删除。
 
 字幕来源和音频路线独立选择：`audio.subtitle_source=upstream` 保留上游/原片字幕，`project` 生成可审校的确定性 SRT，`none` 不输出字幕。`subtitles --source project` 可在审阅后从上游默认切换到本地字幕；失败时始终保留干净母版，不需要重新付费生成。
+
+新建项目时可用 `--install-profile precise-voice` 或 `--install-profile lip-sync` 继承安装档位的对白/字幕默认值；也可以用显式 `--audio-mode`、`--subtitle-source` 覆盖，已有项目不会被安装器改写。
 
 ## 使用话术
 

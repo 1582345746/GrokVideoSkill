@@ -3,6 +3,9 @@ param(
     [string]$Destination,
     [string]$Python = "python",
     [switch]$Force,
+    [switch]$Repair,
+    [switch]$Check,
+    [switch]$Uninstall,
     [switch]$Configure,
     [switch]$ConfigureFromStdin,
     [switch]$SkipProviderTest,
@@ -22,6 +25,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$operationCount = @($Check, $Uninstall) | Where-Object { $_ } | Measure-Object | Select-Object -ExpandProperty Count
+if ($operationCount -gt 1) {
+    throw "Use only one of -Check or -Uninstall."
+}
+if ($Repair) {
+    $Force = $true
+}
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $source = Join-Path $repoRoot "grok-video-studio"
 if (-not (Test-Path -LiteralPath (Join-Path $source "SKILL.md") -PathType Leaf)) {
@@ -39,6 +49,44 @@ if ([string]::IsNullOrWhiteSpace($Destination)) {
 
 $sourcePath = [IO.Path]::GetFullPath($source)
 $destinationPath = [IO.Path]::GetFullPath($Destination)
+
+if ($Check) {
+    if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
+        throw "Installed Skill was not found at $destinationPath"
+    }
+    $installedCli = Join-Path $destinationPath "scripts\grok_video_studio.py"
+    & $Python $installedCli version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed Skill did not pass the version check."
+    }
+    & $Python $installedCli install-plan --profile basic
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed Skill install-plan check failed."
+    }
+    Write-Host "Grok Video Studio installation is readable at $destinationPath"
+    exit 0
+}
+
+if ($Uninstall) {
+    if (-not (Test-Path -LiteralPath $destinationPath -PathType Container)) {
+        Write-Host "Grok Video Studio is not installed at $destinationPath"
+        exit 0
+    }
+    $resolvedParent = [IO.Path]::GetFullPath((Split-Path -Parent $destinationPath))
+    if (-not $destinationPath.StartsWith($resolvedParent + [IO.Path]::DirectorySeparatorChar) -or
+        [IO.Path]::GetFileName($destinationPath) -ne "grok-video-studio") {
+        throw "Refusing to remove an unexpected destination: $destinationPath"
+    }
+    $existingItem = Get-Item -LiteralPath $destinationPath -Force
+    if (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to remove a reparse-point destination: $destinationPath"
+    }
+    Remove-Item -LiteralPath $destinationPath -Recurse -Force
+    Write-Host "Removed the Grok Video Studio Skill files from $destinationPath"
+    Write-Host "User credentials, projects, component sources, and model weights were preserved."
+    exit 0
+}
+
 if ($Configure -and $ConfigureFromStdin) {
     throw "Use either -Configure or -ConfigureFromStdin, not both."
 }
@@ -96,6 +144,7 @@ if ($ConfigureFromStdin -and $Interactive) {
 
 $destinationParent = Split-Path -Parent $destinationPath
 New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+ $backupPath = $null
 if (Test-Path -LiteralPath $destinationPath) {
     if (-not $Force) {
         throw "Skill already exists at $destinationPath. Re-run with -Force to update it."
@@ -105,25 +154,27 @@ if (Test-Path -LiteralPath $destinationPath) {
         [IO.Path]::GetFileName($destinationPath) -ne "grok-video-studio") {
         throw "Refusing to replace an unexpected destination: $destinationPath"
     }
-    Remove-Item -LiteralPath $destinationPath -Recurse -Force
+    $existingItem = Get-Item -LiteralPath $destinationPath -Force
+    if (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Refusing to replace a reparse-point destination: $destinationPath"
+    }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $backupPath = Join-Path $destinationParent ".grok-video-studio-backup-$stamp"
+    Move-Item -LiteralPath $destinationPath -Destination $backupPath
 }
 
-Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Recurse -Force
-$cli = Join-Path $destinationPath "scripts\grok_video_studio.py"
-& $Python $cli version
-if ($LASTEXITCODE -ne 0) {
-    throw "Installed Skill did not pass the version check."
-}
+try {
+    Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Recurse -Force
+    $cli = Join-Path $destinationPath "scripts\grok_video_studio.py"
+    & $Python $cli version
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installed Skill did not pass the version check."
+    }
 
 & $Python $cli install-plan --profile $selectedInstallProfile
 if ($LASTEXITCODE -ne 0) {
     throw "Install profile plan check failed."
 }
-& $Python $cli install-configure --profile $selectedInstallProfile
-if ($LASTEXITCODE -ne 0) {
-    throw "Install profile configuration failed."
-}
-
 if ($Configure -or $ConfigureFromStdin) {
     $arguments = @($cli, "configure")
     if ($ConfigureFromStdin) {
@@ -171,6 +222,11 @@ if ($InstallComponents) {
     }
 }
 
+& $Python $cli install-configure --profile $selectedInstallProfile
+if ($LASTEXITCODE -ne 0) {
+    throw "Install profile configuration failed."
+}
+
 if ($StartComponents) {
     if (-not $InstallComponents -or -not $IncludeComponentModels) {
         throw "-StartComponents requires -InstallComponents and -IncludeComponentModels."
@@ -193,4 +249,17 @@ Write-Host "Install profile: $selectedInstallProfile"
 Write-Host "Component profile: $selectedComponentProfile"
 if (-not $Configure -and -not $ConfigureFromStdin) {
     Write-Host "Next: Codex can run python `"$cli`" configure --credentials-stdin --skip-test and provide the credential JSON through process stdin."
+}
+if ($backupPath) {
+    Write-Host "Previous installation preserved at $backupPath"
+}
+}
+catch {
+    if (Test-Path -LiteralPath $destinationPath -PathType Container) {
+        Remove-Item -LiteralPath $destinationPath -Recurse -Force
+    }
+    if ($backupPath -and (Test-Path -LiteralPath $backupPath -PathType Container)) {
+        Move-Item -LiteralPath $backupPath -Destination $destinationPath
+    }
+    throw
 }

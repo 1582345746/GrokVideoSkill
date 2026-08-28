@@ -33,6 +33,8 @@ The wizard asks for a capability profile, prompts for keys through the CLI's hid
 
 The selected profile is saved as non-secret metadata in the per-user config directory and is exposed by `capabilities`; project files still need an explicit `audio.mode` and `audio.subtitle_source` so one installation can produce both clean and dialogue deliveries.
 
+Use `install.ps1 -Check` to verify an existing installation without changing it, `install.ps1 -Repair -Force` to replace a damaged copy, and `install.ps1 -Uninstall` to remove only the Skill directory. Upgrades move the previous Skill directory to a timestamped sibling backup before copying; a failed copy restores the previous directory. Credentials, projects, component checkouts, and model weights are never removed by uninstall.
+
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 
 ## Select A Workflow
@@ -65,6 +67,8 @@ For exact wording or a clean subtitle-free master, recommend `local-voice` or `l
 1. Initialize a local project:
 
    `python scripts/grok_video_studio.py init <project-folder> --title "..." --topic "..." --workflow <id> --target-seconds <seconds> --mode text-to-video --video-provider quickai --video-resolution 480p`
+
+   Add `--install-profile precise-subtitles|precise-voice|lip-sync` when the project should inherit the selected audio and subtitle defaults from an installation capability profile. Explicit `--audio-mode` and `--subtitle-source` values take precedence.
 
 2. Let the CLI plan a variable number of shots from the target duration, or override with `--shots`. Every shot must be 1-15 seconds; no project is fixed to eight clips.
 3. Fill `project.json`: story, concise identity and style bibles, and every shot's image/video prompts. For speech, add stable character voice data and timed `dialogue` lines; the dialogue text is also the authoritative subtitle text. Keep stable shot and line IDs.

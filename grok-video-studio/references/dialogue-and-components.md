@@ -106,3 +106,5 @@ Managed host ports bind only to `127.0.0.1`. CosyVoice uses port `9880`; MuseTal
 For `local-lipsync` on an 8 GB card, render once with CosyVoice online so `dialogue-state.json` and the per-line WAV files are complete, stop/switch to MuseTalk, then rerun `dialogue-render`; cached lines are reused and the second pass only invokes lip sync.
 
 Source commits are pinned in `assets/components.json`. An existing checkout with local changes or another origin is never overwritten. Docker images isolate CUDA/Python dependencies from the host and the installed Skill directory remains small and updateable.
+
+The standalone installer lifecycle is recoverable: `install.ps1 -Check` is read-only, `-Repair -Force` performs a transactional replacement, and `-Uninstall` removes only Skill files. A timestamped previous-copy backup is retained after an upgrade; user credentials, projects, component sources, and model weights are outside that directory and are preserved.

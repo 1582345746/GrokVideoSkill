@@ -1947,6 +1947,23 @@ def resolve_subtitle_source(project: dict[str, Any], requested: str = "auto") ->
     return selected
 
 
+def resolve_project_audio_options(
+    audio_mode: str | None,
+    subtitle_source: str | None,
+    install_profile: str | None,
+) -> tuple[str, str]:
+    """Resolve explicit project options, optionally inheriting an install profile."""
+    selected_mode = str(audio_mode or "").strip().lower()
+    selected_source = str(subtitle_source or "").strip().lower()
+    if install_profile:
+        plan = install_profile_plan(install_profile)
+        if not selected_mode:
+            selected_mode = str(plan["audio_mode"])
+        if not selected_source:
+            selected_source = str(plan["subtitle_source"])
+    return selected_mode or "preserve", selected_source or "project"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2020,8 +2037,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
-    init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
-    init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
+    init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
+    init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
+    init.add_argument("--install-profile", help="Inherit audio and subtitle defaults from a saved installation profile.")
     init.add_argument("--seconds", type=int)
 
     series_init = commands.add_parser("series-init", help="Create a series contract and standard episode projects.")
@@ -2036,8 +2054,9 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
-    series_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
-    series_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
+    series_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
+    series_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
+    series_init.add_argument("--install-profile", help="Inherit audio and subtitle defaults from a saved installation profile.")
     series_init.add_argument("--clip-seconds", type=int)
 
     for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync"):
@@ -2092,8 +2111,9 @@ def build_parser() -> argparse.ArgumentParser:
     news_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
-    news_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
-    news_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
+    news_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
+    news_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
+    news_init.add_argument("--install-profile", help="Inherit audio and subtitle defaults from a saved installation profile.")
 
     for name in ("news-validate", "news-context"):
         command = commands.add_parser(name)
@@ -2299,6 +2319,9 @@ def main() -> int:
             return 0
         if args.command == "series-init":
             workflow = get_workflow(args.workflow)
+            selected_audio_mode, selected_subtitle_source = resolve_project_audio_options(
+                args.audio_mode, args.subtitle_source, args.install_profile
+            )
             durations = plan_shot_durations(
                 workflow,
                 shot_count=None,
@@ -2321,8 +2344,8 @@ def main() -> int:
                 video_size=args.video_size,
                 video_resolution=args.video_resolution,
                 video_aspect_ratio=args.aspect_ratio,
-                audio_mode=args.audio_mode,
-                subtitle_source=args.subtitle_source,
+                audio_mode=selected_audio_mode,
+                subtitle_source=selected_subtitle_source,
             )
             for episode in episode_records(series):
                 project_root = root / str(episode["project"])
@@ -2337,8 +2360,8 @@ def main() -> int:
                     selected_provider,
                     args.video_resolution,
                     args.aspect_ratio,
-                    args.audio_mode,
-                    args.subtitle_source,
+                    selected_audio_mode,
+                    selected_subtitle_source,
                 )
             synced = sync_all_episode_contracts(root, series)
             print_json(
@@ -2565,6 +2588,9 @@ def main() -> int:
                 return 0
         if args.command == "news-init":
             workflow = get_workflow("news-video")
+            selected_audio_mode, selected_subtitle_source = resolve_project_audio_options(
+                args.audio_mode, args.subtitle_source, args.install_profile
+            )
             durations = plan_shot_durations(
                 workflow,
                 shot_count=args.shots,
@@ -2586,9 +2612,9 @@ def main() -> int:
                 provider,
                 args.video_resolution,
                 args.aspect_ratio,
-                args.audio_mode,
-                args.subtitle_source,
-                )
+                selected_audio_mode,
+                selected_subtitle_source,
+            )
             package = create_news_contract(
                 root,
                 topic=args.topic,
@@ -2629,6 +2655,9 @@ def main() -> int:
             return 0 if not errors else 1
         if args.command == "init":
             workflow = get_workflow(args.workflow)
+            selected_audio_mode, selected_subtitle_source = resolve_project_audio_options(
+                args.audio_mode, args.subtitle_source, args.install_profile
+            )
             durations = plan_shot_durations(
                 workflow,
                 shot_count=args.shots,
@@ -2650,8 +2679,8 @@ def main() -> int:
                 selected_provider,
                 args.video_resolution,
                 args.aspect_ratio,
-                args.audio_mode,
-                args.subtitle_source,
+                selected_audio_mode,
+                selected_subtitle_source,
             )
             print_json({"ok": True, "project": str(path), "workflow": args.workflow, "shot_seconds": durations, "target_seconds": sum(durations)})
             return 0

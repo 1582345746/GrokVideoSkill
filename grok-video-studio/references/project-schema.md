@@ -127,6 +127,8 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 `audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. Older projects without this field use `project` for backwards compatibility. This setting is independent from `audio.mode`.
 
+New projects can inherit this pair from an installation profile with `init`, `series-init`, or `news-init --install-profile <profile>`. The profile is only a default; explicit project flags override it, and changing the installation profile never rewrites existing projects.
+
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 
 ## Narration and subtitles
