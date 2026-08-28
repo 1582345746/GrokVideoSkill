@@ -42,7 +42,7 @@
       "subtitle_source": "project",
       "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
       "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
-      "model_download_gb": 1.5,
+      "model_download_gb": 10.0,
       "gpu_required": true
     },
     "lip-sync": {
@@ -53,7 +53,7 @@
       "subtitle_source": "project",
       "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
       "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
-      "model_download_gb": 7.0,
+      "model_download_gb": 16.0,
       "gpu_required": true
     }
   },

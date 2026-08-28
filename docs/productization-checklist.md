@@ -35,7 +35,7 @@ This checklist is the release contract for the two supported distribution paths.
 - [x] Docker/model downloads require explicit `--accept-downloads` approval.
 - [x] Uninstall preserves credentials, projects, component checkouts, and model weights.
 - [ ] Release artifacts are code-signed and published with checksums.
-- [ ] A secret-scanning job runs in CI for every release.
+- [x] A secret-pattern scanning job runs in GitHub Actions for every push and pull request.
 
 ## Dependency And Upgrade Work
 

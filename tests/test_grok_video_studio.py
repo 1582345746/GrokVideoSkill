@@ -1129,6 +1129,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(dependency_ids["ffmpeg"]["package_id"], "Gyan.FFmpeg")
         self.assertEqual(dependency_ids["docker"]["package_id"], "Docker.DockerDesktop")
         self.assertFalse(dependency_ids["nvidia-gpu"]["auto_installable"])
+        self.assertGreaterEqual(lip_sync["model_download_gb"], 15)
         alias = self.run_cli("install-plan", "--profile", "full-dialogue")
         self.assertEqual(alias["profile"], "lip-sync")
         self.assertEqual(alias["component_profile"], "full-dialogue")

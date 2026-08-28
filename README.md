@@ -57,6 +57,8 @@ cd GrokVideoSkill
 
 本地服务是可选组件。`core` 和 `native-dialogue` 不增加安装负担；`local-voice`/`full-dialogue` 需要 Docker Desktop、NVIDIA GPU 支持和较大的模型下载。Codex 会先运行 `components-plan` 展示来源、固定提交、目录和服务端口，获得同意后才运行安装。服务只发布到本机 `127.0.0.1`，不用时可停止，项目和模型不会被删除。
 
+按当前固定模型实测，`precise-voice` 需要约 10 GB 模型空间，`lip-sync` 需要约 16 GB；实际安装还应预留 Docker 镜像和临时下载空间，以 `install-plan` 输出为准。
+
 字幕来源和音频路线独立选择：`audio.subtitle_source=upstream` 保留上游/原片字幕，`project` 生成可审校的确定性 SRT，`none` 不输出字幕。`subtitles --source project` 可在审阅后从上游默认切换到本地字幕；失败时始终保留干净母版，不需要重新付费生成。
 
 新建项目时可用 `--install-profile precise-voice` 或 `--install-profile lip-sync` 继承安装档位的对白/字幕默认值；也可以用显式 `--audio-mode`、`--subtitle-source` 覆盖，已有项目不会被安装器改写。

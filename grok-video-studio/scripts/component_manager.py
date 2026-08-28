@@ -221,7 +221,11 @@ def _download_component_models(
             missing = [pattern for pattern in allow_patterns if not (target / pattern).is_file()]
             if missing:
                 raise SkillError(f"model download completed without required files for {repository}: {', '.join(missing)}")
-        downloaded.append({"repository": repository, "revision": revision, "destination": str(target)})
+            empty = [pattern for pattern in allow_patterns if (target / pattern).stat().st_size <= 0]
+            if empty:
+                raise SkillError(f"model download produced empty required files for {repository}: {', '.join(empty)}")
+        total_bytes = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
+        downloaded.append({"repository": repository, "revision": revision, "destination": str(target), "bytes": total_bytes})
     return downloaded
 
 
