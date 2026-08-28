@@ -83,6 +83,30 @@ if ($Uninstall) {
     if (($existingItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "Refusing to remove a reparse-point destination: $destinationPath"
     }
+    foreach ($item in Get-ChildItem -LiteralPath $destinationPath -Recurse -Force -ErrorAction Stop) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing to remove an installation that contains a reparse point: $($item.FullName)"
+        }
+        if (-not $item.PSIsContainer) {
+            $stream = $null
+            try {
+                $stream = [IO.File]::Open(
+                    $item.FullName,
+                    [IO.FileMode]::Open,
+                    [IO.FileAccess]::Read,
+                    [IO.FileShare]::None
+                )
+            }
+            catch {
+                throw "Cannot uninstall while a Skill file is in use: $($item.FullName)"
+            }
+            finally {
+                if ($null -ne $stream) {
+                    $stream.Dispose()
+                }
+            }
+        }
+    }
     Remove-Item -LiteralPath $destinationPath -Recurse -Force
     Write-Host "Removed the Grok Video Studio Skill files from $destinationPath"
     Write-Host "User credentials, projects, component sources, and model weights were preserved."
@@ -96,7 +120,30 @@ if ($sourcePath -eq $destinationPath) {
     throw "Source and destination must be different directories."
 }
 
+$installProfileExplicit = $PSBoundParameters.ContainsKey("InstallProfile") -or $PSBoundParameters.ContainsKey("ComponentProfile")
 $selectedInstallProfile = $InstallProfile
+if (-not $Interactive -and -not $installProfileExplicit -and (Test-Path -LiteralPath $destinationPath -PathType Container)) {
+    $profileConfigRoot = if (-not [string]::IsNullOrWhiteSpace($env:GVS_CONFIG_DIR)) {
+        $env:GVS_CONFIG_DIR
+    } elseif (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        Join-Path $env:LOCALAPPDATA "GrokVideoSkill"
+    } else {
+        Join-Path (Join-Path $env:USERPROFILE ".config") "GrokVideoSkill"
+    }
+    $savedProfilePath = Join-Path $profileConfigRoot "install-profile.json"
+    if (Test-Path -LiteralPath $savedProfilePath -PathType Leaf) {
+        try {
+            $savedProfile = (Get-Content -LiteralPath $savedProfilePath -Raw | ConvertFrom-Json).profile
+        }
+        catch {
+            throw "Existing install profile metadata is invalid: $savedProfilePath"
+        }
+        if ($savedProfile -notin @("basic", "upstream-dialogue", "precise-subtitles", "precise-voice", "lip-sync")) {
+            throw "Existing install profile is unsupported: $savedProfile"
+        }
+        $selectedInstallProfile = $savedProfile
+    }
+}
 if ($ComponentProfile -ne "core" -and $InstallProfile -eq "basic") {
     $selectedInstallProfile = @{
         "native-dialogue" = "upstream-dialogue"

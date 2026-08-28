@@ -6,3 +6,4 @@ test-output/
 *.tmp
 acceptance/
 projects/
+dist/

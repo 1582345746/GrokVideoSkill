@@ -19,7 +19,27 @@
         {
           "repository": "FunAudioLLM/Fun-CosyVoice3-0.5B-2512",
           "revision": "29e01c4e8d000f4bcd70751be16fa94bf3d85a18",
-          "destination": "cosyvoice/Fun-CosyVoice3-0.5B-2512"
+          "destination": "cosyvoice/Fun-CosyVoice3-0.5B-2512",
+          "estimated_size_gb": 10.0,
+          "required_patterns": [
+            "configuration.json",
+            "cosyvoice3.yaml",
+            "llm.pt",
+            "llm.rl.pt",
+            "flow.pt",
+            "flow.decoder.estimator.fp32.onnx",
+            "hift.pt",
+            "speech_tokenizer_v3.onnx",
+            "speech_tokenizer_v3.batch.onnx",
+            "campplus.onnx",
+            "config.json",
+            "CosyVoice-BlankEN/config.json",
+            "CosyVoice-BlankEN/generation_config.json",
+            "CosyVoice-BlankEN/merges.txt",
+            "CosyVoice-BlankEN/model.safetensors",
+            "CosyVoice-BlankEN/tokenizer_config.json",
+            "CosyVoice-BlankEN/vocab.json"
+          ]
         }
       ]
     },
@@ -36,30 +56,40 @@
           "repository": "TMElyralab/MuseTalk",
           "revision": "3ef28bc5cff08c90ad8178a25f1b570cd800170f",
           "destination": "musetalk",
-          "allow_patterns": ["musetalkV15/musetalk.json", "musetalkV15/unet.pth"]
+          "estimated_size_gb": 4.7,
+          "allow_patterns": ["musetalkV15/musetalk.json", "musetalkV15/unet.pth", "syncnet/latentsync_syncnet.pt"],
+          "required_patterns": ["musetalkV15/musetalk.json", "musetalkV15/unet.pth", "syncnet/latentsync_syncnet.pt"]
         },
         {
           "repository": "stabilityai/sd-vae-ft-mse",
           "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
           "destination": "musetalk/sd-vae",
+          "estimated_size_gb": 0.4,
+          "required_patterns": ["config.json", "diffusion_pytorch_model.bin"],
           "allow_patterns": ["config.json", "diffusion_pytorch_model.bin"]
         },
         {
           "repository": "openai/whisper-tiny",
           "revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
           "destination": "musetalk/whisper",
+          "estimated_size_gb": 0.2,
+          "required_patterns": ["config.json", "pytorch_model.bin", "preprocessor_config.json"],
           "allow_patterns": ["config.json", "pytorch_model.bin", "preprocessor_config.json"]
         },
         {
           "repository": "yzd-v/DWPose",
           "revision": "1a7144101628d69ee7a3768d1ee3a094070dc388",
           "destination": "musetalk/dwpose",
+          "estimated_size_gb": 0.5,
+          "required_patterns": ["dw-ll_ucoco_384.pth"],
           "allow_patterns": ["dw-ll_ucoco_384.pth"]
         },
         {
           "repository": "ManyOtherFunctions/face-parse-bisent",
           "revision": "0073b233a5a3c4b1377d4dbf49245017938a72b5",
           "destination": "musetalk/face-parse-bisent",
+          "estimated_size_gb": 0.2,
+          "required_patterns": ["79999_iter.pth", "resnet18-5c106cde.pth"],
           "allow_patterns": ["79999_iter.pth", "resnet18-5c106cde.pth"]
         }
       ]

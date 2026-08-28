@@ -25,7 +25,14 @@ FAKE_PCM = b"".join(struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * in
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from gvs_common import load_settings  # noqa: E402
-from component_manager import _docker  # noqa: E402
+from component_manager import (  # noqa: E402
+    _docker,
+    _download_component_models,
+    _ensure_model_disk_space,
+    _checkout_component,
+    component_status,
+    load_model_state,
+)
 from grok_video_studio import composed_video_prompt  # noqa: E402
 from provider_contracts import is_completed, result_urls, task_error, task_id, task_progress, task_status  # noqa: E402
 
@@ -1244,6 +1251,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("$Uninstall", source)
         self.assertIn("InstallSystemDependencies", source)
         self.assertIn("AcceptSystemDependencyChanges", source)
+        self.assertIn("[IO.FileShare]::None", source)
+        self.assertLess(source.index("[IO.FileShare]::None"), source.index("Remove-Item -LiteralPath $destinationPath -Recurse -Force"))
         self.assertIn("Previous installation preserved", source)
         self.assertIn('[ValidateSet("cosyvoice", "musetalk", "all")]', source)
         self.assertIn("-StartComponents with full-dialogue requires -StartComponent", source)
@@ -1299,9 +1308,14 @@ class SkillIntegrationTests(unittest.TestCase):
             for model in component["models"]:
                 self.assertRegex(model["revision"], r"^[0-9a-f]{40}$")
                 self.assertFalse(Path(model["destination"]).is_absolute())
+                self.assertGreater(float(model["estimated_size_gb"]), 0)
+                self.assertTrue(model.get("required_patterns"))
         musetalk_models = manifest["components"]["musetalk"]["models"]
         self.assertTrue(all(model.get("allow_patterns") for model in musetalk_models))
-        self.assertEqual(musetalk_models[0]["allow_patterns"], ["musetalkV15/musetalk.json", "musetalkV15/unet.pth"])
+        self.assertEqual(
+            musetalk_models[0]["allow_patterns"],
+            ["musetalkV15/musetalk.json", "musetalkV15/unet.pth", "syncnet/latentsync_syncnet.pt"],
+        )
         repositories = {model["repository"] for model in musetalk_models}
         self.assertNotIn("ByteDance/LatentSync", repositories)
         self.assertIn("ManyOtherFunctions/face-parse-bisent", repositories)
@@ -1328,6 +1342,139 @@ class SkillIntegrationTests(unittest.TestCase):
         for name in ("cosyvoice_server.py", "musetalk_server.py"):
             source = (services / name).read_text(encoding="utf-8")
             self.assertNotIn("from __future__ import annotations", source, name)
+
+    def test_model_download_state_reuses_verified_files_without_docker(self) -> None:
+        models_root = self.root / "models"
+        target = models_root / "demo"
+        target.mkdir(parents=True)
+        (target / "weights.bin").write_bytes(b"stable model bytes")
+        model = {
+            "repository": "example/demo",
+            "revision": "a" * 40,
+            "destination": "demo",
+            "allow_patterns": ["weights.bin"],
+            "required_patterns": ["weights.bin"],
+        }
+        with mock.patch("component_manager._docker") as docker:
+            result = _download_component_models("demo", {"models": [model]}, image="gvs-demo:test", models_root=models_root)
+        self.assertEqual(result[0]["status"], "reused")
+        docker.assert_not_called()
+        state = load_model_state(models_root)
+        self.assertEqual(state["models"]["demo:example/demo@" + "a" * 40]["status"], "ready")
+
+    def test_model_download_records_files_after_docker_and_repairs_corruption(self) -> None:
+        models_root = self.root / "models-download"
+        model = {
+            "repository": "example/demo",
+            "revision": "b" * 40,
+            "destination": "demo",
+            "allow_patterns": ["weights.bin"],
+            "required_patterns": ["weights.bin"],
+        }
+
+        def fake_docker(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            target = models_root / "demo"
+            target.mkdir(parents=True, exist_ok=True)
+            (target / "weights.bin").write_bytes(b"downloaded model bytes")
+            return subprocess.CompletedProcess(["docker"], 0, stdout="", stderr="")
+
+        with mock.patch("component_manager._docker", side_effect=fake_docker) as docker:
+            first = _download_component_models("demo", {"models": [model]}, image="gvs-demo:test", models_root=models_root)
+            self.assertEqual(first[0]["status"], "downloaded")
+            (models_root / "demo" / "weights.bin").write_bytes(b"corrupt")
+            second = _download_component_models("demo", {"models": [model]}, image="gvs-demo:test", models_root=models_root)
+        self.assertEqual(second[0]["status"], "downloaded")
+        self.assertEqual(docker.call_count, 2)
+
+    def test_model_state_migration_adopts_new_required_files(self) -> None:
+        models_root = self.root / "models-migration"
+        target = models_root / "demo"
+        target.mkdir(parents=True)
+        (target / "weights.bin").write_bytes(b"stable weights")
+        revision = "c" * 40
+        original = {
+            "repository": "example/demo",
+            "revision": revision,
+            "destination": "demo",
+            "allow_patterns": ["weights.bin"],
+            "required_patterns": ["weights.bin"],
+        }
+        with mock.patch("component_manager._docker"):
+            _download_component_models("demo", {"models": [original]}, image="gvs-demo:test", models_root=models_root)
+        (target / "tokenizer.json").write_bytes(b"stable tokenizer")
+        expanded = {**original, "required_patterns": ["weights.bin", "tokenizer.json"]}
+        with mock.patch("component_manager._docker") as docker:
+            result = _download_component_models("demo", {"models": [expanded]}, image="gvs-demo:test", models_root=models_root)
+        self.assertEqual(result[0]["status"], "reused")
+        docker.assert_not_called()
+        files = load_model_state(models_root)["models"]["demo:example/demo@" + revision]["files"]
+        self.assertIn("tokenizer.json", files)
+
+    def test_model_disk_preflight_blocks_insufficient_space(self) -> None:
+        model = {"repository": "example/large", "estimated_size_gb": 2.0}
+        usage = shutil.disk_usage(self.root)
+        constrained = shutil._ntuple_diskusage(usage.total, usage.used, 1024**3)
+        with mock.patch("component_manager.shutil.disk_usage", return_value=constrained):
+            with self.assertRaisesRegex(RuntimeError, "insufficient disk space"):
+                _ensure_model_disk_space(self.root, model, 0)
+
+    def test_component_status_keeps_source_path_separate_from_model_paths(self) -> None:
+        source_root = self.root / "sources"
+        models_root = self.root / "models-status"
+        settings = {
+            "version": 1,
+            "profile": "local-voice",
+            "source_root": str(source_root),
+            "models_root": str(models_root),
+            "services": {"cosyvoice": "http://127.0.0.1:9880", "musetalk": "http://127.0.0.1:9881"},
+        }
+        with mock.patch("component_manager.load_component_settings", return_value=settings), mock.patch(
+            "component_manager._service_health", return_value={"ok": False}
+        ):
+            result = component_status("local-voice")
+        self.assertEqual(result["components"][0]["source"], str(source_root / "cosyvoice"))
+
+    def test_new_component_checkout_failure_leaves_no_partial_target(self) -> None:
+        remote = self.root / "component-remote"
+        target = self.root / "component-target"
+        subprocess.run(["git", "init", str(remote)], check=True, capture_output=True)
+        (remote / "README.md").write_text("fixture", encoding="utf-8")
+        subprocess.run(["git", "-C", str(remote), "add", "README.md"], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(remote), "-c", "user.name=GVS Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture"],
+            check=True,
+            capture_output=True,
+        )
+        component = {"repository": str(remote), "commit": "d" * 40, "submodules": False}
+        with self.assertRaises(RuntimeError):
+            _checkout_component("demo", component, target)
+        self.assertFalse(target.exists())
+        self.assertFalse(list(target.parent.glob(".gvs-demo-partial-*")))
+
+    def test_existing_component_checkout_rolls_back_after_checkout_failure(self) -> None:
+        target = self.root / "existing-component"
+        (target / ".git").mkdir(parents=True)
+        previous = "a" * 40
+        requested = "b" * 40
+        calls: list[tuple[str, ...]] = []
+
+        def fake_git(*args: str, cwd: Path | None = None) -> str:
+            calls.append(tuple(args))
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args[:3] == ("remote", "get-url", "origin"):
+                return "https://example.invalid/demo.git"
+            if args[:2] == ("rev-parse", "HEAD"):
+                return previous
+            if args[:2] == ("checkout", "--detach") and args[2] == requested:
+                raise RuntimeError("simulated checkout failure")
+            return ""
+
+        component = {"repository": "https://example.invalid/demo.git", "commit": requested, "submodules": False}
+        with mock.patch("component_manager._git_output", side_effect=fake_git):
+            with self.assertRaisesRegex(RuntimeError, "simulated checkout failure"):
+                _checkout_component("demo", component, target)
+        self.assertIn(("checkout", "--detach", previous), calls)
 
     def test_cosyvoice_wrapper_preserves_reference_as_a_file(self) -> None:
         source = (SKILL_ROOT / "scripts" / "services" / "cosyvoice_server.py").read_text(encoding="utf-8")

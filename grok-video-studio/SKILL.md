@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.7.0`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.8.0`.
 
 ## Setup
 
@@ -15,9 +15,11 @@ Create the creative plan with Codex. Use the bundled scripts for credentials, pa
 4. Run `python scripts/grok_video_studio.py doctor` and resolve the configured credential roles and FFmpeg checks before paid generation. A missing unused role is allowed. Skip `doctor` when the user asks to avoid all real upstream tests.
 5. Confirm the requested video mode before creating a project. Defaults are text-to-video -> QuickAI JSON and image-to-video -> QuickAI New multipart. A project-level `video_provider` may explicitly override this route when the corresponding key is configured. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
 6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
-7. Before choosing optional services, run `python scripts/grok_video_studio.py install-plan --profile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`. This check has no machine side effects and reports missing FFmpeg, Docker, or NVIDIA prerequisites, key roles, model disk estimate (about 10 GB for precise voice and 16 GB for lip sync on the pinned set), and consent requirements. The old names `core`, `native-dialogue`, `local-voice`, and `full-dialogue` are accepted as aliases.
+7. Before choosing optional services, run `python scripts/grok_video_studio.py install-plan --profile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`. This check has no machine side effects and reports missing FFmpeg, Docker, or NVIDIA prerequisites, key roles, model disk estimate (about 10 GB for precise voice and 17 GB for lip sync including safety margin), and consent requirements. The old names `core`, `native-dialogue`, `local-voice`, and `full-dialogue` are accepted as aliases.
 8. Ask whether the user needs character speech and lip sync. Keep the default `basic` profile for silent/source-audio work. `upstream-dialogue` adds no local dependency. `precise-subtitles` uses only local FFmpeg. `precise-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `lip-sync` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
 9. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
+
+`components-setup --include-models` is resumable. It performs a disk-space preflight, reuses a complete model directory without starting Docker, records a per-model state file under the configured models root, and verifies required files with SHA-256 before reuse. A partial or corrupted model is downloaded again; `components-start` refuses to launch when required model files are missing or empty.
 
 ## Distribution Modes
 
@@ -33,7 +35,7 @@ The wizard asks for a capability profile, prompts for keys through the CLI's hid
 
 The selected profile is saved as non-secret metadata in the per-user config directory and is exposed by `capabilities`; project files still need an explicit `audio.mode` and `audio.subtitle_source` so one installation can produce both clean and dialogue deliveries.
 
-Use `install.ps1 -Check` to verify an existing installation without changing it, `install.ps1 -Repair -Force` to replace a damaged copy, and `install.ps1 -Uninstall` to remove only the Skill directory. Upgrades move the previous Skill directory to a timestamped sibling backup before copying; a failed copy restores the previous directory. Credentials, projects, component checkouts, and model weights are never removed by uninstall.
+Use `install.ps1 -Check` to verify an existing installation without changing it, `install.ps1 -Repair -Force` to replace a damaged copy, and `install.ps1 -Uninstall` to remove only the Skill directory. Upgrades move the previous Skill directory to a timestamped sibling backup before copying; a failed copy restores the previous directory. When no `-InstallProfile` is supplied, an upgrade or repair preserves the saved profile. Credentials, projects, component checkouts, and model weights are never removed by uninstall.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 

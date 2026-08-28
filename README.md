@@ -1,6 +1,6 @@
 # Grok Video Studio
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.7.0`，提供四个视频入口、五种音频模式和五个可选安装档位：
+面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.8.0`，提供四个视频入口、五种音频模式和五个可选安装档位：
 
 - 文生视频：QuickAI 文生视频，支持单镜头和多镜头项目。
 - 图生视频：QuickAI 生图生成角色母版/镜头关键帧，再由 QuickAI New 动画；用户现成图片也走同一路线。
@@ -43,7 +43,9 @@ cd GrokVideoSkill
 
 向导会询问档位、密钥、系统依赖安装和本地服务下载授权。自动化安装使用 `-InstallProfile`；允许 winget 安装 FFmpeg/Docker 时额外传 `-InstallSystemDependencies -AcceptSystemDependencyChanges`；涉及本地服务模型时还必须传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。NVIDIA 驱动由用户手动安装，安装器只检测不替换。
 
-维护命令：`.\install.ps1 -Check` 只检查当前安装；`.\install.ps1 -Repair -Force` 修复安装并在失败时回滚；`.\install.ps1 -Uninstall` 只移除技能目录，不删除 Key、项目、组件源码或模型。
+维护命令：`.\install.ps1 -Check` 只检查当前安装；`.\install.ps1 -Repair -Force` 修复安装并在失败时回滚；`.\install.ps1 -Uninstall` 只移除技能目录，不删除 Key、项目、组件源码或模型。升级/修复时如果没有显式传入 `-InstallProfile`，安装器会保留当前档位。
+
+仓库维护者可运行 `.\build-release.ps1` 生成 ZIP、版本清单和 SHA-256 校验文件；发布前应使用 `-SigningCertificateThumbprint <thumbprint>` 对安装脚本做 Authenticode 签名。用户可用 `Get-FileHash .\GrokVideoSkill-v1.8.0.zip -Algorithm SHA256` 与同名 `.sha256` 文件核对下载完整性；校验和用于防止传输损坏，只有有效的 Authenticode 签名才能验证发布者身份。
 
 配置完成后，凭据按职责分开使用：
 
@@ -57,7 +59,7 @@ cd GrokVideoSkill
 
 本地服务是可选组件。`core` 和 `native-dialogue` 不增加安装负担；`local-voice`/`full-dialogue` 需要 Docker Desktop、NVIDIA GPU 支持和较大的模型下载。Codex 会先运行 `components-plan` 展示来源、固定提交、目录和服务端口，获得同意后才运行安装。服务只发布到本机 `127.0.0.1`，不用时可停止，项目和模型不会被删除。
 
-按当前固定模型实测，`precise-voice` 需要约 10 GB 模型空间，`lip-sync` 需要约 16 GB；实际安装还应预留 Docker 镜像和临时下载空间，以 `install-plan` 输出为准。
+按当前固定模型实测，`precise-voice` 需要约 10 GB 模型空间，`lip-sync` 需要约 17 GB（含安全余量）；实际安装还应预留 Docker 镜像和临时下载空间，以 `install-plan` 输出为准。模型安装会在 `models/.gvs-model-state.json` 保存 revision、必需文件、大小和 SHA-256 状态；中断后可继续，发现文件损坏会重新下载对应模型。
 
 字幕来源和音频路线独立选择：`audio.subtitle_source=upstream` 保留上游/原片字幕，`project` 生成可审校的确定性 SRT，`none` 不输出字幕。`subtitles --source project` 可在审阅后从上游默认切换到本地字幕；失败时始终保留干净母版，不需要重新付费生成。
 

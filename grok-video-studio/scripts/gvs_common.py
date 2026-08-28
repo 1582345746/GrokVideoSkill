@@ -17,7 +17,7 @@ from typing import Any, Iterable
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/1.7.0"
+USER_AGENT = "GrokVideoStudioSkill/1.8.0"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"

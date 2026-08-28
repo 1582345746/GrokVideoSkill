@@ -1,0 +1,43 @@
+name: Grok Video Studio Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install FFmpeg
+        shell: pwsh
+        run: choco install ffmpeg -y --no-progress
+      - name: Validate and test
+        shell: pwsh
+        run: |
+          $version = (python .\grok-video-studio\scripts\grok_video_studio.py version | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag $env:GITHUB_REF_NAME does not match v$version" }
+          python -m compileall -q .\grok-video-studio\scripts
+          python -m unittest discover -s tests -p "test_*.py" -v
+      - name: Build checksummed release bundle
+        shell: pwsh
+        run: .\build-release.ps1 -OutputDirectory .\dist
+      - name: Publish GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = Get-ChildItem -LiteralPath .\dist -File | ForEach-Object { $_.FullName }
+          if ($assets.Count -lt 3) { throw "Release bundle is incomplete." }
+          gh release create $env:GITHUB_REF_NAME @assets --verify-tag --generate-notes --title "Grok Video Studio $env:GITHUB_REF_NAME"

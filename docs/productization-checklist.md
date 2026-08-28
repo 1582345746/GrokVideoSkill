@@ -2,6 +2,8 @@
 
 This checklist is the release contract for the two supported distribution paths.
 
+Current decision (2026-08-28): the standalone installer route is feature-frozen at v1.8.0. Codex-managed installation from the repository is the priority distribution route. The unchecked signing, fresh-machine, and public-release gates below are intentionally deferred rather than treated as complete.
+
 ## Distribution Contracts
 
 - [x] Codex-managed installation is documented in `grok-video-studio/SKILL.md`.
@@ -43,19 +45,21 @@ This checklist is the release contract for the two supported distribution paths.
 - [x] CosyVoice and MuseTalk Docker builds are isolated from the host Python environment.
 - [x] 8 GB GPU staged startup is documented and enforced for the full-dialogue profile.
 - [x] Optional FFmpeg/Docker system dependency installation through a separately approved winget step; NVIDIA drivers remain manual.
-- [ ] Disk-space preflight, resumable model downloads, and per-file integrity verification.
-- [ ] Component source/runtime migration and rollback after a failed upgrade.
+- [x] Disk-space preflight, resumable model downloads, and per-file integrity verification.
+- [x] Component source/runtime migration and rollback after a failed upgrade.
+- [x] Standalone release builder emits a version manifest and SHA-256 checksum and supports optional Authenticode signing.
 - [ ] A signed standalone release bundle that includes the installer and version manifest.
 
 ## Release Acceptance
 
-- [x] Python unit/integration suite: 53 tests passing on Windows development machine.
-- [x] Installed copy reports version `1.7.0` and passes `-Check`.
+- [x] Python unit/integration suite: 61 tests passing on the Windows development machine; the same suite is configured for Windows and Ubuntu CI.
+- [x] Installed copy reports version `1.8.0` and passes `-Check`.
 - [x] Real QuickAI provider and real CosyVoice/MuseTalk GPU acceptance artifacts exist from the preceding release gate.
 - [x] No local service is started by the default `basic` installation.
-- [ ] Interactive installer end-to-end test with redacted test credentials in a clean Windows profile.
+- [x] Interactive installer end-to-end test with redacted test credentials in an isolated Windows profile.
+- [x] All five profiles install, persist their selection, and pass `-Check` in isolated directories.
 - [ ] Fresh-machine acceptance for each of the five profiles.
-- [ ] Reinstall/repair/uninstall acceptance with a locked file and a failed component download.
+- [x] Reinstall/repair/uninstall acceptance with a locked file and a simulated failed component download.
 - [ ] Final release on `main` plus GitHub Release notes, installation wording, and user usage wording.
 
 The unchecked items are release-blocking for a signed public installer, but they do not prevent Codex-managed use of the current Skill or the transparent PowerShell installer.

@@ -80,7 +80,7 @@ from series_workflow import (
 )
 
 
-SKILL_VERSION = "1.7.0"
+SKILL_VERSION = "1.8.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15

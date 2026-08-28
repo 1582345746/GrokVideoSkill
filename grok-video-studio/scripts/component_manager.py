@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
+import tempfile
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,6 +21,8 @@ from gvs_common import SkillError, atomic_write_json, config_dir, normalize_base
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = SKILL_ROOT / "assets" / "components.json"
 COMPONENT_SETTINGS_VERSION = 1
+MODEL_STATE_VERSION = 1
+MODEL_SAFETY_MARGIN_BYTES = 512 * 1024 * 1024
 
 
 def load_manifest() -> dict[str, Any]:
@@ -31,6 +37,160 @@ def load_manifest() -> dict[str, Any]:
 
 def component_settings_path() -> Path:
     return config_dir() / "components.json"
+
+
+def model_state_path(models_root: Path) -> Path:
+    return models_root.resolve() / ".gvs-model-state.json"
+
+
+def load_model_state(models_root: Path) -> dict[str, Any]:
+    path = model_state_path(models_root)
+    if not path.is_file():
+        return {"version": MODEL_STATE_VERSION, "models": {}}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise SkillError(f"model state is invalid: {error}") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != MODEL_STATE_VERSION
+        or not isinstance(value.get("models"), dict)
+    ):
+        raise SkillError("unsupported model state")
+    return value
+
+
+def _model_key(component: str, model: dict[str, Any]) -> str:
+    return f"{component}:{model.get('repository', '')}@{model.get('revision', '')}"
+
+
+def _required_model_patterns(model: dict[str, Any]) -> list[str]:
+    patterns = model.get("required_patterns") or model.get("allow_patterns") or []
+    if not isinstance(patterns, list) or not all(isinstance(item, str) and item for item in patterns):
+        raise SkillError(f"model required_patterns are invalid for {model.get('repository', '')}")
+    if not patterns:
+        raise SkillError(f"model has no required file patterns: {model.get('repository', '')}")
+    return list(dict.fromkeys(patterns))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _model_file_records(target: Path, model: dict[str, Any]) -> tuple[list[str], dict[str, dict[str, Any]], int]:
+    missing: list[str] = []
+    records: dict[str, dict[str, Any]] = {}
+    total_bytes = 0
+    for pattern in _required_model_patterns(model):
+        path = target / pattern
+        if not path.is_file():
+            missing.append(pattern)
+            continue
+        size = path.stat().st_size
+        if size <= 0:
+            missing.append(pattern)
+            continue
+        records[pattern] = {"bytes": size, "sha256": _sha256_file(path)}
+        total_bytes += size
+    return missing, records, total_bytes
+
+
+def _model_files_ready(target: Path, model: dict[str, Any]) -> tuple[bool, list[str], int]:
+    missing: list[str] = []
+    total_bytes = 0
+    for pattern in _required_model_patterns(model):
+        path = target / pattern
+        if not path.is_file():
+            missing.append(pattern)
+            continue
+        size = path.stat().st_size
+        if size <= 0:
+            missing.append(pattern)
+            continue
+        total_bytes += size
+    return not missing, missing, total_bytes
+
+
+def _record_sizes_match_files(target: Path, model: dict[str, Any], record: dict[str, Any]) -> bool:
+    files = record.get("files")
+    if not isinstance(files, dict):
+        return False
+    for pattern in _required_model_patterns(model):
+        entry = files.get(pattern)
+        path = target / pattern
+        if not isinstance(entry, dict) or not path.is_file():
+            return False
+        try:
+            expected_size = int(entry.get("bytes", -1))
+        except (TypeError, ValueError):
+            return False
+        if path.stat().st_size != expected_size:
+            return False
+    return True
+
+
+def _record_matches_files(target: Path, model: dict[str, Any], record: dict[str, Any]) -> bool:
+    files = record.get("files")
+    if not isinstance(files, dict):
+        return False
+    required = _required_model_patterns(model)
+    if any(pattern not in files for pattern in required):
+        return False
+    for pattern in required:
+        entry = files.get(pattern)
+        path = target / pattern
+        if not isinstance(entry, dict) or not path.is_file():
+            return False
+        try:
+            expected_size = int(entry.get("bytes", -1))
+        except (TypeError, ValueError):
+            return False
+        if path.stat().st_size != expected_size or _sha256_file(path) != str(entry.get("sha256", "")):
+            return False
+    return True
+
+
+def _recorded_files_unchanged(target: Path, record: dict[str, Any]) -> bool:
+    files = record.get("files")
+    if not isinstance(files, dict) or not files:
+        return False
+    resolved_target = target.resolve()
+    for pattern, entry in files.items():
+        if not isinstance(pattern, str) or not isinstance(entry, dict):
+            return False
+        path = (target / pattern).resolve()
+        try:
+            path.relative_to(resolved_target)
+            expected_size = int(entry.get("bytes", -1))
+        except (ValueError, TypeError):
+            return False
+        if not path.is_file() or path.stat().st_size != expected_size:
+            return False
+        if _sha256_file(path) != str(entry.get("sha256", "")):
+            return False
+    return True
+
+
+def _ensure_model_disk_space(root: Path, model: dict[str, Any], existing_bytes: int) -> None:
+    estimate_gb = float(model.get("estimated_size_gb", 0))
+    if estimate_gb <= 0:
+        return
+    required = max(0, int(estimate_gb * 1024**3) - existing_bytes) + MODEL_SAFETY_MARGIN_BYTES
+    usage = shutil.disk_usage(root)
+    if usage.free < required:
+        free_gb = usage.free / 1024**3
+        needed_gb = required / 1024**3
+        raise SkillError(
+            f"insufficient disk space for {model.get('repository', '')}: {free_gb:.1f} GB free, "
+            f"approximately {needed_gb:.1f} GB required including safety margin"
+        )
 
 
 def default_component_root() -> Path:
@@ -100,9 +260,14 @@ def component_plan(profile: str, settings: dict[str, Any] | None = None) -> dict
     settings = settings or load_component_settings()
     source_root = Path(str(settings["source_root"]))
     required = []
+    model_download_gb = 0.0
+    required_model_files = 0
     for name in manifest["profiles"][profile]:
         item = dict(manifest["components"][name])
         item.update({"id": name, "source": str(source_root / name), "service_url": settings["services"].get(name, item["service_url"])})
+        for model in item.get("models", []):
+            model_download_gb += float(model.get("estimated_size_gb", 0))
+            required_model_files += len(model.get("required_patterns") or model.get("allow_patterns") or [])
         required.append(item)
     return {
         "profile": profile,
@@ -110,6 +275,8 @@ def component_plan(profile: str, settings: dict[str, Any] | None = None) -> dict
         "components": required,
         "source_root": str(source_root),
         "models_root": str(settings["models_root"]),
+        "model_download_gb": round(model_download_gb, 1),
+        "required_model_files": required_model_files,
         "consent_required": bool(required),
         "note": "Source checkout is small; dependencies and model weights are installed only by an explicit service setup step.",
     }
@@ -131,6 +298,14 @@ def _git_output(*args: str, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
+def _remove_staging_checkout(path: Path) -> None:
+    def clear_readonly(function: Any, failing_path: str, _: Any) -> None:
+        os.chmod(failing_path, stat.S_IWRITE)
+        function(failing_path)
+
+    shutil.rmtree(path, onerror=clear_readonly)
+
+
 def _checkout_component(name: str, component: dict[str, Any], target: Path) -> dict[str, Any]:
     repository = str(component["repository"])
     commit = str(component["commit"])
@@ -142,14 +317,33 @@ def _checkout_component(name: str, component: dict[str, Any], target: Path) -> d
         remote = _git_output("remote", "get-url", "origin", cwd=target)
         if remote.rstrip("/").lower() != repository.rstrip("/").lower():
             raise SkillError(f"component checkout uses a different origin: {target}")
+        previous = _git_output("rev-parse", "HEAD", cwd=target)
         _git_output("fetch", "--depth", "1", "origin", commit, cwd=target)
+        try:
+            _git_output("checkout", "--detach", commit, cwd=target)
+            if component.get("submodules"):
+                _git_output("submodule", "update", "--init", "--recursive", "--depth", "1", cwd=target)
+        except Exception as error:
+            try:
+                _git_output("checkout", "--detach", previous, cwd=target)
+                if component.get("submodules"):
+                    _git_output("submodule", "update", "--init", "--recursive", cwd=target)
+            except Exception as rollback_error:
+                raise SkillError(f"component update failed and rollback failed for {name}: {rollback_error}") from error
+            raise
     else:
         target.parent.mkdir(parents=True, exist_ok=True)
-        _git_output("clone", "--filter=blob:none", "--no-checkout", repository, str(target))
-        _git_output("fetch", "--depth", "1", "origin", commit, cwd=target)
-    _git_output("checkout", "--detach", commit, cwd=target)
-    if component.get("submodules"):
-        _git_output("submodule", "update", "--init", "--recursive", "--depth", "1", cwd=target)
+        staging = Path(tempfile.mkdtemp(prefix=f".gvs-{name}-partial-", dir=str(target.parent)))
+        try:
+            _git_output("clone", "--filter=blob:none", "--no-checkout", repository, str(staging))
+            _git_output("fetch", "--depth", "1", "origin", commit, cwd=staging)
+            _git_output("checkout", "--detach", commit, cwd=staging)
+            if component.get("submodules"):
+                _git_output("submodule", "update", "--init", "--recursive", "--depth", "1", cwd=staging)
+            staging.replace(target)
+        finally:
+            if staging.exists():
+                _remove_staging_checkout(staging)
     actual = _git_output("rev-parse", "HEAD", cwd=target)
     if actual != commit:
         raise SkillError(f"component checkout did not reach pinned commit: {name}")
@@ -193,19 +387,81 @@ def _download_component_models(
     *,
     image: str,
     models_root: Path,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     python = "/opt/conda/envs/cosyvoice/bin/python" if name == "cosyvoice" else "python3.10"
     root = models_root.resolve()
-    downloaded = []
+    root.mkdir(parents=True, exist_ok=True)
+    state = load_model_state(root)
+    state_models = state.setdefault("models", {})
+    downloaded: list[dict[str, Any]] = []
     for model in component.get("models", []):
         repository = str(model["repository"])
         revision = str(model["revision"])
+        key = _model_key(name, model)
         target = (root / str(model["destination"])).resolve()
         try:
             target.relative_to(root)
         except ValueError as error:
             raise SkillError(f"model destination escapes the configured models root: {target}") from error
         target.mkdir(parents=True, exist_ok=True)
+        required_patterns = _required_model_patterns(model)
+        record = state_models.get(key)
+        if isinstance(record, dict) and record.get("revision") == revision and _record_matches_files(target, model, record):
+            downloaded.append(
+                {
+                    "repository": repository,
+                    "revision": revision,
+                    "destination": str(target),
+                    "bytes": int(record.get("total_bytes", 0)),
+                    "status": "reused",
+                }
+            )
+            continue
+        ready, missing, existing_bytes = _model_files_ready(target, model)
+        # A complete directory without state can be adopted. If state exists
+        # but its digests no longer match, treat the directory as corrupted so
+        # the pinned snapshot is downloaded again instead of silently blessing
+        # changed bytes.
+        record_can_migrate = (
+            isinstance(record, dict)
+            and record.get("revision") == revision
+            and _recorded_files_unchanged(target, record)
+        )
+        if ready and (not isinstance(record, dict) or record_can_migrate):
+            _, files, total_bytes = _model_file_records(target, model)
+            state_models[key] = {
+                "component": name,
+                "repository": repository,
+                "revision": revision,
+                "destination": str(target),
+                "status": "ready",
+                "source": "existing",
+                "total_bytes": total_bytes,
+                "files": files,
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            atomic_write_json(model_state_path(root), state)
+            downloaded.append(
+                {
+                    "repository": repository,
+                    "revision": revision,
+                    "destination": str(target),
+                    "bytes": total_bytes,
+                    "status": "reused",
+                }
+            )
+            continue
+        _ensure_model_disk_space(root, model, existing_bytes)
+        state_models[key] = {
+            "component": name,
+            "repository": repository,
+            "revision": revision,
+            "destination": str(target),
+            "status": "downloading",
+            "missing": missing,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        atomic_write_json(model_state_path(root), state)
         allow_patterns = model.get("allow_patterns")
         if allow_patterns is not None and (
             not isinstance(allow_patterns, list) or not all(isinstance(value, str) and value for value in allow_patterns)
@@ -216,16 +472,41 @@ def _download_component_models(
             f"snapshot_download(repo_id={repository!r}, revision={revision!r}, "
             f"local_dir='/models', allow_patterns={allow_patterns!r})"
         )
-        _docker("run", "--rm", "-v", f"{target}:/models", image, python, "-c", script)
-        if allow_patterns:
-            missing = [pattern for pattern in allow_patterns if not (target / pattern).is_file()]
-            if missing:
-                raise SkillError(f"model download completed without required files for {repository}: {', '.join(missing)}")
-            empty = [pattern for pattern in allow_patterns if (target / pattern).stat().st_size <= 0]
-            if empty:
-                raise SkillError(f"model download produced empty required files for {repository}: {', '.join(empty)}")
-        total_bytes = sum(path.stat().st_size for path in target.rglob("*") if path.is_file())
-        downloaded.append({"repository": repository, "revision": revision, "destination": str(target), "bytes": total_bytes})
+        try:
+            _docker("run", "--rm", "-v", f"{target}:/models", image, python, "-c", script)
+        except Exception as error:
+            state_models[key] = {
+                **state_models[key],
+                "status": "failed",
+                "error": str(error)[:1000],
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            atomic_write_json(model_state_path(root), state)
+            raise
+        missing, files, total_bytes = _model_file_records(target, model)
+        if missing:
+            state_models[key] = {
+                **state_models[key],
+                "status": "failed",
+                "missing": missing,
+                "error": "download completed without all required files",
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            atomic_write_json(model_state_path(root), state)
+            raise SkillError(f"model download completed without required files for {repository}: {', '.join(missing)}")
+        state_models[key] = {
+            "component": name,
+            "repository": repository,
+            "revision": revision,
+            "destination": str(target),
+            "status": "ready",
+            "source": "download",
+            "total_bytes": total_bytes,
+            "files": files,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        atomic_write_json(model_state_path(root), state)
+        downloaded.append({"repository": repository, "revision": revision, "destination": str(target), "bytes": total_bytes, "status": "downloaded"})
     return downloaded
 
 
@@ -251,7 +532,7 @@ def setup_component_runtimes(profile: str, *, accept_downloads: bool, include_mo
         dockerfile = SKILL_ROOT / "assets" / "docker" / f"{name}.Dockerfile"
         image = f"gvs-{name}:{str(item['commit'])[:12]}"
         _docker("build", "-f", str(dockerfile), "-t", image, str(source))
-        model_result: str | list[dict[str, str]] = "skipped"
+        model_result: str | list[dict[str, Any]] = "skipped"
         if include_models:
             model_result = _download_component_models(name, item, image=image, models_root=models_root)
         results.append({"id": name, "image": image, "models": model_result})
@@ -327,6 +608,14 @@ def start_components(profile: str, component: str | None = None) -> dict[str, An
             port = urllib.parse.urlsplit(str(item["service_url"])).port
             if not port:
                 raise SkillError(f"component service URL has no port: {item['service_url']}")
+            for model_spec in item.get("models", []):
+                model_target = (models_root / str(model_spec["destination"])).resolve()
+                ready, missing, _ = _model_files_ready(model_target, model_spec)
+                if not ready:
+                    raise SkillError(
+                        f"{name} model is incomplete at {model_target}; missing or empty files: {', '.join(missing)}; "
+                        "run components-setup --include-models"
+                    )
             common = ["run", "-d", "--name", container, "--gpus", "all", "-p", f"127.0.0.1:{port}:{port}"]
             if name == "cosyvoice":
                 model = models_root / "cosyvoice" / "Fun-CosyVoice3-0.5B-2512"
@@ -423,28 +712,58 @@ def component_status(profile: str | None = None, component: str | None = None) -
     selected = profile or str(settings.get("profile", "core"))
     plan = component_plan(selected, settings)
     selected_items = _select_component_items(plan, component, require_explicit_multi=False)
+    models_root = Path(str(settings["models_root"])).resolve()
+    model_state = load_model_state(models_root)
     components = []
     for item in selected_items:
-        target = Path(item["source"])
+        source_target = Path(item["source"])
         actual = ""
-        if (target / ".git").is_dir():
+        if (source_target / ".git").is_dir():
             try:
-                actual = _git_output("rev-parse", "HEAD", cwd=target)
+                actual = _git_output("rev-parse", "HEAD", cwd=source_target)
             except SkillError:
                 actual = "unreadable"
+        models = []
+        for model in item.get("models", []):
+            target = (models_root / str(model["destination"])).resolve()
+            try:
+                target.relative_to(models_root)
+            except ValueError:
+                models.append({"repository": str(model.get("repository", "")), "ready": False, "error": "destination escapes models root"})
+                continue
+            record = model_state.get("models", {}).get(_model_key(str(item["id"]), model))
+            ready, missing, total_bytes = _model_files_ready(target, model)
+            recorded = isinstance(record, dict) and _record_sizes_match_files(target, model, record)
+            models.append(
+                {
+                    "repository": str(model.get("repository", "")),
+                    "revision": str(model.get("revision", "")),
+                    "destination": str(target),
+                    "ready": ready and (recorded or not isinstance(record, dict)),
+                    "missing": missing,
+                    "bytes": total_bytes,
+                    "state": record.get("status", "untracked") if isinstance(record, dict) else "untracked",
+                }
+            )
         components.append(
             {
                 "id": item["id"],
-                "source": str(target),
+                "source": str(source_target),
                 "source_ready": actual == item["commit"],
                 "expected_commit": item["commit"],
                 "actual_commit": actual,
                 "service_url": item["service_url"],
                 "service": _service_health(item["service_url"]),
+                "models": models,
             }
         )
     return {
-        "ok": all(item["source_ready"] and item["service"]["ok"] for item in components),
+        "ok": all(
+            item["source_ready"]
+            and item["service"]["ok"]
+            and all(model["ready"] for model in item["models"])
+            for item in components
+        ),
         "profile": selected,
         "component": component or "all",
         "config": str(component_settings_path()),
