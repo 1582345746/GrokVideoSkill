@@ -362,7 +362,16 @@ def multipart_body(fields: Iterable[tuple[str, str]], files: Iterable[tuple[str,
         safe_field = field.replace('"', "_").replace("\r", "_").replace("\n", "_")
         safe_name = path.name.replace('"', "_").replace("\r", "_").replace("\n", "_")
         extension = path.suffix.lower()
-        media_type = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(extension, "image/png")
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
+            ".wav": "audio/wav",
+            ".mp3": "audio/mpeg",
+            ".m4a": "audio/mp4",
+            ".mp4": "video/mp4",
+        }.get(extension, "application/octet-stream")
         chunks.extend(
             [
                 f"--{boundary}\r\n".encode("ascii"),

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -9,6 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import struct
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,6 +21,7 @@ SKILL_ROOT = REPO_ROOT / "grok-video-studio"
 CLI = SKILL_ROOT / "scripts" / "grok_video_studio.py"
 FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png-payload"
 FAKE_MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"fake-video-payload"
+FAKE_PCM = b"".join(struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * index / 22050))) for index in range(11025))
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 from gvs_common import load_settings  # noqa: E402
@@ -57,6 +60,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     audio_payload = FAKE_MP4
     fail_video_create = False
     video_status = "completed"
+    tts_creates = 0
 
     def log_message(self, format: str, *args: object) -> None:
         return
@@ -72,6 +76,9 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         self.send_bytes(json.dumps(value).encode("utf-8"), "application/json", status)
 
     def do_GET(self) -> None:
+        if self.path == "/health":
+            self.send_json({"ok": True, "service": "fake-local-media"})
+            return
         if self.path == "/v1/models":
             self.send_json({"data": [{"id": "gpt-image-2"}, {"id": "grok-imagine-video-1.5"}]})
             return
@@ -98,6 +105,10 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
+        if self.path in {"/inference_sft", "/inference_zero_shot", "/inference_instruct2"}:
+            type(self).tts_creates += 1
+            self.send_bytes(FAKE_PCM, "application/octet-stream")
+            return
         if self.path == "/v1/images/generations" or self.path == "/v1/images/edits":
             type(self).image_creates += 1
             type(self).image_requests.append((self.path, body))
@@ -214,6 +225,7 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.multipart_video_authorization = ""
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
+        FakeProviderHandler.tts_creates = 0
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         self.config_dir = self.root / "config"
@@ -775,7 +787,7 @@ class SkillIntegrationTests(unittest.TestCase):
         clean = project / "deliverables" / "final.mp4"
         clean_digest = clean.read_bytes()
 
-        result = self.run_cli("subtitles", str(project), "--burn")
+        result = self.run_cli("subtitles", str(project), "--burn", "--style", "cinematic")
         self.assertEqual(result["subtitles"]["cue_count"], 2)
         srt = project / "deliverables" / "subtitles.srt"
         subtitled = project / "deliverables" / "final-subtitled.mp4"
@@ -783,6 +795,83 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(subtitled.is_file())
         self.assertEqual(clean.read_bytes(), clean_digest)
         self.assertTrue(result["burned_video"]["has_audio"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_local_dialogue_renders_tts_timeline_audio_and_subtitles(self) -> None:
+        project = self.create_project("dialogue", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["seconds"] = 1
+        value["characters"] = [
+            {
+                "id": "lead",
+                "name": "Lead",
+                "identity": "An original synthetic presenter.",
+                "references": [],
+                "voice": {"provider": "cosyvoice", "voice_id": "fake-speaker"},
+            }
+        ]
+        value["shots"][0]["character_ids"] = ["lead"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "你好，欢迎来到这里。", "start": 0.05, "end": 0.9, "subtitle": True}
+        ]
+        value["audio"] = {
+            "mode": "local-voice",
+            "language": "zh-CN",
+            "generate_audio": False,
+            "preserve_source_audio": True,
+            "duck_source_audio": True,
+        }
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        local_prompt = composed_video_prompt(value, value["shots"][0])
+        self.assertNotIn("你好，欢迎来到这里。", local_prompt)
+        self.assertIn("do not show any legible words", local_prompt)
+        source = project / "deliverables" / "final.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(FakeProviderHandler.video_payload)
+
+        validation = self.run_cli("validate", str(project))
+        self.assertTrue(validation["ok"])
+        result = self.run_cli(
+            "dialogue-render",
+            str(project),
+            "--source-video",
+            str(source),
+            "--cosyvoice-url",
+            self.base_url,
+        )
+        self.assertEqual(result["dialogue"]["line_count"], 1)
+        self.assertTrue(result["dialogue"]["video"]["has_audio"])
+        self.assertGreater(result["dialogue"]["video"]["audio"]["max_volume_db"], -35)
+        self.assertEqual(FakeProviderHandler.tts_creates, 1)
+        self.assertIn("你好，欢迎来到这里。", (project / "deliverables" / "dialogue.srt").read_text(encoding="utf-8"))
+
+        resumed = self.run_cli(
+            "dialogue-render",
+            str(project),
+            "--source-video",
+            str(source),
+            "--cosyvoice-url",
+            self.base_url,
+        )
+        self.assertTrue(resumed["dialogue"]["rendered"][0]["skipped"])
+        self.assertEqual(FakeProviderHandler.tts_creates, 1)
+
+    def test_native_dialogue_adds_exact_prompt_and_generate_audio_flag(self) -> None:
+        project = self.create_project("native-dialogue", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["video_mode"] = "text-to-video"
+        value["video_provider"] = "quickai"
+        value["characters"] = [{"id": "lead", "name": "Lead", "identity": "An original AI person.", "references": []}]
+        value["shots"][0]["character_ids"] = ["lead"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "这句话必须准确说出。", "start": 0.2, "end": 2.5}
+        ]
+        value["audio"] = {"mode": "native-dialogue", "generate_audio": True}
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertIs(FakeProviderHandler.last_json_video["generate_audio"], True)
+        self.assertIn("这句话必须准确说出。", str(FakeProviderHandler.last_json_video["prompt"]))
+        self.assertIn("Do not render the words as on-screen text", str(FakeProviderHandler.last_json_video["prompt"]))
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_dpapi_storage_keeps_plaintext_out_of_config(self) -> None:
@@ -863,6 +952,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.last_json_video["resolution"], "480p")
         self.assertEqual(FakeProviderHandler.last_json_video["aspect_ratio"], "9:16")
+        self.assertIs(FakeProviderHandler.last_json_video["generate_audio"], False)
         self.assertNotIn("input_reference", FakeProviderHandler.last_json_video)
         self.assertNotIn("reference_images", FakeProviderHandler.last_json_video)
         self.assertIn("No app UI", FakeProviderHandler.last_json_video["prompt"])
@@ -884,7 +974,53 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn(b'name="resolution"\r\n\r\n720p', FakeProviderHandler.last_video_body)
         self.assertIn(b'name="aspect_ratio"', FakeProviderHandler.last_video_body)
+        self.assertIn(b'name="generate_audio"\r\n\r\nfalse', FakeProviderHandler.last_video_body)
         self.assertNotIn(b'name="input_reference"', FakeProviderHandler.last_video_body)
+
+    def test_component_profiles_are_explicit_and_configurable_without_downloads(self) -> None:
+        plan = self.run_cli("components-plan", "--profile", "full-dialogue")
+        self.assertEqual([item["id"] for item in plan["components"]], ["cosyvoice", "musetalk"])
+        self.assertTrue(plan["consent_required"])
+        configured = self.run_cli(
+            "components-configure",
+            "--profile",
+            "local-voice",
+            "--source-root",
+            str(self.root / "component-src"),
+            "--models-root",
+            str(self.root / "component-models"),
+            "--cosyvoice-url",
+            self.base_url,
+        )
+        self.assertEqual(configured["settings"]["profile"], "local-voice")
+        self.assertEqual(len(configured["plan"]["components"]), 1)
+        blocked = self.run_cli("components-install", "--profile", "local-voice", expected=1)
+        self.assertIn("--accept-downloads", blocked["error"])
+
+    def test_voice_reference_requires_rights_and_transcript(self) -> None:
+        project = self.create_project("voice-rights", generate_image=False)
+        reference = project / "assets" / "voices" / "lead.wav"
+        reference.parent.mkdir(parents=True, exist_ok=True)
+        reference.write_bytes(b"RIFFinvalid-test-wave")
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["audio"] = {"mode": "local-voice", "generate_audio": False}
+        value["characters"] = [
+            {
+                "id": "lead",
+                "name": "Lead",
+                "identity": "Original AI character.",
+                "references": [],
+                "voice": {"reference_audio": "assets/voices/lead.wav"},
+            }
+        ]
+        value["shots"][0]["character_ids"] = ["lead"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "Approved line.", "start": 0.2, "end": 2.0}
+        ]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("consent" in error for error in result["errors"]))
+        self.assertTrue(any("reference_text" in error for error in result["errors"]))
 
     def test_role_specific_credentials_do_not_cross_generation_routes(self) -> None:
         self.env.update(
@@ -991,12 +1127,14 @@ class SkillIntegrationTests(unittest.TestCase):
         series = json.loads((series_root / "series.json").read_text(encoding="utf-8"))
         series["season_arc"] = "The lead moves from rejection to belonging."
         series["style_bible"] = "Naturalistic daylight and restrained handheld camera."
+        series["audio"] = {"mode": "local-voice", "language": "zh-CN", "generate_audio": False}
         series["characters"] = [
             {
                 "id": "lead",
                 "name": "Chen",
                 "identity": "A 24-year-old man with short black hair and a narrow face.",
                 "wardrobe": "Faded denim jacket and canvas backpack.",
+                "voice": {"provider": "cosyvoice", "voice_id": "series-lead"},
                 "master": {
                     "enabled": True,
                     "generate": True,
@@ -1038,6 +1176,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(characters["characters"]["completed"], ["lead"])
         synced_project = json.loads((episode_one / "project.json").read_text(encoding="utf-8"))
         self.assertEqual(synced_project["characters"][0]["references"], ["assets/characters/lead.png"])
+        self.assertEqual(synced_project["characters"][0]["voice"]["voice_id"], "series-lead")
+        self.assertEqual(synced_project["audio"]["mode"], "local-voice")
 
         self.run_cli("series-approve", str(series_root), "ep-001")
         approved_project = json.loads((episode_one / "project.json").read_text(encoding="utf-8"))

@@ -12,6 +12,11 @@ from gvs_common import SkillError, assert_mp4
 
 
 SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
+SUBTITLE_STYLES = {
+    "clean": "FontName=Microsoft YaHei,FontSize=20,PrimaryColour=&H00FFFFFF,OutlineColour=&H00101010,BorderStyle=1,Outline=2,Shadow=0,Alignment=2,MarginV=28",
+    "cinematic": "FontName=Microsoft YaHei,FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=1.5,Shadow=1,Alignment=2,MarginV=34",
+    "news": "FontName=Microsoft YaHei,FontSize=20,PrimaryColour=&H00FFFFFF,BackColour=&H80000000,BorderStyle=3,Outline=0,Shadow=0,Alignment=2,MarginV=24",
+}
 
 
 def _run(command: list[str], action: str, *, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
@@ -61,6 +66,220 @@ def probe_media(path: Path) -> dict[str, Any]:
     }
 
 
+def probe_audio(path: Path) -> dict[str, Any]:
+    if not path.is_file() or path.stat().st_size == 0:
+        raise SkillError(f"audio file is missing or empty: {path}")
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise SkillError("ffprobe is required for audio validation")
+    result = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_streams", "-show_format", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode != 0:
+        raise SkillError(f"ffprobe could not read {path.name}: {result.stderr.strip()[-500:]}")
+    try:
+        payload = json.loads(result.stdout)
+        streams = payload.get("streams", [])
+        audio = next(item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio")
+        duration = float((payload.get("format") or {}).get("duration") or audio.get("duration") or 0)
+    except (json.JSONDecodeError, StopIteration, TypeError, ValueError) as error:
+        raise SkillError(f"audio metadata is invalid: {path}") from error
+    if duration <= 0:
+        raise SkillError(f"audio duration is invalid: {path}")
+    return {
+        "duration": round(duration, 3),
+        "codec": str(audio.get("codec_name") or ""),
+        "sample_rate": int(audio.get("sample_rate") or 0),
+        "channels": int(audio.get("channels") or 0),
+    }
+
+
+def analyze_audio(path: Path) -> dict[str, Any]:
+    metadata = probe_audio(path)
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required for audio analysis")
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-af",
+            "volumedetect,silencedetect=noise=-45dB:d=0.35",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    log = result.stderr or ""
+    mean_match = re.search(r"mean_volume:\s*(-?(?:inf|\d+(?:\.\d+)?))\s*dB", log, re.IGNORECASE)
+    max_match = re.search(r"max_volume:\s*(-?(?:inf|\d+(?:\.\d+)?))\s*dB", log, re.IGNORECASE)
+    silence_durations = [float(value) for value in re.findall(r"silence_duration:\s*(\d+(?:\.\d+)?)", log)]
+
+    def level(match: re.Match[str] | None) -> float | None:
+        if not match or match.group(1).lower() in {"inf", "-inf"}:
+            return None
+        return round(float(match.group(1)), 2)
+
+    silence_seconds = min(metadata["duration"], sum(silence_durations))
+    return {
+        **metadata,
+        "mean_volume_db": level(mean_match),
+        "max_volume_db": level(max_match),
+        "silence_seconds": round(silence_seconds, 3),
+        "silence_ratio": round(silence_seconds / metadata["duration"], 4),
+    }
+
+
+def _atempo_chain(speed: float) -> str:
+    if speed <= 0:
+        raise SkillError("audio speed must be positive")
+    factors: list[float] = []
+    while speed > 2.0:
+        factors.append(2.0)
+        speed /= 2.0
+    while speed < 0.5:
+        factors.append(0.5)
+        speed /= 0.5
+    factors.append(speed)
+    return ",".join(f"atempo={factor:.8f}" for factor in factors)
+
+
+def render_dialogue_track(cues: list[dict[str, Any]], output: Path, *, duration: float) -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required to render dialogue audio")
+    if duration <= 0 or not cues:
+        raise SkillError("dialogue track requires cues and a positive duration")
+    command = [ffmpeg, "-y"]
+    filters: list[str] = []
+    labels: list[str] = []
+    for index, cue in enumerate(cues):
+        path = Path(str(cue["path"])).resolve()
+        audio = probe_audio(path)
+        start = float(cue["start"])
+        end = float(cue["end"])
+        window = end - start
+        if start < 0 or window <= 0 or end > duration + 0.05:
+            raise SkillError("dialogue cue is outside the target timeline")
+        command.extend(["-i", str(path)])
+        speed = audio["duration"] / window
+        delay = max(0, int(round(start * 1000)))
+        label = f"d{index}"
+        filters.append(
+            f"[{index}:a]{_atempo_chain(speed)},aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"apad,atrim=0:{window:.6f},adelay={delay}:all=1[{label}]"
+        )
+        labels.append(f"[{label}]")
+    filters.append(
+        f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:normalize=0,"
+        f"apad,atrim=0:{duration:.6f},loudnorm=I=-16:LRA=11:TP=-1.5[aout]"
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command.extend(["-filter_complex", ";".join(filters), "-map", "[aout]", "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2", str(output)])
+    _run(command, "rendering the dialogue track")
+    return {"path": str(output.resolve()), "bytes": output.stat().st_size, **analyze_audio(output)}
+
+
+def mix_dialogue_track(
+    input_video: Path,
+    dialogue_track: Path,
+    output: Path,
+    *,
+    preserve_source_audio: bool = True,
+    duck_source_audio: bool = True,
+) -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required to mix dialogue audio")
+    media = probe_media(input_video)
+    probe_audio(dialogue_track)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [ffmpeg, "-y", "-i", str(input_video), "-i", str(dialogue_track)]
+    filters = [f"[1:a]aresample=48000,apad,atrim=0:{media['duration']:.6f}[dialogue]"]
+    if preserve_source_audio and media["has_audio"]:
+        filters.append(f"[0:a]aresample=48000,apad,atrim=0:{media['duration']:.6f}[source]")
+        if duck_source_audio:
+            filters.append("[source][dialogue]sidechaincompress=threshold=0.025:ratio=10:attack=15:release=350[ducked]")
+            base = "[ducked]"
+        else:
+            base = "[source]"
+        filters.append(f"{base}[dialogue]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
+    else:
+        filters.append("[dialogue]loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            "0:v:0",
+            "-map",
+            "[aout]",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-t",
+            f"{media['duration']:.6f}",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ]
+    )
+    _run(command, "mixing dialogue into the video")
+    result = probe_media(output)
+    return {"path": str(output.resolve()), "bytes": output.stat().st_size, **result, "audio": analyze_audio(output)}
+
+
+def replace_audio_track(video_source: Path, audio_source: Path, output: Path) -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise SkillError("ffmpeg is required to replace a video audio track")
+    video = probe_media(video_source)
+    audio = probe_media(audio_source)
+    if not audio["has_audio"]:
+        raise SkillError("replacement audio source has no audio stream")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _run(
+        [
+            ffmpeg,
+            "-y",
+            "-i",
+            str(video_source),
+            "-i",
+            str(audio_source),
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-t",
+            f"{video['duration']:.6f}",
+            "-movflags",
+            "+faststart",
+            str(output),
+        ],
+        "restoring the final mixed audio after lip sync",
+    )
+    result = probe_media(output)
+    return {"path": str(output.resolve()), "bytes": output.stat().st_size, **result, "audio": analyze_audio(output)}
+
+
 def quality_report(path: Path, *, expected_size: str = "auto", expected_duration: float | None = None) -> dict[str, Any]:
     media = probe_media(path)
     errors: list[str] = []
@@ -70,7 +289,12 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
             raise SkillError("expected size must be WIDTHxHEIGHT or auto")
         width, height = (int(value) for value in expected_size.split("x", 1))
         if (media["width"], media["height"]) != (width, height):
-            errors.append(f"orientation or dimensions mismatch: expected {width}x{height}, got {media['width']}x{media['height']}")
+            expected_ratio = width / height
+            actual_ratio = media["width"] / media["height"]
+            if abs(expected_ratio - actual_ratio) / expected_ratio > 0.08:
+                errors.append(f"orientation or dimensions mismatch: expected {width}x{height}, got {media['width']}x{media['height']}")
+            else:
+                warnings.append(f"provider scaled the requested frame: expected {width}x{height}, got {media['width']}x{media['height']}")
     if expected_duration is not None and abs(media["duration"] - expected_duration) > max(1.5, expected_duration * 0.25):
         warnings.append(f"duration differs from request: expected about {expected_duration}s, got {media['duration']}s")
     if media["codec"] != "h264" or media["pixel_format"] != "yuv420p":
@@ -79,6 +303,7 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
     ffmpeg = shutil.which("ffmpeg")
     black_events: list[str] = []
     freeze_events: list[str] = []
+    audio_signals: dict[str, Any] = {}
     if ffmpeg:
         result = subprocess.run(
             [
@@ -105,6 +330,19 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
             warnings.append(f"detected {len(black_events)} black segment event(s)")
         if freeze_events:
             warnings.append(f"detected {len(freeze_events)} freeze event(s)")
+        if media["has_audio"]:
+            try:
+                audio_signals = analyze_audio(path)
+                maximum = audio_signals.get("max_volume_db")
+                mean = audio_signals.get("mean_volume_db")
+                if maximum is None or maximum < -35:
+                    warnings.append("audio track is effectively silent")
+                elif mean is not None and mean < -42:
+                    warnings.append("audio track is unusually quiet")
+                if float(audio_signals.get("silence_ratio", 0)) > 0.95:
+                    warnings.append("audio track is more than 95% silent")
+            except SkillError as error:
+                warnings.append(f"audio analysis failed: {error}")
     else:
         warnings.append("ffmpeg not found; black/freeze scan was skipped")
 
@@ -114,7 +352,7 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
         "media": media,
         "errors": errors,
         "warnings": warnings,
-        "signals": {"black_events": black_events[:20], "freeze_events": freeze_events[:20]},
+        "signals": {"black_events": black_events[:20], "freeze_events": freeze_events[:20], "audio": audio_signals},
         "manual_review_required": [
             "character identity and wardrobe continuity",
             "hands, fingers, limbs, and facial anatomy",
@@ -149,9 +387,11 @@ def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count
     return frames
 
 
-def _subtitle_filter(path: Path) -> str:
+def _subtitle_filter(path: Path, style: str = "clean") -> str:
+    if style not in SUBTITLE_STYLES:
+        raise SkillError("subtitle style must be clean, cinematic, or news")
     value = path.resolve().as_posix().replace("'", "\\'").replace(":", "\\:")
-    return f"subtitles=filename='{value}'"
+    return f"subtitles=filename='{value}':force_style='{SUBTITLE_STYLES[style]}'"
 
 
 def postprocess_video(
@@ -161,6 +401,7 @@ def postprocess_video(
     music: Path | None = None,
     voice: Path | None = None,
     subtitles: Path | None = None,
+    subtitle_style: str = "clean",
     fade_seconds: float = 0.0,
 ) -> dict[str, Any]:
     ffmpeg = shutil.which("ffmpeg")
@@ -189,7 +430,7 @@ def postprocess_video(
 
     video_filters: list[str] = []
     if subtitles:
-        video_filters.append(_subtitle_filter(subtitles))
+        video_filters.append(_subtitle_filter(subtitles, subtitle_style))
     if fade_seconds:
         video_filters.extend(
             [
@@ -204,15 +445,22 @@ def postprocess_video(
     if audio_inputs:
         filters: list[str] = []
         labels: list[str] = []
+        if media["has_audio"]:
+            source_volume = "0.35" if voice else "0.75"
+            filters.append(f"[0:a]volume={source_volume},apad,atrim=0:{media['duration']:.3f}[source]")
+            labels.append("[source]")
         for name, index in audio_inputs:
             label = f"a{index}"
             volume = "0.20" if name == "music" else "1.0"
             filters.append(f"[{index}:a]volume={volume},apad,atrim=0:{media['duration']:.3f}[{label}]")
             labels.append(f"[{label}]")
         if len(labels) == 1:
-            filters.append(f"{labels[0]}anull[aout]")
+            filters.append(f"{labels[0]}loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
         else:
-            filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=2[aout]")
+            filters.append(
+                f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=2:normalize=0,"
+                "loudnorm=I=-16:LRA=11:TP=-1.5[aout]"
+            )
         command.extend(["-filter_complex", ";".join(filters), "-map", "[aout]"])
     elif media["has_audio"]:
         command.extend(["-map", "0:a:0?"])
@@ -238,7 +486,12 @@ def postprocess_video(
     )
     _run(command, "post-processing video")
     result = probe_media(output_path)
-    return {"path": str(output_path.resolve()), "bytes": output_path.stat().st_size, **result}
+    return {
+        "path": str(output_path.resolve()),
+        "bytes": output_path.stat().st_size,
+        **result,
+        "subtitle_style": subtitle_style if subtitles else "",
+    }
 
 
 def extract_cover(input_path: Path, output_path: Path, *, at_seconds: float = 0.5) -> dict[str, Any]:

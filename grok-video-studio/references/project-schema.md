@@ -21,8 +21,22 @@
     "name": "Lead",
     "identity": "Stable face, hair, age, and body description",
     "wardrobe": "Canonical wardrobe",
-    "references": []
+    "references": [],
+    "voice": {
+      "provider": "cosyvoice",
+      "voice_id": "optional model speaker",
+      "reference_audio": "assets/voices/lead.wav",
+      "reference_text": "Exact transcript of the owned reference",
+      "consent": "synthetic"
+    }
   }],
+  "audio": {
+    "mode": "local-voice",
+    "language": "zh-CN",
+    "generate_audio": false,
+    "preserve_source_audio": true,
+    "duck_source_audio": true
+  },
   "character_master": {
     "enabled": true,
     "mode": "single-sheet",
@@ -62,9 +76,18 @@
     "scene_id": "office",
     "character_ids": ["lead"],
     "continuity_notes": "Keep wardrobe, eyeline, lighting, and prop position from the previous shot",
-    "narration": "Optional narration used as a subtitle fallback",
-    "subtitle": "Optional one-cue shorthand",
-    "subtitles": [{"start": 0.2, "end": 2.8, "text": "Optional precise cue relative to this shot"}],
+    "narration": "",
+    "subtitle": "",
+    "dialogue": [{
+      "id": "line-001",
+      "speaker": "lead",
+      "text": "Authoritative spoken and subtitle text",
+      "start": 0.2,
+      "end": 2.8,
+      "emotion": "calm",
+      "subtitle": true,
+      "lip_sync": true
+    }],
     "wardrobe": {},
     "continuity_change": false,
     "image_prompt": "One still keyframe",
@@ -98,6 +121,8 @@ Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed
 
 `defaults.audio_policy` is `preserve` by default. Assembly preserves source audio and inserts silent AAC audio for clips that have no audio, keeping the final timeline stream-compatible. Set it to `mute` only when a silent delivery is intentional. `allow_ui_elements` defaults to `false`; a shot may set it to `true` only when the script explicitly shows an app or social-video interface. The clean-frame rule is a prompt constraint and still requires visual QA because an upstream model can hallucinate overlays.
 
+`audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
+
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 
 ## Narration and subtitles
@@ -105,6 +130,8 @@ Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `comple
 `narration` and `subtitle` are optional strings. `subtitle` is a one-cue shorthand covering most of the shot. For precise timing, use `subtitles` and provide non-overlapping `start`/`end` seconds relative to that shot; do not use `subtitle` and `subtitles` together. Each cue must fit within the shot duration.
 
 The `subtitles` command prefers precise cues, then `subtitle`, then `narration`, then sourced-news narration. It exports UTF-8 SRT. With `--burn`, local FFmpeg creates `final-subtitled.mp4` while preserving clean `final.mp4`.
+
+When a shot has `dialogue`, it cannot also use `subtitle` or `subtitles`. Dialogue lines are preferred for SRT and define the TTS/mix timeline. IDs are unique project-wide, speakers reference known characters, lines do not overlap, and each `0 <= start < end <= shot.seconds`. `dialogue-render` keeps generated line assets under `assets/dialogue/` and resumable signatures in `dialogue-state.json`.
 
 ## Characters, continuity, and budget
 

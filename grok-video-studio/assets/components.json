@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "profiles": {
+    "core": [],
+    "native-dialogue": [],
+    "local-voice": ["cosyvoice"],
+    "full-dialogue": ["cosyvoice", "musetalk"]
+  },
+  "components": {
+    "cosyvoice": {
+      "title": "CosyVoice local TTS",
+      "repository": "https://github.com/FunAudioLLM/CosyVoice.git",
+      "commit": "074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc",
+      "submodules": true,
+      "service_url": "http://127.0.0.1:9880",
+      "gpu_vram_gb": 4,
+      "purpose": "Generate deterministic local dialogue audio from text and an owned or licensed voice reference."
+    },
+    "musetalk": {
+      "title": "MuseTalk local lip sync",
+      "repository": "https://github.com/TMElyralab/MuseTalk.git",
+      "commit": "0a89dec45a0192b824e3cf4daf96c239440c5ed8",
+      "submodules": false,
+      "service_url": "http://127.0.0.1:9881",
+      "gpu_vram_gb": 4,
+      "purpose": "Synchronize an AI character's mouth motion to a rendered dialogue track."
+    }
+  }
+}

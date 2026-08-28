@@ -26,7 +26,7 @@ Combine character identity, environment, framing, lighting, visual style, and co
 
 ## Video prompt
 
-Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Unless the script explicitly calls for an interface, keep the frame clean: no app UI, controls, counters, comments, captions, logos, watermarks, or stickers. Do not put dialogue, subtitles, music, or multiple scene cuts into a single generation prompt unless the provider explicitly supports them.
+Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Unless the script explicitly calls for an interface, keep the frame clean: no app UI, controls, counters, comments, captions, logos, watermarks, or stickers. Timed dialogue is injected only for `native-dialogue`; local modes ask for natural speaking motion while supplying exact speech and subtitles in post-production. Never ask the video model to draw ordinary subtitles, music controls, or multiple scene cuts.
 
 ## Multi-reference use
 

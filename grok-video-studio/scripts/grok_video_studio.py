@@ -31,8 +31,26 @@ from gvs_common import (
     print_json,
     save_settings,
 )
+from component_manager import (
+    component_plan,
+    component_status,
+    install_component_sources,
+    save_component_settings,
+    setup_component_runtimes,
+    start_components,
+    stop_components,
+)
+from dialogue_workflow import (
+    DIALOGUE_MODES,
+    audio_config,
+    dialogue_preflight,
+    dialogue_prompt,
+    dialogue_subtitle_cues,
+    render_local_dialogue,
+    validate_dialogue,
+)
 from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
-from media_tools import export_review_frames, extract_cover, postprocess_video, quality_report
+from media_tools import SUBTITLE_STYLES, export_review_frames, extract_cover, postprocess_video, quality_report
 from news_workflow import create_news_contract, load_news_contract, news_context, validate_news_contract
 from provider_contracts import task_progress
 from series_workflow import (
@@ -59,7 +77,7 @@ from series_workflow import (
 )
 
 
-SKILL_VERSION = "1.5.0"
+SKILL_VERSION = "1.6.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -245,6 +263,9 @@ def allow_ui_elements(project: dict[str, Any], shot: dict[str, Any] | None = Non
 
 
 def audio_policy(project: dict[str, Any]) -> str:
+    audio = project.get("audio") if isinstance(project.get("audio"), dict) else {}
+    if str(audio.get("mode", "")).strip().lower() == "mute":
+        return "mute"
     defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
     return str(defaults.get("audio_policy", "preserve")).strip().lower()
 
@@ -388,6 +409,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("project.allow_ui_elements must be a boolean")
     if audio_policy(project) not in VIDEO_AUDIO_POLICIES:
         errors.append("defaults.audio_policy must be preserve or mute")
+    errors.extend(validate_dialogue(root, project))
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -720,6 +742,9 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
             "[CLEAN FRAME POLICY]\n"
             "Clean cinematic frame. No app UI, controls, overlays, text, logos, watermarks, captions, counters, comments, or stickers anywhere in frame."
         )
+    spoken = dialogue_prompt(project, shot)
+    if spoken:
+        sections.append("[DIALOGUE]\n" + spoken)
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
     return "\n\n".join(sections)
 
@@ -833,6 +858,7 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
         "prompts": prompts,
         "budget": cost,
         "warnings": warnings,
+        "dialogue": dialogue_preflight(project),
     }
 
 
@@ -1075,6 +1101,7 @@ def generate_videos(
     _, _, settings = clients()
     mode = video_mode(project)
     provider = video_provider(project, settings)
+    generate_audio = bool(audio_config(project)["generate_audio"])
     if mode not in {"text-to-video", "image-to-video"}:
         raise SkillError("video_mode must be text-to-video or image-to-video")
     video_client = select_video_client(settings, provider)
@@ -1091,7 +1118,7 @@ def generate_videos(
         resolution = video_resolution(project, shot)
         aspect_ratio = video_aspect_ratio(project, shot)
         current_signature = signature(
-            {"mode": mode, "provider": provider, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio},
+            {"mode": mode, "provider": provider, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
             references,
         )
         existing_path = str(video.get("path", ""))
@@ -1138,6 +1165,7 @@ def generate_videos(
                     "resolution": resolution,
                     "aspect_ratio": aspect_ratio,
                     "reference_count": len(references),
+                    "generate_audio": generate_audio,
                     "error": "",
                     "create_attempted_at": int(time.time()),
                 }
@@ -1152,6 +1180,7 @@ def generate_videos(
                     size=size,
                     resolution=resolution,
                     aspect_ratio=aspect_ratio,
+                    generate_audio=generate_audio,
                     references=references,
                 )
             except Exception as error:
@@ -1355,6 +1384,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
 
 def qa_project(root: Path) -> dict[str, Any]:
     project = require_valid_project(root)
+    dialogue = dialogue_preflight(project)
     state = load_state(root)
     reports: list[dict[str, Any]] = []
     review_root = root / "deliverables" / "qa-frames"
@@ -1399,11 +1429,24 @@ def qa_project(root: Path) -> dict[str, Any]:
         reports.append({"kind": "deliverable", "id": "final", **report})
     save_state(root, state)
     technical_ok = all(bool(item.get("ok")) for item in reports) if reports else False
+    dialogue_review = {
+        **dialogue,
+        "manual_checks": (
+            [
+                "listen for exact approved wording and intelligibility",
+                "verify mouth timing and speaker identity",
+                "reject unintended model-baked captions; use the clean local subtitle derivative instead",
+            ]
+            if dialogue["mode"] == "native-dialogue" and dialogue["line_count"]
+            else []
+        ),
+    }
     return {
         "ok": technical_ok,
         "technical_ok": technical_ok,
         "reports": reports,
         "project_audit": audit_project(root, project),
+        "dialogue_review": dialogue_review,
         "visual_review_required": True,
         "manual_review_complete": False,
     }
@@ -1452,7 +1495,7 @@ def init_project(
     if path.exists():
         raise SkillError(f"project already exists: {path}")
     workflow = get_workflow(workflow_id)
-    for folder in ("assets/references", "assets/keyframes", "clips", "deliverables", "logs"):
+    for folder in ("assets/references", "assets/keyframes", "assets/voices", "assets/dialogue", "clips", "deliverables", "logs"):
         (root / folder).mkdir(parents=True, exist_ok=True)
     shot_defaults = workflow.get("shot_defaults") if isinstance(workflow.get("shot_defaults"), dict) else {}
     shots = [
@@ -1464,6 +1507,7 @@ def init_project(
             "continuity_notes": "",
             "narration": "",
             "subtitle": "",
+            "dialogue": [],
             "image_prompt": "",
             "video_prompt": "",
             "generate_image": False if video_mode_value == "text-to-video" else bool(shot_defaults.get("generate_image", True)),
@@ -1491,6 +1535,13 @@ def init_project(
         "character_bible": "",
         "style_bible": "",
         "characters": [],
+        "audio": {
+            "mode": "preserve",
+            "language": "zh-CN",
+            "generate_audio": False,
+            "preserve_source_audio": True,
+            "duck_source_audio": True,
+        },
         "character_master": {
             "enabled": uses_master,
             "mode": "single-sheet",
@@ -1783,6 +1834,9 @@ def subtitle_cues(root: Path, project: dict[str, Any]) -> list[dict[str, Any]]:
         except SkillError:
             news_narration = {}
     cues: list[dict[str, Any]] = []
+    dialogue_by_shot: dict[str, list[dict[str, Any]]] = {}
+    for cue in dialogue_subtitle_cues(project):
+        dialogue_by_shot.setdefault(str(cue["shot_id"]), []).append(cue)
     offset = 0.0
     for shot in project.get("shots", []):
         if not isinstance(shot, dict):
@@ -1790,7 +1844,9 @@ def subtitle_cues(root: Path, project: dict[str, Any]) -> list[dict[str, Any]]:
         shot_id = str(shot.get("id", ""))
         duration = float(shot_value(project, shot, "seconds", 6))
         items = shot.get("subtitles") if isinstance(shot.get("subtitles"), list) else []
-        if items:
+        if dialogue_by_shot.get(shot_id):
+            cues.extend(dialogue_by_shot[shot_id])
+        elif items:
             for item in items:
                 if not isinstance(item, dict):
                     continue
@@ -1862,6 +1918,28 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--skip-test", action="store_true")
 
     commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")
+
+    components_plan = commands.add_parser("components-plan", help="Show optional local-service requirements without changing the machine.")
+    components_plan.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"), required=True)
+    components_configure = commands.add_parser("components-configure", help="Save the user-approved optional component profile and locations.")
+    components_configure.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"), required=True)
+    components_configure.add_argument("--source-root", type=Path)
+    components_configure.add_argument("--models-root", type=Path)
+    components_configure.add_argument("--cosyvoice-url")
+    components_configure.add_argument("--musetalk-url")
+    components_install = commands.add_parser("components-install", help="Download pinned optional component sources after explicit approval.")
+    components_install.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"), required=True)
+    components_install.add_argument("--accept-downloads", action="store_true")
+    components_doctor = commands.add_parser("components-doctor", help="Check optional source pins and localhost services.")
+    components_doctor.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"))
+    components_setup = commands.add_parser("components-setup", help="Build isolated Docker runtimes and optionally download model weights.")
+    components_setup.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
+    components_setup.add_argument("--accept-downloads", action="store_true")
+    components_setup.add_argument("--include-models", action="store_true")
+    components_start = commands.add_parser("components-start", help="Start user-approved localhost AI media services.")
+    components_start.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
+    components_stop = commands.add_parser("components-stop", help="Stop and remove only Grok Video Studio managed service containers.")
+    components_stop.add_argument("--profile", choices=("local-voice", "full-dialogue"), required=True)
 
     init = commands.add_parser("init", help="Create a project contract and durable state.")
     init.add_argument("project", type=Path)
@@ -1999,6 +2077,7 @@ def build_parser() -> argparse.ArgumentParser:
     postprocess.add_argument("--music", type=Path)
     postprocess.add_argument("--voice", type=Path)
     postprocess.add_argument("--subtitles", type=Path)
+    postprocess.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLES), default="clean")
     postprocess.add_argument("--fade-seconds", type=float, default=0.0)
 
     subtitles = commands.add_parser("subtitles", help="Export deterministic SRT and optionally burn a separate subtitled MP4.")
@@ -2007,6 +2086,17 @@ def build_parser() -> argparse.ArgumentParser:
     subtitles.add_argument("--burn", action="store_true")
     subtitles.add_argument("--source-video", type=Path)
     subtitles.add_argument("--output-video", type=Path)
+    subtitles.add_argument("--style", choices=tuple(SUBTITLE_STYLES), default="clean")
+
+    dialogue = commands.add_parser("dialogue-render", help="Render local TTS dialogue, deterministic timing, mixing, and optional lip sync.")
+    dialogue.add_argument("project", type=Path)
+    dialogue.add_argument("--source-video", type=Path)
+    dialogue.add_argument("--output-video", type=Path)
+    dialogue.add_argument("--cosyvoice-url")
+    dialogue.add_argument("--musetalk-url")
+    dialogue.add_argument("--force", action="store_true")
+    dialogue.add_argument("--burn-subtitles", action="store_true")
+    dialogue.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLES), default="clean")
 
     cover = commands.add_parser("cover", help="Export a representative frame as a JPG or PNG cover.")
     cover.add_argument("input", type=Path)
@@ -2049,6 +2139,12 @@ def main() -> int:
                         },
                     ],
                     "workflows": workflow_catalog(),
+                    "audio_routes": [
+                        {"id": "preserve", "requires": [], "use_for": "keep provider or supplied source audio"},
+                        {"id": "native-dialogue", "requires": [], "use_for": "ask the video provider for synchronized spoken dialogue"},
+                        {"id": "local-voice", "requires": ["cosyvoice"], "use_for": "deterministic local TTS, subtitles, and FFmpeg mixing"},
+                        {"id": "local-lipsync", "requires": ["cosyvoice", "musetalk"], "use_for": "local TTS plus character mouth synchronization"},
+                    ],
                     "selection": "Choose one product route, then select an internal workflow preset when needed.",
                 }
             )
@@ -2063,6 +2159,44 @@ def main() -> int:
             code, result = doctor()
             print_json(result)
             return code
+        if args.command == "components-plan":
+            print_json({"ok": True, **component_plan(args.profile)})
+            return 0
+        if args.command == "components-configure":
+            settings = save_component_settings(
+                profile=args.profile,
+                source_root=args.source_root,
+                models_root=args.models_root,
+                cosyvoice_url=args.cosyvoice_url,
+                musetalk_url=args.musetalk_url,
+            )
+            print_json({"ok": True, "settings": settings, "plan": component_plan(args.profile, settings)})
+            return 0
+        if args.command == "components-install":
+            print_json({"ok": True, **install_component_sources(args.profile, accept_downloads=args.accept_downloads)})
+            return 0
+        if args.command == "components-doctor":
+            result = component_status(args.profile)
+            print_json(result)
+            return 0 if result["ok"] else 1
+        if args.command == "components-setup":
+            print_json(
+                {
+                    "ok": True,
+                    **setup_component_runtimes(
+                        args.profile,
+                        accept_downloads=args.accept_downloads,
+                        include_models=args.include_models,
+                    ),
+                }
+            )
+            return 0
+        if args.command == "components-start":
+            print_json({"ok": True, **start_components(args.profile)})
+            return 0
+        if args.command == "components-stop":
+            print_json({"ok": True, **stop_components(args.profile)})
+            return 0
         if args.command == "series-init":
             workflow = get_workflow(args.workflow)
             durations = plan_shot_durations(
@@ -2431,6 +2565,7 @@ def main() -> int:
                 music=args.music.resolve() if args.music else None,
                 voice=args.voice.resolve() if args.voice else None,
                 subtitles=args.subtitles.resolve() if args.subtitles else None,
+                subtitle_style=args.subtitle_style,
                 fade_seconds=args.fade_seconds,
             )
             print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
@@ -2450,8 +2585,37 @@ def main() -> int:
                     raise SkillError(f"subtitle source video does not exist: {source}")
                 if source == output:
                     raise SkillError("subtitled output must differ from the clean source video")
-                video_result = postprocess_video(source, output, subtitles=srt_output)
+                video_result = postprocess_video(source, output, subtitles=srt_output, subtitle_style=args.style)
             print_json({"ok": True, "subtitles": subtitle_result, "burned_video": video_result or {}})
+            return 0
+        if args.command == "dialogue-render":
+            root = args.project.resolve()
+            project = require_valid_project(root)
+            source = args.source_video.resolve() if args.source_video else root / "deliverables" / "final.mp4"
+            output = args.output_video.resolve() if args.output_video else root / "deliverables" / "final-dialogue.mp4"
+            if source == output:
+                raise SkillError("dialogue output must differ from the clean source video")
+            result = render_local_dialogue(
+                root,
+                project,
+                source_video=source,
+                output_video=output,
+                service_url=args.cosyvoice_url,
+                musetalk_url=args.musetalk_url,
+                force=args.force,
+            )
+            subtitles_result = export_subtitles(root, project, root / "deliverables" / "dialogue.srt")
+            burned: dict[str, Any] = {}
+            if args.burn_subtitles:
+                delivery = Path(str((result.get("lipsync") or {}).get("path") or output))
+                burned_path = delivery.with_name(delivery.stem + "-subtitled.mp4")
+                burned = postprocess_video(
+                    delivery,
+                    burned_path,
+                    subtitles=Path(subtitles_result["path"]),
+                    subtitle_style=args.subtitle_style,
+                )
+            print_json({"ok": True, "dialogue": result, "subtitles": subtitles_result, "burned_video": burned})
             return 0
         if args.command == "cover":
             input_path = args.input.resolve()

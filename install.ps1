@@ -5,7 +5,15 @@ param(
     [switch]$Force,
     [switch]$Configure,
     [switch]$ConfigureFromStdin,
-    [switch]$SkipProviderTest
+    [switch]$SkipProviderTest,
+    [ValidateSet("core", "native-dialogue", "local-voice", "full-dialogue")]
+    [string]$ComponentProfile = "core",
+    [string]$ComponentSourceRoot,
+    [string]$ComponentModelsRoot,
+    [switch]$InstallComponents,
+    [switch]$IncludeComponentModels,
+    [switch]$AcceptComponentDownloads,
+    [switch]$StartComponents
 )
 
 $ErrorActionPreference = "Stop"
@@ -68,7 +76,51 @@ if ($Configure -or $ConfigureFromStdin) {
     }
 }
 
+$componentArguments = @($cli, "components-configure", "--profile", $ComponentProfile)
+if (-not [string]::IsNullOrWhiteSpace($ComponentSourceRoot)) {
+    $componentArguments += @("--source-root", $ComponentSourceRoot)
+}
+if (-not [string]::IsNullOrWhiteSpace($ComponentModelsRoot)) {
+    $componentArguments += @("--models-root", $ComponentModelsRoot)
+}
+& $Python @componentArguments
+if ($LASTEXITCODE -ne 0) {
+    throw "Component profile configuration failed."
+}
+
+if ($InstallComponents) {
+    if ($ComponentProfile -notin @("local-voice", "full-dialogue")) {
+        throw "-InstallComponents requires -ComponentProfile local-voice or full-dialogue."
+    }
+    if (-not $AcceptComponentDownloads) {
+        throw "Component installation requires -AcceptComponentDownloads after the user approves downloads."
+    }
+    & $Python $cli components-install --profile $ComponentProfile --accept-downloads
+    if ($LASTEXITCODE -ne 0) {
+        throw "Optional component source installation failed."
+    }
+    $setupArguments = @($cli, "components-setup", "--profile", $ComponentProfile, "--accept-downloads")
+    if ($IncludeComponentModels) {
+        $setupArguments += "--include-models"
+    }
+    & $Python @setupArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw "Optional component runtime setup failed."
+    }
+}
+
+if ($StartComponents) {
+    if (-not $InstallComponents -or -not $IncludeComponentModels) {
+        throw "-StartComponents requires -InstallComponents and -IncludeComponentModels."
+    }
+    & $Python $cli components-start --profile $ComponentProfile
+    if ($LASTEXITCODE -ne 0) {
+        throw "Optional component services failed to start."
+    }
+}
+
 Write-Host "Installed Grok Video Studio to $destinationPath"
+Write-Host "Component profile: $ComponentProfile"
 if (-not $Configure -and -not $ConfigureFromStdin) {
     Write-Host "Next: Codex can run python `"$cli`" configure --credentials-stdin --skip-test and provide the credential JSON through process stdin."
 }

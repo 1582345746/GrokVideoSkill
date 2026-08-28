@@ -41,6 +41,12 @@ series-root/
     "name": "Lead",
     "identity": "Stable age, face, hair, build, and distinguishing details",
     "wardrobe": "Canonical wardrobe and signature props",
+    "voice": {
+      "provider": "cosyvoice",
+      "reference_audio": "assets/voices/lead.wav",
+      "reference_text": "Exact transcript of the owned series voice reference",
+      "consent": "owned"
+    },
     "master": {
       "enabled": true,
       "generate": true,
@@ -51,6 +57,13 @@ series-root/
       "image_quality": "auto"
     }
   }],
+  "audio": {
+    "mode": "local-voice",
+    "language": "zh-CN",
+    "generate_audio": false,
+    "preserve_source_audio": true,
+    "duck_source_audio": true
+  },
   "defaults": {
     "episode_target_seconds": 90,
     "workflow": "character-consistent-story",
@@ -80,6 +93,8 @@ series-root/
 ```
 
 For image-to-video, a character master is enabled by default and requires a master prompt. For text-to-video, it is disabled by default and no image key is required. Set `master.enabled` explicitly when overriding that rule.
+
+Series-level `audio` and character `voice` settings are synchronized into every episode project. An owned/licensed/synthetic series voice reference is copied into each episode's `assets/voices/` directory, so episode projects remain self-contained and resumable. Every episode still owns its timed dialogue lines and can be reviewed before generation.
 
 ## Planning and generation
 

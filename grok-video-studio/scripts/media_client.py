@@ -200,6 +200,7 @@ class QuickAINewVideoClient:
         size: str,
         resolution: str = "480p",
         aspect_ratio: str = "16:9",
+        generate_audio: bool = False,
         references: Iterable[Path],
     ) -> str:
         _validate_prompt(prompt)
@@ -213,6 +214,7 @@ class QuickAINewVideoClient:
             ("seconds", str(seconds)),
             ("resolution", resolution),
             ("aspect_ratio", aspect_ratio),
+            ("generate_audio", "true" if generate_audio else "false"),
         ]
         if size and size != "auto":
             fields.append(("size", size))
@@ -336,6 +338,7 @@ class QuickAIVideoClient:
         size: str,
         resolution: str = "480p",
         aspect_ratio: str = "16:9",
+        generate_audio: bool = False,
         references: Iterable[Path],
     ) -> str:
         _validate_prompt(prompt)
@@ -350,6 +353,7 @@ class QuickAIVideoClient:
             "seconds": seconds,
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
+            "generate_audio": generate_audio,
         }
         if size and size != "auto":
             payload["size"] = size

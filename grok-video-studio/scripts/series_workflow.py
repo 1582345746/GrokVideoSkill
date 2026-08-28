@@ -21,6 +21,8 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 EPISODE_STATUSES = {"draft", "approved", "generating", "needs_review", "completed", "failed"}
 MAX_PROMPT_CHARS = 4096
 SAFE_PROMPT_CHARS = 3800
+AUDIO_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
+VOICE_CONSENTS = {"synthetic", "owned", "licensed"}
 
 
 def series_file(root: Path) -> Path:
@@ -150,7 +152,7 @@ def create_series_contract(
         raise SkillError("episode count must be from 1 to 100")
     if target_seconds < 1 or target_seconds > 750:
         raise SkillError("episode target duration must be from 1 to 750 seconds")
-    for folder in ("assets/character-masters", "assets/references", "episodes", "logs"):
+    for folder in ("assets/character-masters", "assets/references", "assets/voices", "episodes", "logs"):
         (root / folder).mkdir(parents=True, exist_ok=True)
     episodes = [
         {
@@ -175,6 +177,13 @@ def create_series_contract(
         "locations": [],
         "props": [],
         "characters": [],
+        "audio": {
+            "mode": "preserve",
+            "language": "zh-CN",
+            "generate_audio": False,
+            "preserve_source_audio": True,
+            "duck_source_audio": True,
+        },
         "defaults": {
             "episode_target_seconds": target_seconds,
             "workflow": workflow,
@@ -221,6 +230,17 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
             errors.append(f"series.{name} is required")
     if _contains_secret(series):
         errors.append("series contains a credential-like field; credentials must stay outside projects")
+    audio = series.get("audio") if isinstance(series.get("audio"), dict) else {}
+    if series.get("audio") is not None and not isinstance(series.get("audio"), dict):
+        errors.append("series.audio must be an object")
+    audio_mode = str(audio.get("mode", "preserve")).strip().lower()
+    if audio_mode not in AUDIO_MODES:
+        errors.append("series.audio.mode is invalid")
+    generate_audio = bool(audio.get("generate_audio", audio_mode == "native-dialogue"))
+    if audio_mode == "native-dialogue" and not generate_audio:
+        errors.append("series.audio.generate_audio must be true for native-dialogue")
+    if audio_mode in {"mute", "local-voice", "local-lipsync"} and generate_audio:
+        errors.append(f"series.audio.generate_audio must be false for {audio_mode}")
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
     if defaults.get("video_mode") not in {"text-to-video", "image-to-video"}:
         errors.append("series.defaults.video_mode must be text-to-video or image-to-video")
@@ -245,6 +265,20 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         for name in ("name", "identity"):
             if not str(character.get(name, "")).strip():
                 errors.append(f"{prefix}.{name} is required")
+        voice = character.get("voice")
+        if voice is not None and not isinstance(voice, dict):
+            errors.append(f"{prefix}.voice must be an object")
+        elif isinstance(voice, dict):
+            reference = str(voice.get("reference_audio", "")).strip()
+            if reference:
+                if str(voice.get("consent", "")).strip().lower() not in VOICE_CONSENTS:
+                    errors.append(f"{prefix}.voice.consent must be synthetic, owned, or licensed")
+                if not str(voice.get("reference_text", "")).strip():
+                    errors.append(f"{prefix}.voice.reference_text is required")
+                try:
+                    resolve_series_path(root, reference)
+                except SkillError as error:
+                    errors.append(str(error))
         master = series_character_master_config(series, character)
         if bool(master["enabled"]):
             path_value = str(master.get("path", f"assets/character-masters/{character_id}.png")).strip()
@@ -316,7 +350,7 @@ def episode_contract_digest(root: Path, series: dict[str, Any], episode: dict[st
     project_root = episode_root(root, episode)
     creative_series = {
         key: series.get(key)
-        for key in ("version", "id", "title", "premise", "season_arc", "style_bible", "locations", "props", "characters", "defaults")
+        for key in ("version", "id", "title", "premise", "season_arc", "style_bible", "locations", "props", "characters", "audio", "defaults")
     }
     value = {
         "series": creative_series,
@@ -374,6 +408,8 @@ def sync_episode_contract(root: Path, series: dict[str, Any], episode: dict[str,
     if str(episode.get("synopsis", "")).strip():
         project["topic"] = str(episode["synopsis"]).strip()
     project["character_bible"] = canonical_character_bible(series)
+    if isinstance(series.get("audio"), dict):
+        project["audio"] = dict(series["audio"])
     if str(series.get("style_bible", "")).strip():
         project["style_bible"] = str(series["style_bible"]).strip()
     old_characters = {
@@ -414,6 +450,17 @@ def sync_episode_contract(root: Path, series: dict[str, Any], episode: dict[str,
                     shutil.copy2(source, target)
                 references.insert(0, target.relative_to(project_root).as_posix())
         existing["references"] = list(dict.fromkeys(references))
+        if isinstance(character.get("voice"), dict):
+            voice = dict(character["voice"])
+            reference_value = str(voice.get("reference_audio", "")).strip()
+            if reference_value:
+                source = resolve_series_path(root, reference_value)
+                target = project_root / "assets" / "voices" / f"{character_id}{source.suffix.lower()}"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                if not _same_file(source, target):
+                    shutil.copy2(source, target)
+                voice["reference_audio"] = target.relative_to(project_root).as_posix()
+            existing["voice"] = voice
         synced_characters.append(existing)
     project["characters"] = synced_characters
     master = project.get("character_master")
