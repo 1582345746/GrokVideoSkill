@@ -23,6 +23,7 @@ from gvs_common import (
     DEFAULT_VIDEO_MODEL,
     SkillError,
     assert_mp4,
+    atomic_write_bytes,
     atomic_write_json,
     config_path,
     load_settings,
@@ -32,10 +33,33 @@ from gvs_common import (
 )
 from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
 from media_tools import export_review_frames, extract_cover, postprocess_video, quality_report
+from news_workflow import create_news_contract, load_news_contract, news_context, validate_news_contract
 from provider_contracts import task_progress
+from series_workflow import (
+    accept_episode,
+    approve_episode,
+    begin_episode,
+    create_series_contract,
+    episode_records,
+    episode_root,
+    fail_episode_generation,
+    finish_episode_generation,
+    generate_series_characters,
+    get_episode,
+    load_series,
+    load_series_state,
+    select_next_episode,
+    series_context,
+    series_character_master_config,
+    series_character_preflight,
+    series_status,
+    sync_all_episode_contracts,
+    sync_episode_contract,
+    validate_series,
+)
 
 
-SKILL_VERSION = "1.4.0"
+SKILL_VERSION = "1.5.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -166,7 +190,16 @@ def _known_secret_field(value: Any) -> bool:
     if isinstance(value, dict):
         for key, child in value.items():
             normalized = str(key).lower().replace("-", "_")
-            if normalized in {"api_key", "quickai_key", "quickainew_key", "authorization", "secret"}:
+            if normalized in {
+                "api_key",
+                "quickai_key",
+                "quickainew_key",
+                "quickai_image_key",
+                "quickai_video_key",
+                "quickainew_video_key",
+                "authorization",
+                "secret",
+            }:
                 return True
             if _known_secret_field(child):
                 return True
@@ -471,6 +504,37 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.wardrobe must map character ids to wardrobe descriptions")
         if raw_shot.get("allow_ui_elements") is not None and not isinstance(raw_shot.get("allow_ui_elements"), bool):
             errors.append(f"{prefix}.allow_ui_elements must be a boolean")
+        if raw_shot.get("narration") is not None and not isinstance(raw_shot.get("narration"), str):
+            errors.append(f"{prefix}.narration must be a string")
+        if raw_shot.get("subtitle") is not None and not isinstance(raw_shot.get("subtitle"), str):
+            errors.append(f"{prefix}.subtitle must be a string")
+        subtitle_items = raw_shot.get("subtitles")
+        if subtitle_items is not None:
+            if raw_shot.get("subtitle"):
+                errors.append(f"{prefix} cannot use both subtitle and subtitles")
+            if not isinstance(subtitle_items, list):
+                errors.append(f"{prefix}.subtitles must be an array")
+            else:
+                previous_end = 0.0
+                shot_seconds = shot_value(project, raw_shot, "seconds", 6)
+                for cue_index, cue in enumerate(subtitle_items):
+                    cue_prefix = f"{prefix}.subtitles[{cue_index}]"
+                    if not isinstance(cue, dict):
+                        errors.append(f"{cue_prefix} must be an object")
+                        continue
+                    if not str(cue.get("text", "")).strip():
+                        errors.append(f"{cue_prefix}.text is required")
+                    try:
+                        start = float(cue.get("start"))
+                        end = float(cue.get("end"))
+                    except (TypeError, ValueError):
+                        errors.append(f"{cue_prefix}.start and end must be seconds")
+                        continue
+                    if start < 0 or end <= start or not isinstance(shot_seconds, int) or end > shot_seconds:
+                        errors.append(f"{cue_prefix} must satisfy 0 <= start < end <= shot seconds")
+                    if start < previous_end:
+                        errors.append(f"{cue_prefix} overlaps the previous subtitle cue")
+                    previous_end = max(previous_end, end)
         if str(raw_shot.get("image_prompt", "")).strip():
             image_prompt = composed_image_prompt(project, raw_shot)
             if len(image_prompt) > max_prompt_chars:
@@ -497,8 +561,29 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         for ref_name in ("image_references", "video_references"):
             references = raw_shot.get(ref_name, [])
             errors.extend(_reference_errors(root, references, f"{prefix}.{ref_name}", max_references))
+        if bool(raw_shot.get("generate_image", True)) and isinstance(shot_character_ids, list):
+            by_character_id = {
+                str(character.get("id", "")): character for character in raw_characters if isinstance(character, dict)
+            }
+            combined = [
+                str(value)
+                for character_id in shot_character_ids
+                for value in (
+                    by_character_id.get(str(character_id), {}).get("references", [])
+                    if isinstance(by_character_id.get(str(character_id), {}).get("references", []), list)
+                    else []
+                )
+            ]
+            image_references = raw_shot.get("image_references", [])
+            combined.extend(str(value) for value in image_references if isinstance(image_references, list))
+            if bool(raw_shot.get("use_character_master", False)):
+                combined.append(str(master.get("path", "")))
+            if len(dict.fromkeys(value for value in combined if value)) > max_references:
+                errors.append(f"{prefix} combined character and image references exceed max_reference_images {max_references}")
     if total_seconds > max_seconds:
         errors.append(f"total video seconds {total_seconds} exceeds max_total_video_seconds {max_seconds}")
+    if project.get("workflow") == "news-video":
+        errors.extend(validate_news_contract(root, project))
     return errors
 
 
@@ -578,6 +663,18 @@ def structured_shot_context(project: dict[str, Any], shot: dict[str, Any]) -> st
     return "\n".join(lines)
 
 
+def episode_continuity_context(project: dict[str, Any]) -> str:
+    value = project.get("series_context") if isinstance(project.get("series_context"), dict) else {}
+    sections = []
+    continuity_in = str(value.get("continuity_in", "")).strip()
+    previous = str(value.get("previous_episode_continuity", "")).strip()
+    if previous:
+        sections.append("Reviewed previous episode end state: " + previous)
+    if continuity_in:
+        sections.append("Required current episode starting state: " + continuity_in)
+    return "\n".join(sections)
+
+
 def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
     character = str(project.get("character_bible", "")).strip()
@@ -589,6 +686,9 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     structured = structured_shot_context(project, shot)
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
+    episode_continuity = episode_continuity_context(project)
+    if episode_continuity:
+        sections.append("[EPISODE CONTINUITY]\n" + episode_continuity)
     if not allow_ui_elements(project, shot):
         sections.append(
             "[CLEAN FRAME POLICY]\n"
@@ -612,6 +712,9 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     structured = structured_shot_context(project, shot)
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
+    episode_continuity = episode_continuity_context(project)
+    if episode_continuity:
+        sections.append("[EPISODE CONTINUITY]\n" + episode_continuity)
     if not allow_ui_elements(project, shot):
         sections.append(
             "[CLEAN FRAME POLICY]\n"
@@ -619,6 +722,21 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         )
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
     return "\n\n".join(sections)
+
+
+def shot_character_references(root: Path, project: dict[str, Any], shot: dict[str, Any]) -> list[Path]:
+    requested = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
+    by_id = {str(item.get("id", "")): item for item in project_characters(project)}
+    references: list[Path] = []
+    for character_id in requested:
+        character = by_id.get(str(character_id))
+        if not character:
+            continue
+        for value in character.get("references", []):
+            path = resolve_project_path(root, str(value))
+            if path not in references:
+                references.append(path)
+    return references
 
 
 def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
@@ -772,21 +890,21 @@ def write_event(root: Path, event: dict[str, Any]) -> None:
 def clients(*, require_secrets: bool = True) -> tuple[QuickAIImageClient, QuickAINewVideoClient, dict[str, Any]]:
     settings = load_settings(require_secrets=require_secrets)
     return (
-        QuickAIImageClient(settings["quickai_base_url"], settings["quickai_key"], settings["image_model"]),
-        QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_key"], settings["video_model"]),
+        QuickAIImageClient(settings["quickai_base_url"], settings["quickai_image_key"], settings["image_model"]),
+        QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"]),
         settings,
     )
 
 
 def select_video_client(settings: dict[str, Any], provider: str) -> QuickAIVideoClient | QuickAINewVideoClient:
     if provider == "quickai":
-        if not settings.get("quickai_key"):
-            raise SkillError("QuickAI key is required for video_provider=quickai")
-        return QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_key"], settings["video_model"])
+        if not settings.get("quickai_video_key"):
+            raise SkillError("QuickAI video key is required for video_provider=quickai")
+        return QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_video_key"], settings["video_model"])
     if provider == "quickainew":
-        if not settings.get("quickainew_key"):
-            raise SkillError("QuickAI New key is required for video_provider=quickainew")
-        return QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_key"], settings["video_model"])
+        if not settings.get("quickainew_video_key"):
+            raise SkillError("QuickAI New video key is required for video_provider=quickainew")
+        return QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"])
     raise SkillError("video_provider must be quickai or quickainew")
 
 
@@ -818,8 +936,8 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         return {"status": "completed", "path": str(path), "source": "external", "skipped": True}
 
     image_client, _, settings = clients()
-    if not settings.get("quickai_key"):
-        raise SkillError("QuickAI key is required for image generation")
+    if not settings.get("quickai_image_key"):
+        raise SkillError("QuickAI image key is required for image generation")
     references = [resolve_project_path(root, value) for value in master.get("source_references", [])]
     prompt = composed_character_prompt(project)
     size = str(master.get("image_size") or project.get("defaults", {}).get("image_size") or "1024x1024")
@@ -875,17 +993,22 @@ def generate_images(
     reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
     state = load_state(root)
+    shots = selected_shots(project, shot_ids)
+    skipped = [str(shot["id"]) for shot in shots if not bool(shot.get("generate_image", True))]
+    generating = [shot for shot in shots if bool(shot.get("generate_image", True))]
+    if not generating:
+        return {"completed": [], "skipped": skipped}
     image_client, _, settings = clients()
-    if not settings.get("quickai_key"):
-        raise SkillError("QuickAI key is required for image generation")
+    if not settings.get("quickai_image_key"):
+        raise SkillError("QuickAI image key is required for image generation")
     completed: list[str] = []
-    skipped: list[str] = []
-    for shot in selected_shots(project, shot_ids):
+    for shot in generating:
         shot_id = str(shot["id"])
-        if not bool(shot.get("generate_image", True)):
-            skipped.append(shot_id)
-            continue
-        references = [resolve_project_path(root, value) for value in shot.get("image_references", [])]
+        references = shot_character_references(root, project, shot)
+        for value in shot.get("image_references", []):
+            path = resolve_project_path(root, value)
+            if path not in references:
+                references.append(path)
         if bool(shot.get("use_character_master", False)):
             master_path = resolved_character_master(root, project, state)
             if master_path not in references:
@@ -1339,6 +1462,8 @@ def init_project(
             "scene_id": "",
             "character_ids": [],
             "continuity_notes": "",
+            "narration": "",
+            "subtitle": "",
             "image_prompt": "",
             "video_prompt": "",
             "generate_image": False if video_mode_value == "text-to-video" else bool(shot_defaults.get("generate_image", True)),
@@ -1414,7 +1539,7 @@ def init_project(
 
 
 def doctor() -> tuple[int, dict[str, Any]]:
-    image_client, video_client, settings = clients()
+    settings = load_settings()
     result: dict[str, Any] = {
         "ok": True,
         "skill_version": SKILL_VERSION,
@@ -1425,33 +1550,53 @@ def doctor() -> tuple[int, dict[str, Any]]:
     }
     if result["ffmpeg"] == "not_found" or result["ffprobe"] == "not_found":
         result["ok"] = False
-    checks = []
-    if settings.get("quickai_key"):
-        checks.append(("quickai", image_client.list_models, image_client))
-    else:
-        result["providers"]["quickai"] = {"ok": False, "configured_model": settings["image_model"], "skipped": True, "reason": "key_not_configured"}
-    if settings.get("quickainew_key"):
-        checks.append(("quickainew", video_client.list_models, video_client))
-    else:
-        result["providers"]["quickainew"] = {"ok": False, "configured_model": settings["video_model"], "skipped": True, "reason": "key_not_configured"}
-    for name, operation, client in checks:
+    checks = [
+        (
+            "quickai_image",
+            settings.get("quickai_image_key", ""),
+            settings["image_model"],
+            QuickAIImageClient(settings["quickai_base_url"], settings["quickai_image_key"], settings["image_model"]),
+            False,
+        ),
+        (
+            "quickai_video",
+            settings.get("quickai_video_key", ""),
+            settings["video_model"],
+            QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_video_key"], settings["video_model"]),
+            settings.get("default_video_provider") == "quickai",
+        ),
+        (
+            "quickainew_video",
+            settings.get("quickainew_video_key", ""),
+            settings["video_model"],
+            QuickAINewVideoClient(
+                settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"]
+            ),
+            settings.get("default_video_provider") == "quickainew",
+        ),
+    ]
+    for name, key, model, client, required in checks:
+        if not key:
+            result["providers"][name] = {
+                "ok": not required,
+                "configured_model": model,
+                "skipped": True,
+                "required": required,
+                "reason": "key_not_configured",
+            }
+            if required:
+                result["ok"] = False
+            continue
         started = time.perf_counter()
         try:
-            models = operation()
-            image_present = settings["image_model"] in models if name == "quickai" else None
-            video_present = settings["video_model"] in models if name == settings.get("default_video_provider") else None
-            configured_models = [settings["image_model"]] if name == "quickai" else []
-            if name == settings.get("default_video_provider"):
-                configured_models.append(settings["video_model"])
-            present = video_present if name == settings.get("default_video_provider") else True
+            models = client.list_models()
+            present = model in models
             result["providers"][name] = {
                 "ok": present,
-                "configured_model": settings["video_model"] if name == settings.get("default_video_provider") else settings["image_model"],
-                "configured_models": configured_models,
+                "configured_model": model,
                 "models": models,
                 "model_present": present,
-                "image_model_present": image_present,
-                "video_model_present": video_present,
+                "required": required,
                 "model_count": len(models),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "circuit": client.health_snapshot(),
@@ -1459,21 +1604,19 @@ def doctor() -> tuple[int, dict[str, Any]]:
             if not present:
                 result["ok"] = False
         except Exception as error:
-            client = image_client if name == "quickai" else video_client
             result["providers"][name] = {
                 "ok": False,
-                "configured_model": settings["video_model"] if name == settings.get("default_video_provider") else settings["image_model"],
-                "configured_models": [settings["image_model"]] if name == "quickai" else [settings["video_model"]],
+                "configured_model": model,
+                "required": required,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "error": str(error)[:1000],
                 "circuit": client.health_snapshot(),
             }
-            if name == settings.get("default_video_provider") or name == "quickai" and settings.get("quickai_key") or name == "quickainew" and settings.get("quickainew_key"):
-                result["ok"] = False
+            result["ok"] = False
     return (0 if result["ok"] else 1), result
 
 
-def read_credentials_payload() -> tuple[str, str]:
+def read_credentials_payload() -> tuple[str, str, str]:
     prompt = "Credential payload JSON: "
     raw = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline(MAX_CREDENTIAL_PAYLOAD_CHARS + 1)
     if len(raw) > MAX_CREDENTIAL_PAYLOAD_CHARS:
@@ -1484,54 +1627,79 @@ def read_credentials_payload() -> tuple[str, str]:
         raise SkillError("credential payload must be one JSON object") from error
     if not isinstance(payload, dict):
         raise SkillError("credential payload must be one JSON object")
-    quickai_key = payload.get("quickai_key")
-    quickainew_key = payload.get("quickainew_key")
-    if quickai_key is None:
-        quickai_key = ""
-    if quickainew_key is None:
-        quickainew_key = ""
-    if not isinstance(quickai_key, str) or not isinstance(quickainew_key, str):
-        raise SkillError("credential payload fields quickai_key and quickainew_key must be strings when provided")
-    return quickai_key.strip(), quickainew_key.strip()
+    for name in ("quickai_key", "quickainew_key", "quickai_image_key", "quickai_video_key", "quickainew_video_key"):
+        if name in payload and not isinstance(payload[name], str):
+            raise SkillError(f"credential payload field {name} must be a string when provided")
+    legacy_quickai = str(payload.get("quickai_key", "")).strip()
+    legacy_quickainew = str(payload.get("quickainew_key", "")).strip()
+    image_key = str(payload["quickai_image_key"]).strip() if "quickai_image_key" in payload else legacy_quickai
+    video_key = str(payload["quickai_video_key"]).strip() if "quickai_video_key" in payload else legacy_quickai
+    new_video_key = (
+        str(payload["quickainew_video_key"]).strip() if "quickainew_video_key" in payload else legacy_quickainew
+    )
+    return image_key, video_key, new_video_key
 
 
 def configure(args: argparse.Namespace) -> dict[str, Any]:
     if args.credentials_stdin and args.environment_only:
         raise SkillError("--credentials-stdin cannot be combined with --environment-only because the supplied keys would not persist")
     if args.credentials_stdin:
-        quickai_key, quickainew_key = read_credentials_payload()
+        quickai_image_key, quickai_video_key, quickainew_video_key = read_credentials_payload()
         credential_source = "agent-stdin"
     else:
-        quickai_key = os.environ.get("GVS_QUICKAI_KEY", "").strip()
-        quickainew_key = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
-        if not quickai_key:
-            quickai_key = getpass.getpass("QuickAI image key: ").strip()
-        if not quickainew_key:
-            quickainew_key = getpass.getpass("QuickAI New video key: ").strip()
+        legacy_quickai = os.environ.get("GVS_QUICKAI_KEY", "").strip()
+        legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
+        quickai_image_key = os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip() or legacy_quickai
+        quickai_video_key = os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip() or legacy_quickai
+        quickainew_video_key = os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip() or legacy_quickainew
+        if not quickai_image_key:
+            quickai_image_key = getpass.getpass("QuickAI image key (optional): ").strip()
+        if not quickai_video_key:
+            quickai_video_key = getpass.getpass("QuickAI text-to-video key (optional): ").strip()
+        if not quickainew_video_key:
+            quickainew_video_key = getpass.getpass("QuickAI New image-to-video key (optional): ").strip()
         credential_source = "environment-or-interactive"
-    if not quickai_key and not quickainew_key:
+    if not quickai_image_key and not quickai_video_key and not quickainew_video_key:
         raise SkillError("at least one provider key is required")
     config = {
         "quickai_base_url": normalize_base_url(args.quickai_base_url),
         "quickainew_base_url": normalize_base_url(args.quickainew_base_url),
         "image_model": args.image_model.strip(),
         "video_model": args.video_model.strip(),
-        "default_video_provider": args.video_provider.strip(),
+        "default_video_provider": (
+            args.video_provider
+            or ("quickai" if quickai_video_key else "quickainew" if quickainew_video_key else "quickai")
+        ),
     }
-    connection: dict[str, Any] = {"quickai": "not_tested", "quickainew": "not_tested"}
+    connection: dict[str, Any] = {
+        "quickai_image": "not_tested",
+        "quickai_video": "not_tested",
+        "quickainew_video": "not_tested",
+    }
     if not args.skip_test:
-        connection = {"quickai": "not_configured", "quickainew": "not_configured"}
-        if quickai_key:
-            image_models = QuickAIImageClient(config["quickai_base_url"], quickai_key, config["image_model"]).list_models()
+        connection = {"quickai_image": "not_configured", "quickai_video": "not_configured", "quickainew_video": "not_configured"}
+        if quickai_image_key:
+            image_models = QuickAIImageClient(config["quickai_base_url"], quickai_image_key, config["image_model"]).list_models()
             if config["image_model"] not in image_models:
                 raise SkillError(f"configured image model is not advertised by QuickAI: {config['image_model']}")
-            connection["quickai"] = "ok"
-        if quickainew_key:
-            video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_key, config["video_model"]).list_models()
+            connection["quickai_image"] = "ok"
+        if quickai_video_key:
+            video_models = QuickAIVideoClient(config["quickai_base_url"], quickai_video_key, config["video_model"]).list_models()
+            if config["video_model"] not in video_models:
+                raise SkillError(f"configured video model is not advertised by QuickAI: {config['video_model']}")
+            connection["quickai_video"] = "ok"
+        if quickainew_video_key:
+            video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_video_key, config["video_model"]).list_models()
             if config["video_model"] not in video_models:
                 raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
-            connection["quickainew"] = "ok"
-    save_settings(config, quickai_key, quickainew_key, store_secrets=not args.environment_only)
+            connection["quickainew_video"] = "ok"
+    save_settings(
+        config,
+        quickai_image_key,
+        quickai_video_key,
+        quickainew_video_key,
+        store_secrets=not args.environment_only,
+    )
     return {
         "configured": str(config_path()),
         "secret_provider": "environment" if args.environment_only else "windows-dpapi",
@@ -1573,6 +1741,103 @@ def status_summary(root: Path) -> dict[str, Any]:
     }
 
 
+def compact_series_runtime(runtime: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: runtime.get(key)
+        for key in (
+            "status",
+            "attempts",
+            "approved_at",
+            "generation_started_at",
+            "generation_finished_at",
+            "completed_at",
+            "final",
+            "technical_qa",
+            "continuity_summary",
+            "review_notes",
+            "manual_review_complete",
+            "error",
+        )
+        if runtime.get(key) not in (None, "")
+    }
+
+
+def _srt_timestamp(seconds: float) -> str:
+    milliseconds = max(0, int(round(seconds * 1000)))
+    hours, milliseconds = divmod(milliseconds, 3_600_000)
+    minutes, milliseconds = divmod(milliseconds, 60_000)
+    whole_seconds, milliseconds = divmod(milliseconds, 1000)
+    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{milliseconds:03d}"
+
+
+def subtitle_cues(root: Path, project: dict[str, Any]) -> list[dict[str, Any]]:
+    news_narration: dict[str, str] = {}
+    if project.get("workflow") == "news-video":
+        try:
+            news = load_news_contract(root)
+            news_narration = {
+                str(item.get("shot_id", "")): str(item.get("narration", "")).strip()
+                for item in news.get("script_segments", [])
+                if isinstance(item, dict)
+            }
+        except SkillError:
+            news_narration = {}
+    cues: list[dict[str, Any]] = []
+    offset = 0.0
+    for shot in project.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        shot_id = str(shot.get("id", ""))
+        duration = float(shot_value(project, shot, "seconds", 6))
+        items = shot.get("subtitles") if isinstance(shot.get("subtitles"), list) else []
+        if items:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                cues.append(
+                    {
+                        "shot_id": shot_id,
+                        "start": offset + float(item["start"]),
+                        "end": offset + float(item["end"]),
+                        "text": str(item["text"]).strip(),
+                    }
+                )
+        else:
+            text = (
+                str(shot.get("subtitle", "")).strip()
+                or str(shot.get("narration", "")).strip()
+                or news_narration.get(shot_id, "")
+            )
+            if text:
+                padding = min(0.15, duration * 0.08)
+                cues.append(
+                    {
+                        "shot_id": shot_id,
+                        "start": offset + padding,
+                        "end": offset + duration - padding,
+                        "text": text,
+                    }
+                )
+        offset += duration
+    return cues
+
+
+def export_subtitles(root: Path, project: dict[str, Any], output: Path) -> dict[str, Any]:
+    cues = subtitle_cues(root, project)
+    if not cues:
+        raise SkillError("project has no subtitle, narration, or news narration text")
+    if output.suffix.lower() != ".srt":
+        raise SkillError("subtitle output must end with .srt")
+    blocks = []
+    for index, cue in enumerate(cues, 1):
+        text = str(cue["text"]).replace("\r\n", "\n").replace("\r", "\n").replace("-->", "->").strip()
+        blocks.append(
+            f"{index}\n{_srt_timestamp(float(cue['start']))} --> {_srt_timestamp(float(cue['end']))}\n{text}"
+        )
+    atomic_write_bytes(output.resolve(), ("\n\n".join(blocks) + "\n").encode("utf-8"))
+    return {"path": str(output.resolve()), "cue_count": len(cues), "cues": cues}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1587,7 +1852,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--quickainew-base-url", default=DEFAULT_QUICKAINEW_URL)
     setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
-    setup.add_argument("--video-provider", choices=("quickai", "quickainew"), default="quickai")
+    setup.add_argument("--video-provider", choices=("quickai", "quickainew"))
     setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
     setup.add_argument(
         "--credentials-stdin",
@@ -1611,6 +1876,77 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     init.add_argument("--seconds", type=int)
+
+    series_init = commands.add_parser("series-init", help="Create a series contract and standard episode projects.")
+    series_init.add_argument("series", type=Path)
+    series_init.add_argument("--title", required=True)
+    series_init.add_argument("--premise", required=True)
+    series_init.add_argument("--episodes", type=int, default=20)
+    series_init.add_argument("--episode-seconds", type=int, default=90)
+    series_init.add_argument("--workflow", default="character-consistent-story")
+    series_init.add_argument("--video-size", default="1280x720")
+    series_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="image-to-video")
+    series_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
+    series_init.add_argument("--clip-seconds", type=int)
+
+    for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync"):
+        command = commands.add_parser(name)
+        command.add_argument("series", type=Path)
+        if name == "series-preflight":
+            command.add_argument("--episode")
+
+    context = commands.add_parser("series-context", help="Export compact season history and the current episode contract.")
+    context.add_argument("series", type=Path)
+    context.add_argument("--episode")
+
+    series_approve = commands.add_parser("series-approve", help="Approve one reviewed episode contract for paid generation.")
+    series_approve.add_argument("series", type=Path)
+    series_approve.add_argument("episode")
+
+    series_characters = commands.add_parser("series-generate-characters", help="Generate reusable series-level character masters.")
+    series_characters.add_argument("series", type=Path)
+    series_characters.add_argument("--character", action="append")
+    series_characters.add_argument("--retry-failed", action="store_true")
+    series_characters.add_argument("--retry-reason", default="")
+    series_characters.add_argument("--progress", action="store_true")
+
+    series_run = commands.add_parser("series-run", help="Generate one approved episode and stop at the visual review gate.")
+    series_run.add_argument("series", type=Path)
+    series_run.add_argument("--episode")
+    series_run.add_argument("--next", action="store_true")
+    series_run.add_argument("--retry-failed", action="store_true")
+    series_run.add_argument("--retry-reason", default="")
+    series_run.add_argument("--progress", action="store_true")
+    series_run.add_argument("--poll-timeout", type=int, default=1800)
+
+    series_accept = commands.add_parser("series-accept", help="Accept a reviewed episode and record its actual continuity state.")
+    series_accept.add_argument("series", type=Path)
+    series_accept.add_argument("episode")
+    series_accept.add_argument("--continuity-summary", required=True)
+    series_accept.add_argument("--review-notes", default="")
+    series_accept.add_argument("--accept-qa-warnings", action="store_true")
+
+    news_init = commands.add_parser("news-init", help="Create a sourced-news contract and standard video project.")
+    news_init.add_argument("project", type=Path)
+    news_init.add_argument("--title", required=True)
+    news_init.add_argument("--topic", required=True)
+    news_init.add_argument("--region", default="global")
+    news_init.add_argument("--language", default="zh-CN")
+    news_init.add_argument("--window-hours", type=int, default=24)
+    news_init.add_argument("--target-seconds", type=int, default=60)
+    news_init.add_argument("--shots", type=int)
+    news_init.add_argument("--clip-seconds", type=int)
+    news_init.add_argument("--video-size", default="1280x720")
+    news_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="text-to-video")
+    news_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
+
+    for name in ("news-validate", "news-context"):
+        command = commands.add_parser(name)
+        command.add_argument("project", type=Path)
 
     for name in ("validate", "preflight", "status", "assemble", "audit"):
         command = commands.add_parser(name)
@@ -1665,6 +2001,13 @@ def build_parser() -> argparse.ArgumentParser:
     postprocess.add_argument("--subtitles", type=Path)
     postprocess.add_argument("--fade-seconds", type=float, default=0.0)
 
+    subtitles = commands.add_parser("subtitles", help="Export deterministic SRT and optionally burn a separate subtitled MP4.")
+    subtitles.add_argument("project", type=Path)
+    subtitles.add_argument("--output-srt", type=Path)
+    subtitles.add_argument("--burn", action="store_true")
+    subtitles.add_argument("--source-video", type=Path)
+    subtitles.add_argument("--output-video", type=Path)
+
     cover = commands.add_parser("cover", help="Export a representative frame as a JPG or PNG cover.")
     cover.add_argument("input", type=Path)
     cover.add_argument("output", type=Path)
@@ -1679,7 +2022,36 @@ def main() -> int:
             print_json({"ok": True, "version": SKILL_VERSION})
             return 0
         if args.command == "capabilities":
-            print_json({"ok": True, "version": SKILL_VERSION, "workflows": workflow_catalog(), "selection": "Reply with a workflow id or title."})
+            print_json(
+                {
+                    "ok": True,
+                    "version": SKILL_VERSION,
+                    "product_routes": [
+                        {
+                            "id": "text-to-video",
+                            "command": "init",
+                            "use_for": "one standalone video generated directly from prompts",
+                        },
+                        {
+                            "id": "image-to-video",
+                            "command": "init",
+                            "use_for": "one standalone video animated from supplied images or generated keyframes",
+                        },
+                        {
+                            "id": "episodic-series",
+                            "command": "series-init",
+                            "use_for": "multiple ordered episodes with shared canon, review gates, and continuity state",
+                        },
+                        {
+                            "id": "news-video",
+                            "command": "news-init",
+                            "use_for": "current hot-news research with sourced claims before standard video generation",
+                        },
+                    ],
+                    "workflows": workflow_catalog(),
+                    "selection": "Choose one product route, then select an internal workflow preset when needed.",
+                }
+            )
             return 0
         if args.command == "describe":
             print_json({"ok": True, "workflow": get_workflow(args.workflow)})
@@ -1691,6 +2063,330 @@ def main() -> int:
             code, result = doctor()
             print_json(result)
             return code
+        if args.command == "series-init":
+            workflow = get_workflow(args.workflow)
+            durations = plan_shot_durations(
+                workflow,
+                shot_count=None,
+                seconds=args.clip_seconds,
+                target_seconds=args.episode_seconds,
+            )
+            if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
+                raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
+            selected_provider = args.video_provider or ("quickai" if args.mode == "text-to-video" else "quickainew")
+            root = args.series.resolve()
+            series = create_series_contract(
+                root,
+                title=args.title,
+                premise=args.premise,
+                episode_count=args.episodes,
+                target_seconds=args.episode_seconds,
+                workflow=args.workflow,
+                video_mode=args.mode,
+                video_provider=selected_provider,
+                video_size=args.video_size,
+                video_resolution=args.video_resolution,
+                video_aspect_ratio=args.aspect_ratio,
+            )
+            for episode in episode_records(series):
+                project_root = root / str(episode["project"])
+                init_project(
+                    project_root,
+                    f"{args.title} {episode['id']}",
+                    f"Episode {episode['number']} plan",
+                    args.workflow,
+                    durations,
+                    args.video_size,
+                    args.mode,
+                    selected_provider,
+                    args.video_resolution,
+                    args.aspect_ratio,
+                )
+            synced = sync_all_episode_contracts(root, series)
+            print_json(
+                {
+                    "ok": True,
+                    "series": str(root),
+                    "series_contract": str(root / "series.json"),
+                    "episode_count": len(series["episodes"]),
+                    "episode_target_seconds": args.episode_seconds,
+                    "shot_seconds": durations,
+                    "synced_episodes": synced,
+                    "next": "Fill the season plan and episode project prompts, then run series-preflight and series-approve ep-001.",
+                }
+            )
+            return 0
+        if args.command.startswith("series-"):
+            root = args.series.resolve()
+            series = load_series(root)
+            series_errors = validate_series(root, series)
+            if args.command == "series-status":
+                print_json({"ok": not series_errors, "errors": series_errors, **series_status(root)})
+                return 0 if not series_errors else 1
+            if args.command == "series-context":
+                print_json({"ok": not series_errors, "errors": series_errors, **series_context(root, args.episode)})
+                return 0 if not series_errors else 1
+            if args.command == "series-next":
+                episode, state = select_next_episode(root)
+                episode_id = str(episode.get("id", ""))
+                runtime = state["episodes"][episode_id]
+                action = {
+                    "draft": "fill_prompts_then_preflight_and_approve",
+                    "approved": "run_episode",
+                    "generating": "resume_episode",
+                    "needs_review": "review_frames_then_accept",
+                    "failed": "inspect_state_then_explicitly_retry",
+                }.get(str(runtime.get("status")), "inspect")
+                print_json(
+                    {
+                        "ok": not series_errors,
+                        "errors": series_errors,
+                        "episode": episode,
+                        "runtime": compact_series_runtime(runtime),
+                        "next_action": action,
+                    }
+                )
+                return 0 if not series_errors else 1
+            if args.command == "series-sync":
+                if series_errors:
+                    raise SkillError("series validation failed: " + "; ".join(series_errors))
+                print_json({"ok": True, "synced_episodes": sync_all_episode_contracts(root, series)})
+                return 0
+            if args.command in {"series-validate", "series-preflight"}:
+                requested = [get_episode(series, args.episode)] if args.command == "series-preflight" and args.episode else episode_records(series)
+                episodes = []
+                all_ok = not series_errors
+                character_preflight = series_character_preflight(root, series)
+                for episode in requested:
+                    episode_id = str(episode.get("id", ""))
+                    try:
+                        if args.command == "series-preflight":
+                            sync_episode_contract(root, series, episode)
+                        project_root = episode_root(root, episode)
+                        project = load_project(project_root)
+                        errors = validate_project(project_root, project)
+                        result: dict[str, Any] = {
+                            "id": episode_id,
+                            "project": str(project_root),
+                            "ok": not errors,
+                            "errors": errors,
+                        }
+                        if args.command == "series-preflight":
+                            result["preflight"] = preflight_report(project)
+                            result["audit"] = audit_project(project_root, project)
+                    except SkillError as error:
+                        result = {"id": episode_id, "ok": False, "errors": [str(error)]}
+                    all_ok = all_ok and bool(result["ok"])
+                    episodes.append(result)
+                totals: dict[str, Any] = {}
+                if args.command == "series-preflight":
+                    episode_images = sum(
+                        int(((item.get("preflight") or {}).get("requests") or {}).get("total_images", 0))
+                        for item in episodes
+                    )
+                    episode_videos = sum(
+                        int(((item.get("preflight") or {}).get("requests") or {}).get("videos", 0))
+                        for item in episodes
+                    )
+                    totals = {
+                        "pending_series_character_images": character_preflight["pending_character_master_images"],
+                        "episode_images": episode_images,
+                        "episode_videos": episode_videos,
+                        "total_pending_images": character_preflight["pending_character_master_images"] + episode_images,
+                    }
+                print_json(
+                    {
+                        "ok": all_ok,
+                        "series": str(root),
+                        "series_errors": series_errors,
+                        "character_preflight": character_preflight,
+                        "request_totals": totals,
+                        "episodes": episodes,
+                    }
+                )
+                return 0 if all_ok else 1
+            if args.command == "series-approve":
+                if series_errors:
+                    raise SkillError("series validation failed: " + "; ".join(series_errors))
+                episode = get_episode(series, args.episode)
+                project_root = episode_root(root, episode)
+                sync_episode_contract(root, series, episode)
+                project = load_project(project_root)
+                project_errors = validate_project(project_root, project)
+                if project_errors:
+                    raise SkillError("episode project validation failed: " + "; ".join(project_errors))
+                print_json(
+                    {
+                        "ok": True,
+                        "episode": args.episode,
+                        "runtime": compact_series_runtime(approve_episode(root, args.episode)),
+                    }
+                )
+                return 0
+            if args.command == "series-generate-characters":
+                if series_errors:
+                    raise SkillError("series validation failed: " + "; ".join(series_errors))
+
+                def series_progress(event: dict[str, Any]) -> None:
+                    emit_progress(args.progress, **event)
+
+                result = generate_series_characters(
+                    root,
+                    character_ids=args.character,
+                    retry_failed=args.retry_failed,
+                    retry_reason=args.retry_reason,
+                    on_progress=series_progress,
+                )
+                print_json({"ok": True, "characters": result})
+                return 0
+            if args.command == "series-accept":
+                runtime = accept_episode(
+                    root,
+                    args.episode,
+                    continuity_summary=args.continuity_summary,
+                    review_notes=args.review_notes,
+                    accept_qa_warnings=args.accept_qa_warnings,
+                )
+                print_json({"ok": True, "episode": args.episode, "runtime": compact_series_runtime(runtime)})
+                return 0
+            if args.command == "series-run":
+                if args.episode and args.next:
+                    raise SkillError("use either --episode or --next, not both")
+                if series_errors:
+                    raise SkillError("series validation failed: " + "; ".join(series_errors))
+                if args.episode:
+                    episode = get_episode(series, args.episode)
+                else:
+                    episode = select_next_episode(root, for_run=True)[0]
+                episode_id = str(episode.get("id", ""))
+                project_root = episode_root(root, episode)
+                sync_episode_contract(root, series, episode)
+                project = require_valid_project(project_root)
+                series_state = load_series_state(root, series)
+                if video_mode(project) == "image-to-video":
+                    used_characters = {
+                        str(character_id)
+                        for shot in project.get("shots", [])
+                        if isinstance(shot, dict)
+                        for character_id in shot.get("character_ids", [])
+                    }
+                    by_id = {str(item.get("id", "")): item for item in series.get("characters", []) if isinstance(item, dict)}
+                    missing_masters = []
+                    for character_id in sorted(used_characters):
+                        character = by_id.get(character_id)
+                        master = series_character_master_config(series, character) if character else {"enabled": False}
+                        if bool(master["enabled"]):
+                            runtime = (series_state.get("characters", {}).get(character_id) or {})
+                            if runtime.get("status") != "completed":
+                                missing_masters.append(character_id)
+                    if missing_masters:
+                        raise SkillError(
+                            "generate or register series character masters before image-to-video: " + ", ".join(missing_masters)
+                        )
+                begin_episode(root, episode_id, allow_failed_retry=args.retry_failed)
+                try:
+                    character_result = generate_character_master(
+                        project_root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                    )
+                    image_result = generate_images(
+                        project_root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                    )
+                    video_result = generate_videos(
+                        project_root,
+                        retry_failed=args.retry_failed,
+                        retry_reason=args.retry_reason,
+                        progress=args.progress,
+                        poll_timeout=args.poll_timeout,
+                    )
+                    output, media = assemble(project_root)
+                    qa = qa_project(project_root)
+                    runtime = finish_episode_generation(root, episode_id, final_path=output, qa=qa)
+                except Exception as error:
+                    fail_episode_generation(root, episode_id, error)
+                    raise
+                print_json(
+                    {
+                        "ok": True,
+                        "episode": episode_id,
+                        "status": "needs_review",
+                        "character_master": character_result,
+                        "images": image_result,
+                        "videos": video_result,
+                        "output": str(output),
+                        "media": media,
+                        "qa": qa,
+                        "runtime": compact_series_runtime(runtime),
+                    }
+                )
+                return 0
+        if args.command == "news-init":
+            workflow = get_workflow("news-video")
+            durations = plan_shot_durations(
+                workflow,
+                shot_count=args.shots,
+                seconds=args.clip_seconds,
+                target_seconds=args.target_seconds,
+            )
+            if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
+                raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
+            provider = args.video_provider or ("quickai" if args.mode == "text-to-video" else "quickainew")
+            root = args.project.resolve()
+            path = init_project(
+                root,
+                args.title,
+                args.topic,
+                "news-video",
+                durations,
+                args.video_size,
+                args.mode,
+                provider,
+                args.video_resolution,
+                args.aspect_ratio,
+            )
+            package = create_news_contract(
+                root,
+                topic=args.topic,
+                region=args.region,
+                language=args.language,
+                window_hours=args.window_hours,
+            )
+            print_json(
+                {
+                    "ok": True,
+                    "project": str(path),
+                    "news_contract": str(root / "news.json"),
+                    "video_mode": args.mode,
+                    "video_provider": provider,
+                    "shot_seconds": durations,
+                    "research_status": package["editorial"]["status"],
+                    "next": "Codex must browse current sources, fill sourced claims and script segments, then run news-validate.",
+                }
+            )
+            return 0
+        if args.command in {"news-validate", "news-context"}:
+            root = args.project.resolve()
+            context = news_context(root)
+            if args.command == "news-context":
+                print_json({"ok": True, **context})
+                return 0
+            errors = validate_project(root, context["project"])
+            print_json(
+                {
+                    "ok": not errors,
+                    "project": str(root),
+                    "errors": errors,
+                    "preflight": preflight_report(context["project"]),
+                    "audit": audit_project(root, context["project"]),
+                    "news": context["news"],
+                }
+            )
+            return 0 if not errors else 1
         if args.command == "init":
             workflow = get_workflow(args.workflow)
             durations = plan_shot_durations(
@@ -1738,6 +2434,24 @@ def main() -> int:
                 fade_seconds=args.fade_seconds,
             )
             print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
+            return 0
+        if args.command == "subtitles":
+            root = args.project.resolve()
+            project = require_valid_project(root)
+            if args.output_video and not args.burn:
+                raise SkillError("--output-video requires --burn")
+            srt_output = args.output_srt.resolve() if args.output_srt else root / "deliverables" / "subtitles.srt"
+            subtitle_result = export_subtitles(root, project, srt_output)
+            video_result: dict[str, Any] | None = None
+            if args.burn:
+                source = args.source_video.resolve() if args.source_video else root / "deliverables" / "final.mp4"
+                output = args.output_video.resolve() if args.output_video else root / "deliverables" / "final-subtitled.mp4"
+                if not source.is_file():
+                    raise SkillError(f"subtitle source video does not exist: {source}")
+                if source == output:
+                    raise SkillError("subtitled output must differ from the clean source video")
+                video_result = postprocess_video(source, output, subtitles=srt_output)
+            print_json({"ok": True, "subtitles": subtitle_result, "burned_video": video_result or {}})
             return 0
         if args.command == "cover":
             input_path = args.input.resolve()

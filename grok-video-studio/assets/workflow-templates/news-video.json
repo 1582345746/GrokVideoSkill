@@ -1,0 +1,18 @@
+{
+  "id": "news-video",
+  "title": "热点新闻视频",
+  "summary": "联网检索当前热点，保存来源与事实主张，再生成可审计的新闻脚本、分镜和视频。",
+  "default_shots": 6,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "shot_defaults": {
+    "generate_image": false,
+    "use_character_master": false
+  },
+  "guidance": {
+    "ask": ["新闻地区与语言", "热点时间窗口", "目标时长", "报道语气", "文生或图生路线"],
+    "story": "先联网检索并交叉核实；把来源、事实主张和镜头旁白写入 news.json，验证通过后才能生成。",
+    "image_prompt": "只生成与已核实事实相符的说明性画面，不仿造新闻现场、不伪造人物言行、不复制无授权媒体素材。",
+    "video_prompt": "使用克制的说明性动作和镜头，避免把AI重建画面表述为真实现场记录。"
+  }
+}

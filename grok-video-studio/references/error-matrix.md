@@ -4,6 +4,7 @@
 | --- | --- | --- |
 | `401` or `403` | Credential or account | Rotate the correct provider key and run `doctor`. |
 | Missing unused provider key | Configuration | Allowed. Configure a key when a workflow or explicit provider override needs that provider. |
+| QuickAI image request uses the T2V key, or T2V uses the image key | Credential role | Configure `quickai_image_key` and `quickai_video_key` separately. Legacy `quickai_key` intentionally supplies both roles only when role-specific values are absent. |
 | Mode/provider mismatch | Project contract | Set `video_mode` and `video_provider` explicitly and verify the matching key. |
 | `unknown provider for model` | Upstream model routing | Confirm the exact model appears in that provider's `/v1/models`; do not retry create. |
 | `404` on `/v1/videos` | Base path or incompatible upstream | Store only the origin; verify the provider implements the OpenAI video endpoint. |
@@ -21,6 +22,13 @@
 | Final assembly has no audio | Local assembly policy | Keep `defaults.audio_policy=preserve`; assembly retains source audio and adds silent AAC to clips without audio. Use `mute` only intentionally. |
 | App controls, likes, comments, captions, or watermarks appear | Generative visual artifact | Keep `allow_ui_elements=false`, regenerate the affected shot, and inspect every exported QA review frame before delivery. Do not crop blindly when overlays cover story content. |
 | Character appearance changes between T2V shots | Model continuity limit | Use concise identity locks for best effort. For strict continuity, switch to image-to-video with one character master and a per-shot keyframe. |
+| Later series episode is blocked | Series lifecycle | Finish visual review and `series-accept` the earlier episode, then preflight and approve the next draft. |
+| Series episode remains `needs_review` | Series lifecycle | Inspect the final and every review frame, then record the actual ending with `series-accept --continuity-summary`. |
+| Supplied-image animation asks for an image key | Project contract | Use `single-image-animation`, keep `generate_image=false`, and place the supplied image in `video_references`. Only the I2V key is required. |
+| News project says `news.json` is incomplete | News evidence gate | Browse current exact source pages, map claims and narration, resolve conflicts, set verified timestamps, then run `news-validate`. No paid request was sent. |
+| News claim lacks support | News evidence gate | Add one primary source or two independent sources from distinct publishers; remove unsupported wording from the script. |
+| Subtitle text is garbled in generated footage | Generation prompt | Keep upstream clean-frame rules enabled. Export SRT and use local `subtitles --burn` instead of asking the model to draw text. |
+| Subtitle timing is inaccurate after adding voice | Post-production | Replace shot-level cues with word/sentence timestamps from the final TTS or voice track, then burn a new subtitled copy. |
 | I2V reference field rejected | Provider contract | Verify QuickAI JSON uses `input_reference` for one image or `reference_images` for multiple; QuickAI New uses repeated multipart `input_reference`. |
 | `ffprobe` or assembly validation fails | Local media QA | Install FFmpeg/FFprobe, inspect the reported stream metadata, and normalize clips before assembling. |
 | Browser history lacks the task | Expected direct mode behavior | The local project is the source of truth; direct Skill tasks do not enter Canvas IndexedDB. |

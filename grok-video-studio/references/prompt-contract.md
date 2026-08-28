@@ -6,7 +6,7 @@ Write a concise story, then split it into shots that can each be represented by 
 
 ## Prompt budget
 
-The provider limit applies after `character_bible`, `style_bible`, structured continuity, clean-frame policy, and shot text are composed. The tested QuickAI boundary is 4096 characters inclusive; keep each final prompt at or below 4096 characters, with 3800 as the working ceiling. Preflight reports the final length, hard-limit remainder, and safe-limit status. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt.
+The provider limit applies after `character_bible`, `style_bible`, structured shot continuity, series episode continuity, clean-frame policy, and shot text are composed. The tested QuickAI boundary is 4096 characters inclusive; keep each final prompt at or below 4096 characters, with 3800 as the working ceiling. Preflight reports the final length, hard-limit remainder, and safe-limit status. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt.
 
 ## Single-sheet character master
 
@@ -18,6 +18,8 @@ For each shot, derive one scene keyframe from that master. Send that keyframe as
 
 Put immutable details in `character_bible`: face, age range, hair, clothing, signature props, and prohibited changes. Reuse one approved master reference throughout related shots. Avoid conflicting identity descriptions in individual shots.
 
+For a series, keep immutable identity in `series.json.characters` and use one persistent master per enabled character. `character_ids` selects the relevant master references for each keyframe. Before a new episode, use the prior accepted episode's reviewed end-state summary as continuity input. Do not assume that a planned wardrobe, prop, or ending survived generation until visual review confirms it.
+
 ## Keyframe prompt
 
 Combine character identity, environment, framing, lighting, visual style, and continuity constraints. Describe a single still moment; do not put a sequence of actions into the image prompt.
@@ -28,4 +30,4 @@ Describe one continuous subject motion, one camera motion, environmental motion,
 
 ## Multi-reference use
 
-Order references from most authoritative to least authoritative. Multiple files may be accepted by the image endpoint, but an upstream model may ignore later references. QuickAI New workflows should prefer the current shot keyframe as one video reference.
+Order references from most authoritative to least authoritative. Selected `characters[].references` are added automatically before explicit `shot.image_references`. Multiple files may be accepted by the image endpoint, but an upstream model may ignore later references. QuickAI New workflows should prefer the current shot keyframe as one video reference.

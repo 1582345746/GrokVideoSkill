@@ -1,4 +1,4 @@
 interface:
   display_name: "Grok Video Studio"
-  short_description: "Build, review, and finish resumable AI videos"
-  default_prompt: "Use $grok-video-studio to build a resumable AI video project, preserve audio and character continuity, review clean frames, and deliver a validated MP4."
+  short_description: "Build sourced, resumable AI videos and series"
+  default_prompt: "Use $grok-video-studio to create a text, image, episodic, or sourced-news video with continuity, subtitles, review gates, and validated delivery."

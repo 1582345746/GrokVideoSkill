@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 USER_AGENT = "GrokVideoStudioSkill/1.1"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
@@ -172,7 +172,14 @@ def dpapi_unprotect(data: bytes) -> bytes:
         ctypes.windll.kernel32.LocalFree(output_blob.pbData)
 
 
-def save_settings(config: dict[str, Any], quickai_key: str, quickainew_key: str, *, store_secrets: bool) -> None:
+def save_settings(
+    config: dict[str, Any],
+    quickai_image_key: str,
+    quickai_video_key: str,
+    quickainew_video_key: str,
+    *,
+    store_secrets: bool,
+) -> None:
     normalized = {
         "version": CONFIG_VERSION,
         "quickai_base_url": normalize_base_url(str(config["quickai_base_url"])),
@@ -188,10 +195,15 @@ def save_settings(config: dict[str, Any], quickai_key: str, quickainew_key: str,
         raise SkillError("default_video_provider must be quickai or quickainew")
     atomic_write_json(config_path(), normalized)
     if store_secrets:
-        if not quickai_key.strip() and not quickainew_key.strip():
+        if not quickai_image_key.strip() and not quickai_video_key.strip() and not quickainew_video_key.strip():
             raise SkillError("at least one provider key is required")
         secret_payload = json.dumps(
-            {"version": 1, "quickai_key": quickai_key.strip(), "quickainew_key": quickainew_key.strip()},
+            {
+                "version": 2,
+                "quickai_image_key": quickai_image_key.strip(),
+                "quickai_video_key": quickai_video_key.strip(),
+                "quickainew_video_key": quickainew_video_key.strip(),
+            },
             separators=(",", ":"),
         ).encode("utf-8")
         atomic_write_bytes(secrets_path(), dpapi_protect(secret_payload))
@@ -204,7 +216,7 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     if not path.is_file():
         raise SkillError(f"configuration not found: {path}; run configure first")
     config = read_json(path)
-    if config.get("version") not in {1, CONFIG_VERSION}:
+    if config.get("version") not in {1, 2, CONFIG_VERSION}:
         raise SkillError("unsupported configuration version")
     result = {
         "version": CONFIG_VERSION,
@@ -223,10 +235,32 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
                 stored = stored_value
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SkillError("encrypted secret file is invalid") from error
-    result["quickai_key"] = os.environ.get("GVS_QUICKAI_KEY", "").strip() or str(stored.get("quickai_key", "")).strip()
-    result["quickainew_key"] = os.environ.get("GVS_QUICKAINEW_KEY", "").strip() or str(stored.get("quickainew_key", "")).strip()
-    if require_secrets and not result["quickai_key"] and not result["quickainew_key"]:
-        raise SkillError("provider keys are unavailable; run configure or set GVS_QUICKAI_KEY or GVS_QUICKAINEW_KEY")
+    legacy_quickai = os.environ.get("GVS_QUICKAI_KEY", "").strip() or str(stored.get("quickai_key", "")).strip()
+    legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip() or str(stored.get("quickainew_key", "")).strip()
+    result["quickai_image_key"] = (
+        os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip()
+        or str(stored.get("quickai_image_key", "")).strip()
+        or legacy_quickai
+    )
+    result["quickai_video_key"] = (
+        os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip()
+        or str(stored.get("quickai_video_key", "")).strip()
+        or legacy_quickai
+    )
+    result["quickainew_video_key"] = (
+        os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip()
+        or str(stored.get("quickainew_video_key", "")).strip()
+        or legacy_quickainew
+    )
+    # Deprecated aliases keep older callers and installations compatible.
+    result["quickai_key"] = result["quickai_image_key"]
+    result["quickainew_key"] = result["quickainew_video_key"]
+    if require_secrets and not any(
+        result[name] for name in ("quickai_image_key", "quickai_video_key", "quickainew_video_key")
+    ):
+        raise SkillError(
+            "provider keys are unavailable; run configure or set a GVS_QUICKAI_*_KEY or GVS_QUICKAINEW_VIDEO_KEY"
+        )
     return result
 
 

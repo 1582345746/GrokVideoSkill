@@ -62,6 +62,9 @@
     "scene_id": "office",
     "character_ids": ["lead"],
     "continuity_notes": "Keep wardrobe, eyeline, lighting, and prop position from the previous shot",
+    "narration": "Optional narration used as a subtitle fallback",
+    "subtitle": "Optional one-cue shorthand",
+    "subtitles": [{"start": 0.2, "end": 2.8, "text": "Optional precise cue relative to this shot"}],
     "wardrobe": {},
     "continuity_change": false,
     "image_prompt": "One still keyframe",
@@ -85,6 +88,8 @@
 
 `use_character_master` prepends the single sheet to a shot's image references. It does not add that sheet to video references. When `video_references` is empty and a generated keyframe exists, only that keyframe becomes the video reference.
 
+Every character selected by `shot.character_ids` also contributes its `characters[].references` to keyframe image generation automatically. This supports multiple reusable character masters. Explicit `shot.image_references` are added after the selected character references, and the combined unique reference count must stay within `max_reference_images`.
+
 ## Limits and state
 
 Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed 4096 characters; 3800 is the recommended working ceiling. Limits are hard preflight gates and request counts include a generated character master.
@@ -95,8 +100,16 @@ Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed
 
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 
+## Narration and subtitles
+
+`narration` and `subtitle` are optional strings. `subtitle` is a one-cue shorthand covering most of the shot. For precise timing, use `subtitles` and provide non-overlapping `start`/`end` seconds relative to that shot; do not use `subtitle` and `subtitles` together. Each cue must fit within the shot duration.
+
+The `subtitles` command prefers precise cues, then `subtitle`, then `narration`, then sourced-news narration. It exports UTF-8 SRT. With `--burn`, local FFmpeg creates `final-subtitled.mp4` while preserving clean `final.mp4`.
+
 ## Characters, continuity, and budget
 
 `characters` is optional and supports more than one named character. A shot selects participants with `character_ids`; their identity and canonical wardrobe are injected into both keyframe and motion prompts. `scene_id` and `continuity_notes` make adjacent-shot continuity auditable. Set `continuity_change` to true when a deliberate wardrobe or scene discontinuity is part of the story.
+
+Series-managed episode projects may also contain `series_context`. The CLI owns this object and synchronizes the series ID, episode number, declared starting state, previous accepted episode summary, and intended ending. The previous accepted summary and current starting state are injected into composed prompts. Do not store credentials in this object.
 
 Budget rates are operator estimates, not provider invoices. When `max_estimated_cost` is non-null, preflight rejects an over-budget plan and runtime blocks the next create request before its attempt would exceed the ceiling. `state.json.budget_usage` counts actual create attempts, including explicitly authorized retries.

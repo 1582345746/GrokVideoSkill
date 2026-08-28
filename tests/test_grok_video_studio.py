@@ -50,6 +50,9 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     json_video_creates = 0
     last_json_video: dict[str, object] = {}
     image_requests: list[tuple[str, bytes]] = []
+    image_authorization = ""
+    json_video_authorization = ""
+    multipart_video_authorization = ""
     video_payload = FAKE_MP4
     audio_payload = FAKE_MP4
     fail_video_create = False
@@ -98,11 +101,13 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/images/generations" or self.path == "/v1/images/edits":
             type(self).image_creates += 1
             type(self).image_requests.append((self.path, body))
+            type(self).image_authorization = self.headers.get("Authorization", "")
             self.send_json({"data": [{"b64_json": base64.b64encode(FAKE_PNG).decode("ascii")}]})
             return
         if self.path == "/v1/videos":
             type(self).video_creates += 1
             type(self).last_video_body = body
+            type(self).multipart_video_authorization = self.headers.get("Authorization", "")
             if type(self).fail_video_create:
                 self.send_json({"error": {"message": "temporary upstream failure"}}, 502)
                 return
@@ -110,6 +115,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/videos/generations":
             type(self).json_video_creates += 1
+            type(self).json_video_authorization = self.headers.get("Authorization", "")
             try:
                 type(self).last_json_video = json.loads(body.decode("utf-8"))
             except json.JSONDecodeError:
@@ -203,6 +209,9 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.json_video_creates = 0
         FakeProviderHandler.last_json_video = {}
         FakeProviderHandler.image_requests = []
+        FakeProviderHandler.image_authorization = ""
+        FakeProviderHandler.json_video_authorization = ""
+        FakeProviderHandler.multipart_video_authorization = ""
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
         self.temp = tempfile.TemporaryDirectory()
@@ -374,6 +383,8 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_capabilities_and_dynamic_duration_planning(self) -> None:
         capabilities = self.run_cli("capabilities")
         ids = {item["id"] for item in capabilities["workflows"]}
+        routes = {item["id"] for item in capabilities["product_routes"]}
+        self.assertEqual(routes, {"text-to-video", "image-to-video", "episodic-series", "news-video"})
         self.assertIn("short-drama", ids)
         self.assertIn("single-image-animation", ids)
         project = self.root / "dynamic"
@@ -391,6 +402,81 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(sum(created["shot_seconds"]), 37)
         self.assertNotEqual(len(created["shot_seconds"]), 8)
+
+    def test_news_video_requires_verified_sourced_claims(self) -> None:
+        project = self.root / "news"
+        created = self.run_cli(
+            "news-init",
+            str(project),
+            "--title",
+            "Daily Brief",
+            "--topic",
+            "A verified product announcement",
+            "--target-seconds",
+            "2",
+            "--shots",
+            "2",
+            "--clip-seconds",
+            "1",
+        )
+        self.assertEqual(created["research_status"], "researching")
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "A concise sourced explanation of the announcement."
+        for index, shot in enumerate(value["shots"], 1):
+            shot["video_prompt"] = f"A neutral illustrative news visual for verified point {index}."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        news = json.loads((project / "news.json").read_text(encoding="utf-8"))
+        news.update(
+            {
+                "as_of": "2026-08-28T12:00:00+08:00",
+                "sources": [
+                    {
+                        "id": "official",
+                        "title": "Official announcement",
+                        "publisher": "Example Organization",
+                        "url": "https://example.org/announcement",
+                        "published_at": "2026-08-28T08:00:00+08:00",
+                        "accessed_at": "2026-08-28T12:00:00+08:00",
+                        "source_type": "primary",
+                        "visual_rights": "facts-only",
+                    },
+                    {
+                        "id": "report",
+                        "title": "Independent report",
+                        "publisher": "Example Newsroom",
+                        "url": "https://news.example.com/report",
+                        "published_at": "2026-08-28T09:00:00+08:00",
+                        "accessed_at": "2026-08-28T12:00:00+08:00",
+                        "source_type": "secondary",
+                        "visual_rights": "facts-only",
+                    },
+                ],
+                "claims": [
+                    {"id": "announcement-fact", "text": "The organization published an announcement.", "source_ids": ["official"]}
+                ],
+                "script_segments": [
+                    {"shot_id": "shot-001", "narration": "The organization issued a new announcement.", "claim_ids": ["announcement-fact"]},
+                    {"shot_id": "shot-002", "narration": "Independent reporting supplied additional context.", "claim_ids": ["announcement-fact"]},
+                ],
+            }
+        )
+        news["selection"].update(
+            {
+                "rationale": "Selected because it was recent and independently reported.",
+                "search_queries": ["verified product announcement"],
+            }
+        )
+        news["editorial"].update(
+            {"status": "verified", "fact_checked_at": "2026-08-28T12:05:00+08:00", "unresolved_conflicts": []}
+        )
+        (project / "news.json").write_text(json.dumps(news), encoding="utf-8")
+        validated = self.run_cli("news-validate", str(project))
+        self.assertTrue(validated["ok"])
+
+        news["sources"] = news["sources"][:1]
+        (project / "news.json").write_text(json.dumps(news), encoding="utf-8")
+        rejected = self.run_cli("news-validate", str(project), expected=1)
+        self.assertTrue(any("at least two sources" in error for error in rejected["errors"]))
         self.assertTrue(all(1 <= value <= 15 for value in created["shot_seconds"]))
 
     def test_validation_enforces_video_and_prompt_limits(self) -> None:
@@ -621,6 +707,29 @@ class SkillIntegrationTests(unittest.TestCase):
         video_prompt = next(item for item in preflight["preflight"]["prompts"] if item["kind"] == "video")
         self.assertGreater(video_prompt["characters"], len(shot["video_prompt"]))
 
+    def test_multiple_selected_character_references_feed_keyframe_generation(self) -> None:
+        project = self.create_project("multi-character")
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["characters"] = []
+        for character_id in ("lead", "friend"):
+            relative = f"assets/references/{character_id}.png"
+            (project / relative).write_bytes(FAKE_PNG)
+            value["characters"].append(
+                {
+                    "id": character_id,
+                    "name": character_id.title(),
+                    "identity": f"Stable identity for {character_id}.",
+                    "wardrobe": "Simple everyday clothes.",
+                    "references": [relative],
+                }
+            )
+        value["shots"][0]["character_ids"] = ["lead", "friend"]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+
+        self.run_cli("generate-images", str(project))
+        self.assertEqual(FakeProviderHandler.image_requests[-1][0], "/v1/images/edits")
+        self.assertEqual(FakeProviderHandler.image_requests[-1][1].count(b'name="image"'), 2)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_progress_qa_postprocess_and_cover_are_offline(self) -> None:
         project = self.create_project("delivery", generate_image=False)
@@ -652,11 +761,35 @@ class SkillIntegrationTests(unittest.TestCase):
         cover_result = self.run_cli("cover", str(processed), str(cover), "--at-seconds", "0.2")
         self.assertGreater(cover_result["cover"]["bytes"], 100)
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_subtitles_export_sidecar_and_preserve_clean_final(self) -> None:
+        project = self.create_project("subtitles", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["subtitles"] = [
+            {"start": 0.05, "end": 0.45, "text": "First line"},
+            {"start": 0.5, "end": 0.9, "text": "Second line"},
+        ]
+        value["shots"][0]["seconds"] = 1
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        self.run_cli("run", str(project), "--poll-timeout", "5")
+        clean = project / "deliverables" / "final.mp4"
+        clean_digest = clean.read_bytes()
+
+        result = self.run_cli("subtitles", str(project), "--burn")
+        self.assertEqual(result["subtitles"]["cue_count"], 2)
+        srt = project / "deliverables" / "subtitles.srt"
+        subtitled = project / "deliverables" / "final-subtitled.mp4"
+        self.assertIn("00:00:00,050 --> 00:00:00,450", srt.read_text(encoding="utf-8"))
+        self.assertTrue(subtitled.is_file())
+        self.assertEqual(clean.read_bytes(), clean_digest)
+        self.assertTrue(result["burned_video"]["has_audio"])
+
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_dpapi_storage_keeps_plaintext_out_of_config(self) -> None:
         secure_dir = self.root / "secure-config"
         image_secret = "private-image-value"
-        video_secret = "private-video-value"
+        text_video_secret = "private-text-video-value"
+        image_video_secret = "private-image-video-value"
         environment = self.env.copy()
         environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
         result = subprocess.run(
@@ -671,7 +804,13 @@ class SkillIntegrationTests(unittest.TestCase):
                 "--quickainew-base-url",
                 self.base_url,
             ],
-            input=json.dumps({"quickai_key": image_secret, "quickainew_key": video_secret}) + "\n",
+            input=json.dumps(
+                {
+                    "quickai_image_key": image_secret,
+                    "quickai_video_key": text_video_secret,
+                    "quickainew_video_key": image_video_secret,
+                }
+            ) + "\n",
             env=environment,
             capture_output=True,
             text=True,
@@ -680,15 +819,18 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn(image_secret, result.stdout + result.stderr)
-        self.assertNotIn(video_secret, result.stdout + result.stderr)
+        self.assertNotIn(text_video_secret, result.stdout + result.stderr)
+        self.assertNotIn(image_video_secret, result.stdout + result.stderr)
         with mock.patch.dict(os.environ, environment, clear=False):
             config_bytes = (secure_dir / "config.json").read_bytes()
             secret_bytes = (secure_dir / "secrets.dpapi").read_bytes()
             self.assertNotIn(image_secret.encode(), config_bytes + secret_bytes)
-            self.assertNotIn(video_secret.encode(), config_bytes + secret_bytes)
+            self.assertNotIn(text_video_secret.encode(), config_bytes + secret_bytes)
+            self.assertNotIn(image_video_secret.encode(), config_bytes + secret_bytes)
             loaded = load_settings()
-            self.assertEqual(loaded["quickai_key"], image_secret)
-            self.assertEqual(loaded["quickainew_key"], video_secret)
+            self.assertEqual(loaded["quickai_image_key"], image_secret)
+            self.assertEqual(loaded["quickai_video_key"], text_video_secret)
+            self.assertEqual(loaded["quickainew_video_key"], image_video_secret)
 
     def test_credentials_stdin_accepts_single_provider_key(self) -> None:
         secure_dir = self.root / "invalid-config"
@@ -743,6 +885,237 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn(b'name="resolution"\r\n\r\n720p', FakeProviderHandler.last_video_body)
         self.assertIn(b'name="aspect_ratio"', FakeProviderHandler.last_video_body)
         self.assertNotIn(b'name="input_reference"', FakeProviderHandler.last_video_body)
+
+    def test_role_specific_credentials_do_not_cross_generation_routes(self) -> None:
+        self.env.update(
+            {
+                "GVS_QUICKAI_IMAGE_KEY": "image-role-key",
+                "GVS_QUICKAI_VIDEO_KEY": "text-video-role-key",
+                "GVS_QUICKAINEW_VIDEO_KEY": "image-video-role-key",
+            }
+        )
+        image_project = self.create_project("role-image")
+        self.run_cli("generate-images", str(image_project))
+        self.assertEqual(FakeProviderHandler.image_authorization, "Bearer image-role-key")
+
+        text_project = self.root / "role-text-video"
+        self.run_cli(
+            "init",
+            str(text_project),
+            "--title",
+            "Text",
+            "--topic",
+            "Route",
+            "--workflow",
+            "text-to-video",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+        )
+        text_value = json.loads((text_project / "project.json").read_text(encoding="utf-8"))
+        text_value["story"] = "One text generated clip."
+        text_value["shots"][0]["video_prompt"] = "A red paper boat floats across a still pond."
+        (text_project / "project.json").write_text(json.dumps(text_value), encoding="utf-8")
+        self.run_cli("generate-videos", str(text_project), "--poll-timeout", "5")
+        self.assertEqual(FakeProviderHandler.json_video_authorization, "Bearer text-video-role-key")
+
+        self.run_cli("generate-videos", str(image_project), "--poll-timeout", "5")
+        self.assertEqual(FakeProviderHandler.multipart_video_authorization, "Bearer image-video-role-key")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_supplied_image_animation_does_not_require_an_image_key(self) -> None:
+        self.env.update(
+            {
+                "GVS_QUICKAI_KEY": "",
+                "GVS_QUICKAI_IMAGE_KEY": "",
+                "GVS_QUICKAI_VIDEO_KEY": "",
+                "GVS_QUICKAINEW_KEY": "",
+                "GVS_QUICKAINEW_VIDEO_KEY": "only-image-to-video-key",
+            }
+        )
+        project = self.root / "supplied-image"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Animate One Image",
+            "--topic",
+            "Subtle portrait motion",
+            "--workflow",
+            "single-image-animation",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+            "--video-size",
+            "320x240",
+            "--aspect-ratio",
+            "4:3",
+        )
+        reference = project / "assets" / "references" / "portrait.png"
+        reference.write_bytes(FAKE_PNG)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "Animate the supplied portrait without changing its identity or framing."
+        value["shots"][0]["video_prompt"] = "The subject blinks once and breathes naturally; lock all other details."
+        value["shots"][0]["video_references"] = ["assets/references/portrait.png"]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+
+        result = self.run_cli("run", str(project), "--poll-timeout", "5")
+        self.assertEqual(result["images"]["skipped"], ["shot-001"])
+        self.assertEqual(FakeProviderHandler.image_creates, 0)
+        self.assertEqual(FakeProviderHandler.multipart_video_authorization, "Bearer only-image-to-video-key")
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_series_episode_lifecycle_and_shared_character_master(self) -> None:
+        series_root = self.root / "series"
+        created = self.run_cli(
+            "series-init",
+            str(series_root),
+            "--title",
+            "City Story",
+            "--premise",
+            "A newcomer builds a life in the city.",
+            "--episodes",
+            "2",
+            "--episode-seconds",
+            "1",
+            "--clip-seconds",
+            "1",
+            "--video-size",
+            "320x240",
+            "--aspect-ratio",
+            "4:3",
+        )
+        self.assertEqual(created["episode_count"], 2)
+        series = json.loads((series_root / "series.json").read_text(encoding="utf-8"))
+        series["season_arc"] = "The lead moves from rejection to belonging."
+        series["style_bible"] = "Naturalistic daylight and restrained handheld camera."
+        series["characters"] = [
+            {
+                "id": "lead",
+                "name": "Chen",
+                "identity": "A 24-year-old man with short black hair and a narrow face.",
+                "wardrobe": "Faded denim jacket and canvas backpack.",
+                "master": {
+                    "enabled": True,
+                    "generate": True,
+                    "path": "assets/character-masters/lead.png",
+                    "prompt": "A clean single sheet with front, side, and back full-body views of the same person.",
+                    "source_references": [],
+                    "image_size": "1024x1024",
+                    "image_quality": "auto",
+                },
+            }
+        ]
+        for episode in series["episodes"]:
+            episode["title"] = f"Episode {episode['number']}"
+            episode["synopsis"] = f"Story beat {episode['number']}."
+        (series_root / "series.json").write_text(json.dumps(series), encoding="utf-8")
+
+        episode_one = series_root / "episodes" / "ep-001"
+        project = json.loads((episode_one / "project.json").read_text(encoding="utf-8"))
+        project["story"] = "Chen reaches the city and asks for his first job."
+        project["shots"][0].update(
+            {
+                "summary": "Chen enters a small restaurant.",
+                "scene_id": "restaurant",
+                "character_ids": ["lead"],
+                "continuity_notes": "Keep the denim jacket and backpack.",
+                "image_prompt": "Chen stands inside a modest restaurant beside the front door.",
+                "video_prompt": "Chen takes one step forward and looks toward the counter.",
+            }
+        )
+        (episode_one / "project.json").write_text(json.dumps(project), encoding="utf-8")
+
+        preflight = self.run_cli("series-preflight", str(series_root), "--episode", "ep-001")
+        self.assertEqual(preflight["request_totals"]["pending_series_character_images"], 1)
+        self.assertEqual(preflight["request_totals"]["episode_images"], 1)
+        self.assertEqual(preflight["request_totals"]["episode_videos"], 1)
+        self.assertEqual(preflight["request_totals"]["total_pending_images"], 2)
+
+        characters = self.run_cli("series-generate-characters", str(series_root))
+        self.assertEqual(characters["characters"]["completed"], ["lead"])
+        synced_project = json.loads((episode_one / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(synced_project["characters"][0]["references"], ["assets/characters/lead.png"])
+
+        self.run_cli("series-approve", str(series_root), "ep-001")
+        approved_project = json.loads((episode_one / "project.json").read_text(encoding="utf-8"))
+        approved_prompt = approved_project["shots"][0]["video_prompt"]
+        approved_project["shots"][0]["video_prompt"] += " Unreviewed change."
+        (episode_one / "project.json").write_text(json.dumps(approved_project), encoding="utf-8")
+        blocked = self.run_cli(
+            "series-run", str(series_root), "--episode", "ep-001", "--poll-timeout", "5", expected=1
+        )
+        self.assertIn("changed after approval", blocked["error"])
+        self.assertEqual(FakeProviderHandler.image_creates, 1)
+        approved_project["shots"][0]["video_prompt"] = approved_prompt
+        (episode_one / "project.json").write_text(json.dumps(approved_project), encoding="utf-8")
+        generated = self.run_cli("series-run", str(series_root), "--episode", "ep-001", "--poll-timeout", "5")
+        self.assertEqual(generated["status"], "needs_review")
+        self.assertTrue(generated["qa"]["technical_ok"])
+        self.assertEqual(FakeProviderHandler.image_requests[-1][0], "/v1/images/edits")
+        self.assertIn(b'name="image"', FakeProviderHandler.image_requests[-1][1])
+
+        accepted = self.run_cli(
+            "series-accept",
+            str(series_root),
+            "ep-001",
+            "--continuity-summary",
+            "Chen ends inside the restaurant, still wearing the denim jacket and carrying the backpack.",
+        )
+        self.assertEqual(accepted["runtime"]["status"], "completed")
+        next_episode = self.run_cli("series-next", str(series_root))
+        self.assertEqual(next_episode["episode"]["id"], "ep-002")
+        self.assertEqual(next_episode["next_action"], "fill_prompts_then_preflight_and_approve")
+        context = self.run_cli("series-context", str(series_root), "--episode", "ep-002")
+        self.assertEqual(context["previous_episodes"][0]["id"], "ep-001")
+        self.assertIn("denim jacket", context["previous_episodes"][0]["continuity_summary"])
+        episode_two = series_root / "episodes" / "ep-002"
+        project_two = json.loads((episode_two / "project.json").read_text(encoding="utf-8"))
+        project_two["story"] = "Chen continues from the reviewed restaurant ending."
+        project_two["shots"][0].update(
+            {
+                "image_prompt": "Chen waits beside the same restaurant counter.",
+                "video_prompt": "Chen puts the backpack down beside the counter.",
+                "character_ids": ["lead"],
+            }
+        )
+        (episode_two / "project.json").write_text(json.dumps(project_two), encoding="utf-8")
+        self.run_cli("series-sync", str(series_root))
+        synced_two = json.loads((episode_two / "project.json").read_text(encoding="utf-8"))
+        self.assertIn("Reviewed previous episode end state", composed_video_prompt(synced_two, synced_two["shots"][0]))
+
+    def test_text_to_video_series_characters_do_not_require_image_masters(self) -> None:
+        series_root = self.root / "text-series"
+        self.run_cli(
+            "series-init",
+            str(series_root),
+            "--title",
+            "Text Series",
+            "--premise",
+            "A prompt-only episodic story.",
+            "--episodes",
+            "1",
+            "--episode-seconds",
+            "1",
+            "--clip-seconds",
+            "1",
+            "--mode",
+            "text-to-video",
+        )
+        series = json.loads((series_root / "series.json").read_text(encoding="utf-8"))
+        series["characters"] = [
+            {
+                "id": "lead",
+                "name": "Lead",
+                "identity": "A stable prompt-only identity description.",
+                "wardrobe": "Blue coat.",
+            }
+        ]
+        (series_root / "series.json").write_text(json.dumps(series), encoding="utf-8")
+        status = self.run_cli("series-status", str(series_root))
+        self.assertTrue(status["ok"])
 
 
 if __name__ == "__main__":
