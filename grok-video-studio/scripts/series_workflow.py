@@ -22,6 +22,7 @@ EPISODE_STATUSES = {"draft", "approved", "generating", "needs_review", "complete
 MAX_PROMPT_CHARS = 4096
 SAFE_PROMPT_CHARS = 3800
 AUDIO_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
+SUBTITLE_SOURCES = {"upstream", "project", "none"}
 VOICE_CONSENTS = {"synthetic", "owned", "licensed"}
 
 
@@ -144,6 +145,8 @@ def create_series_contract(
     video_size: str,
     video_resolution: str,
     video_aspect_ratio: str,
+    audio_mode: str = "preserve",
+    subtitle_source: str = "project",
 ) -> dict[str, Any]:
     root = root.resolve()
     if series_file(root).exists() or series_state_file(root).exists():
@@ -178,11 +181,12 @@ def create_series_contract(
         "props": [],
         "characters": [],
         "audio": {
-            "mode": "preserve",
+            "mode": audio_mode,
             "language": "zh-CN",
-            "generate_audio": False,
+            "generate_audio": audio_mode == "native-dialogue",
             "preserve_source_audio": True,
             "duck_source_audio": True,
+            "subtitle_source": subtitle_source,
         },
         "defaults": {
             "episode_target_seconds": target_seconds,
@@ -234,6 +238,7 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
     if series.get("audio") is not None and not isinstance(series.get("audio"), dict):
         errors.append("series.audio must be an object")
     audio_mode = str(audio.get("mode", "preserve")).strip().lower()
+    subtitle_source = str(audio.get("subtitle_source", "project")).strip().lower() or "project"
     if audio_mode not in AUDIO_MODES:
         errors.append("series.audio.mode is invalid")
     generate_audio = bool(audio.get("generate_audio", audio_mode == "native-dialogue"))
@@ -241,6 +246,8 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         errors.append("series.audio.generate_audio must be true for native-dialogue")
     if audio_mode in {"mute", "local-voice", "local-lipsync"} and generate_audio:
         errors.append(f"series.audio.generate_audio must be false for {audio_mode}")
+    if subtitle_source not in SUBTITLE_SOURCES:
+        errors.append("series.audio.subtitle_source must be upstream, project, or none")
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
     if defaults.get("video_mode") not in {"text-to-video", "image-to-video"}:
         errors.append("series.defaults.video_mode must be text-to-video or image-to-video")

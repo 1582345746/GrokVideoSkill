@@ -14,6 +14,7 @@ from media_tools import mix_dialogue_track, probe_media, render_dialogue_track, 
 
 
 DIALOGUE_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
+SUBTITLE_SOURCES = {"upstream", "project", "none"}
 VOICE_CONSENTS = {"synthetic", "owned", "licensed"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
@@ -21,8 +22,10 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 def audio_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("audio") if isinstance(project.get("audio"), dict) else {}
     mode = str(value.get("mode", "preserve")).strip().lower()
+    subtitle_source = str(value.get("subtitle_source", "project")).strip().lower() or "project"
     return {
         "mode": mode,
+        "subtitle_source": subtitle_source,
         "language": str(value.get("language", "zh-CN")).strip() or "zh-CN",
         "generate_audio": bool(value.get("generate_audio", mode == "native-dialogue")),
         "preserve_source_audio": bool(value.get("preserve_source_audio", True)),
@@ -59,6 +62,8 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("project.audio must be an object")
     if config["mode"] not in DIALOGUE_MODES:
         errors.append("audio.mode must be preserve, mute, native-dialogue, local-voice, or local-lipsync")
+    if config["subtitle_source"] not in SUBTITLE_SOURCES:
+        errors.append("audio.subtitle_source must be upstream, project, or none")
     if config["mode"] == "native-dialogue" and not config["generate_audio"]:
         errors.append("audio.generate_audio must be true for native-dialogue")
     if config["mode"] in {"mute", "local-voice", "local-lipsync"} and config["generate_audio"]:

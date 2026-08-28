@@ -6,6 +6,9 @@ param(
     [switch]$Configure,
     [switch]$ConfigureFromStdin,
     [switch]$SkipProviderTest,
+    [ValidateSet("basic", "upstream-dialogue", "precise-subtitles", "precise-voice", "lip-sync")]
+    [string]$InstallProfile = "basic",
+    [switch]$Interactive,
     [ValidateSet("core", "native-dialogue", "local-voice", "full-dialogue")]
     [string]$ComponentProfile = "core",
     [string]$ComponentSourceRoot,
@@ -43,6 +46,54 @@ if ($sourcePath -eq $destinationPath) {
     throw "Source and destination must be different directories."
 }
 
+$selectedInstallProfile = $InstallProfile
+if ($ComponentProfile -ne "core" -and $InstallProfile -eq "basic") {
+    $selectedInstallProfile = @{
+        "native-dialogue" = "upstream-dialogue"
+        "local-voice" = "precise-voice"
+        "full-dialogue" = "lip-sync"
+    }[$ComponentProfile]
+}
+if ($Interactive) {
+    $profileInput = Read-Host "Choose profile: basic, upstream-dialogue, precise-subtitles, precise-voice, lip-sync (default: $selectedInstallProfile)"
+    if (-not [string]::IsNullOrWhiteSpace($profileInput)) {
+        $selectedInstallProfile = $profileInput.Trim().ToLowerInvariant()
+    }
+    if ($selectedInstallProfile -notin @("basic", "upstream-dialogue", "precise-subtitles", "precise-voice", "lip-sync")) {
+        throw "Unknown install profile: $selectedInstallProfile"
+    }
+    $Configure = $true
+}
+$profileComponentMap = @{
+    "basic" = "core"
+    "upstream-dialogue" = "native-dialogue"
+    "precise-subtitles" = "core"
+    "precise-voice" = "local-voice"
+    "lip-sync" = "full-dialogue"
+}
+$selectedComponentProfile = $profileComponentMap[$selectedInstallProfile]
+if ([string]::IsNullOrWhiteSpace($selectedComponentProfile)) {
+    throw "Install profile mapping is invalid: $selectedInstallProfile"
+}
+if ($Interactive -and $selectedInstallProfile -in @("precise-voice", "lip-sync")) {
+    $componentChoice = Read-Host "Download and build the optional local AI services and pinned models now? (y/N)"
+    if ($componentChoice.Trim().ToLowerInvariant() -in @("y", "yes")) {
+        $InstallComponents = $true
+        $IncludeComponentModels = $true
+        $AcceptComponentDownloads = $true
+    }
+}
+if ($Interactive -and $InstallComponents -and $selectedInstallProfile -eq "lip-sync") {
+    $startChoice = Read-Host "Start a local service after installation? Use cosyvoice, musetalk, all, or N (default: N)"
+    if ($startChoice.Trim().ToLowerInvariant() -in @("cosyvoice", "musetalk", "all")) {
+        $StartComponents = $true
+        $StartComponent = $startChoice.Trim().ToLowerInvariant()
+    }
+}
+if ($ConfigureFromStdin -and $Interactive) {
+    throw "Use either -Interactive or -ConfigureFromStdin, not both."
+}
+
 $destinationParent = Split-Path -Parent $destinationPath
 New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
 if (Test-Path -LiteralPath $destinationPath) {
@@ -64,6 +115,15 @@ if ($LASTEXITCODE -ne 0) {
     throw "Installed Skill did not pass the version check."
 }
 
+& $Python $cli install-plan --profile $selectedInstallProfile
+if ($LASTEXITCODE -ne 0) {
+    throw "Install profile plan check failed."
+}
+& $Python $cli install-configure --profile $selectedInstallProfile
+if ($LASTEXITCODE -ne 0) {
+    throw "Install profile configuration failed."
+}
+
 if ($Configure -or $ConfigureFromStdin) {
     $arguments = @($cli, "configure")
     if ($ConfigureFromStdin) {
@@ -78,7 +138,7 @@ if ($Configure -or $ConfigureFromStdin) {
     }
 }
 
-$componentArguments = @($cli, "components-configure", "--profile", $ComponentProfile)
+$componentArguments = @($cli, "components-configure", "--profile", $selectedComponentProfile)
 if (-not [string]::IsNullOrWhiteSpace($ComponentSourceRoot)) {
     $componentArguments += @("--source-root", $ComponentSourceRoot)
 }
@@ -91,17 +151,17 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 if ($InstallComponents) {
-    if ($ComponentProfile -notin @("local-voice", "full-dialogue")) {
-        throw "-InstallComponents requires -ComponentProfile local-voice or full-dialogue."
+    if ($selectedComponentProfile -notin @("local-voice", "full-dialogue")) {
+        throw "-InstallComponents requires an install profile with local AI services."
     }
     if (-not $AcceptComponentDownloads) {
         throw "Component installation requires -AcceptComponentDownloads after the user approves downloads."
     }
-    & $Python $cli components-install --profile $ComponentProfile --accept-downloads
+    & $Python $cli components-install --profile $selectedComponentProfile --accept-downloads
     if ($LASTEXITCODE -ne 0) {
         throw "Optional component source installation failed."
     }
-    $setupArguments = @($cli, "components-setup", "--profile", $ComponentProfile, "--accept-downloads")
+    $setupArguments = @($cli, "components-setup", "--profile", $selectedComponentProfile, "--accept-downloads")
     if ($IncludeComponentModels) {
         $setupArguments += "--include-models"
     }
@@ -115,10 +175,10 @@ if ($StartComponents) {
     if (-not $InstallComponents -or -not $IncludeComponentModels) {
         throw "-StartComponents requires -InstallComponents and -IncludeComponentModels."
     }
-    if ($ComponentProfile -eq "full-dialogue" -and [string]::IsNullOrWhiteSpace($StartComponent)) {
+    if ($selectedComponentProfile -eq "full-dialogue" -and [string]::IsNullOrWhiteSpace($StartComponent)) {
         throw "-StartComponents with full-dialogue requires -StartComponent cosyvoice, musetalk, or all."
     }
-    $startArguments = @($cli, "components-start", "--profile", $ComponentProfile)
+    $startArguments = @($cli, "components-start", "--profile", $selectedComponentProfile)
     if (-not [string]::IsNullOrWhiteSpace($StartComponent)) {
         $startArguments += @("--component", $StartComponent)
     }
@@ -129,7 +189,8 @@ if ($StartComponents) {
 }
 
 Write-Host "Installed Grok Video Studio to $destinationPath"
-Write-Host "Component profile: $ComponentProfile"
+Write-Host "Install profile: $selectedInstallProfile"
+Write-Host "Component profile: $selectedComponentProfile"
 if (-not $Configure -and -not $ConfigureFromStdin) {
     Write-Host "Next: Codex can run python `"$cli`" configure --credentials-stdin --skip-test and provide the credential JSON through process stdin."
 }

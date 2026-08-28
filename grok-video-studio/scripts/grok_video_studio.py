@@ -41,8 +41,10 @@ from component_manager import (
     start_components,
     stop_components,
 )
+from install_profiles import INSTALL_PROFILE_IDS, install_profile_plan, install_profile_settings_path, load_install_profile, save_install_profile
 from dialogue_workflow import (
     DIALOGUE_MODES,
+    SUBTITLE_SOURCES,
     audio_config,
     dialogue_preflight,
     dialogue_prompt,
@@ -78,7 +80,7 @@ from series_workflow import (
 )
 
 
-SKILL_VERSION = "1.6.2"
+SKILL_VERSION = "1.7.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -1512,6 +1514,8 @@ def init_project(
     video_provider_value: str,
     video_resolution_value: str,
     video_aspect_ratio_value: str,
+    audio_mode_value: str = "preserve",
+    subtitle_source_value: str = "project",
 ) -> Path:
     root = root.resolve()
     path = project_file(root)
@@ -1559,11 +1563,12 @@ def init_project(
         "style_bible": "",
         "characters": [],
         "audio": {
-            "mode": "preserve",
+            "mode": audio_mode_value,
             "language": "zh-CN",
-            "generate_audio": False,
+            "generate_audio": audio_mode_value == "native-dialogue",
             "preserve_source_audio": True,
             "duck_source_audio": True,
+            "subtitle_source": subtitle_source_value,
         },
         "character_master": {
             "enabled": uses_master,
@@ -1933,6 +1938,15 @@ def export_subtitles(root: Path, project: dict[str, Any], output: Path) -> dict[
     return {"path": str(output.resolve()), "cue_count": len(cues), "cues": cues}
 
 
+def resolve_subtitle_source(project: dict[str, Any], requested: str = "auto") -> str:
+    selected = str(requested or "auto").strip().lower()
+    if selected == "auto":
+        selected = audio_config(project).get("subtitle_source", "project")
+    if selected not in SUBTITLE_SOURCES:
+        raise SkillError("subtitle source must be auto, upstream, project, or none")
+    return selected
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -1957,6 +1971,17 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--skip-test", action="store_true")
 
     commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")
+
+    install_plan = commands.add_parser(
+        "install-plan", help="Show a side-effect-free capability installation plan and dependency checks."
+    )
+    # Aliases such as full-dialogue are resolved by install_profiles.py so old
+    # automation can keep using the command after the profile rename.
+    install_plan.add_argument("--profile", default="basic")
+    install_configure = commands.add_parser(
+        "install-configure", help="Persist the selected capability profile without storing provider secrets."
+    )
+    install_configure.add_argument("--profile", required=True)
 
     components_plan = commands.add_parser("components-plan", help="Show optional local-service requirements without changing the machine.")
     components_plan.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"), required=True)
@@ -1995,6 +2020,8 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
+    init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
+    init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
     init.add_argument("--seconds", type=int)
 
     series_init = commands.add_parser("series-init", help="Create a series contract and standard episode projects.")
@@ -2009,6 +2036,8 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
+    series_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
+    series_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
     series_init.add_argument("--clip-seconds", type=int)
 
     for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync"):
@@ -2063,6 +2092,8 @@ def build_parser() -> argparse.ArgumentParser:
     news_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
     news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
+    news_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)), default="preserve")
+    news_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)), default="project")
 
     for name in ("news-validate", "news-context"):
         command = commands.add_parser(name)
@@ -2130,6 +2161,12 @@ def build_parser() -> argparse.ArgumentParser:
     subtitles.add_argument("--output-video", type=Path)
     subtitles.add_argument("--style", choices=tuple(SUBTITLE_STYLES), default="clean")
     subtitles.add_argument(
+        "--source",
+        choices=("auto", "upstream", "project", "none"),
+        default="auto",
+        help="Select upstream pixels, deterministic project cues, or no subtitle delivery.",
+    )
+    subtitles.add_argument(
         "--confirm-source-clean",
         action="store_true",
         help="Allow subtitle burning for native-dialogue only after visual review confirms the source has no baked captions.",
@@ -2144,6 +2181,12 @@ def build_parser() -> argparse.ArgumentParser:
     dialogue.add_argument("--force", action="store_true")
     dialogue.add_argument("--burn-subtitles", action="store_true")
     dialogue.add_argument("--subtitle-style", choices=tuple(SUBTITLE_STYLES), default="clean")
+    dialogue.add_argument(
+        "--subtitle-source",
+        choices=("auto", "upstream", "project", "none"),
+        default="auto",
+        help="Select subtitle source for the optional SRT/burned delivery.",
+    )
 
     cover = commands.add_parser("cover", help="Export a representative frame as a JPG or PNG cover.")
     cover.add_argument("input", type=Path)
@@ -2160,10 +2203,12 @@ def main() -> int:
             print_json({"ok": True, "version": SKILL_VERSION})
             return 0
         if args.command == "capabilities":
+            install_profile = load_install_profile()
             print_json(
                 {
                     "ok": True,
                     "version": SKILL_VERSION,
+                    "installation": install_profile,
                     "product_routes": [
                         {
                             "id": "text-to-video",
@@ -2207,6 +2252,13 @@ def main() -> int:
             code, result = doctor()
             print_json(result)
             return code
+        if args.command == "install-plan":
+            print_json({"ok": True, **install_profile_plan(args.profile)})
+            return 0
+        if args.command == "install-configure":
+            settings = save_install_profile(args.profile)
+            print_json({"ok": True, "settings": settings, "path": str(install_profile_settings_path())})
+            return 0
         if args.command == "components-plan":
             print_json({"ok": True, **component_plan(args.profile)})
             return 0
@@ -2269,6 +2321,8 @@ def main() -> int:
                 video_size=args.video_size,
                 video_resolution=args.video_resolution,
                 video_aspect_ratio=args.aspect_ratio,
+                audio_mode=args.audio_mode,
+                subtitle_source=args.subtitle_source,
             )
             for episode in episode_records(series):
                 project_root = root / str(episode["project"])
@@ -2283,6 +2337,8 @@ def main() -> int:
                     selected_provider,
                     args.video_resolution,
                     args.aspect_ratio,
+                    args.audio_mode,
+                    args.subtitle_source,
                 )
             synced = sync_all_episode_contracts(root, series)
             print_json(
@@ -2530,7 +2586,9 @@ def main() -> int:
                 provider,
                 args.video_resolution,
                 args.aspect_ratio,
-            )
+                args.audio_mode,
+                args.subtitle_source,
+                )
             package = create_news_contract(
                 root,
                 topic=args.topic,
@@ -2592,6 +2650,8 @@ def main() -> int:
                 selected_provider,
                 args.video_resolution,
                 args.aspect_ratio,
+                args.audio_mode,
+                args.subtitle_source,
             )
             print_json({"ok": True, "project": str(path), "workflow": args.workflow, "shot_seconds": durations, "target_seconds": sum(durations)})
             return 0
@@ -2621,15 +2681,24 @@ def main() -> int:
         if args.command == "subtitles":
             root = args.project.resolve()
             project = require_valid_project(root)
+            subtitle_source = resolve_subtitle_source(project, args.source)
             if args.output_video and not args.burn:
                 raise SkillError("--output-video requires --burn")
+            if args.burn and subtitle_source != "project":
+                raise SkillError(
+                    f"subtitle source {subtitle_source!r} has no local SRT to burn; use --source project for a deterministic subtitle copy"
+                )
             if args.burn and audio_config(project)["mode"] == "native-dialogue" and not args.confirm_source_clean:
                 raise SkillError(
                     "native-dialogue providers may bake captions into pixels; inspect the source video first, then re-run with "
                     "--confirm-source-clean only when the source is visually caption-free"
                 )
-            srt_output = args.output_srt.resolve() if args.output_srt else root / "deliverables" / "subtitles.srt"
-            subtitle_result = export_subtitles(root, project, srt_output)
+            subtitle_result: dict[str, Any] = {"source": subtitle_source, "preserved": subtitle_source == "upstream"}
+            if subtitle_source == "project":
+                srt_output = args.output_srt.resolve() if args.output_srt else root / "deliverables" / "subtitles.srt"
+                subtitle_result.update(export_subtitles(root, project, srt_output))
+            elif args.output_srt:
+                raise SkillError("--output-srt is only valid with --source project")
             video_result: dict[str, Any] | None = None
             if args.burn:
                 source = args.source_video.resolve() if args.source_video else root / "deliverables" / "final.mp4"
@@ -2644,6 +2713,11 @@ def main() -> int:
         if args.command == "dialogue-render":
             root = args.project.resolve()
             project = require_valid_project(root)
+            subtitle_source = resolve_subtitle_source(project, args.subtitle_source)
+            if args.burn_subtitles and subtitle_source != "project":
+                raise SkillError(
+                    f"subtitle source {subtitle_source!r} has no local SRT to burn; use --subtitle-source project for a deterministic subtitle copy"
+                )
             source = args.source_video.resolve() if args.source_video else root / "deliverables" / "final.mp4"
             output = args.output_video.resolve() if args.output_video else root / "deliverables" / "final-dialogue.mp4"
             if source == output:
@@ -2657,7 +2731,9 @@ def main() -> int:
                 musetalk_url=args.musetalk_url,
                 force=args.force,
             )
-            subtitles_result = export_subtitles(root, project, root / "deliverables" / "dialogue.srt")
+            subtitles_result: dict[str, Any] = {"source": subtitle_source, "preserved": subtitle_source == "upstream"}
+            if subtitle_source == "project":
+                subtitles_result.update(export_subtitles(root, project, root / "deliverables" / "dialogue.srt"))
             burned: dict[str, Any] = {}
             if args.burn_subtitles:
                 delivery = Path(str((result.get("lipsync") or {}).get("path") or output))

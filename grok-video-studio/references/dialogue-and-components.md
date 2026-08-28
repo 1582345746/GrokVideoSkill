@@ -24,6 +24,8 @@ The command synthesizes one WAV per line, resumes unchanged lines from `dialogue
 
 Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SRT, then choose `--style clean`, `cinematic`, or `news` when burning. For `native-dialogue`, first inspect the source for provider-baked captions; the CLI requires `--confirm-source-clean` before it will burn another subtitle layer. If the result is not approved, re-burn another style or deliver the clean master; no paid video regeneration is needed.
 
+`audio.subtitle_source` controls local subtitle artifacts: `upstream` keeps provider/source pixels and creates no local SRT, `project` uses the approved dialogue/cue contract, and `none` suppresses subtitle delivery. Use `subtitles --source project` to deliberately override an upstream default after visual review. This choice does not change the audio track or lip-sync route.
+
 ## Project fields
 
 ```json
@@ -33,7 +35,8 @@ Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SR
     "language": "zh-CN",
     "generate_audio": false,
     "preserve_source_audio": true,
-    "duck_source_audio": true
+    "duck_source_audio": true,
+    "subtitle_source": "project"
   },
   "characters": [{
     "id": "lead",
@@ -71,7 +74,17 @@ A zero-shot voice reference is allowed only when `consent` is `synthetic`, `owne
 
 ## Component profiles
 
-Run `components-plan --profile <profile>` before changing the machine.
+Run `install-plan --profile <basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync>` before changing the machine. It is side-effect free and is the user-facing capability plan. Run `components-plan --profile <profile>` for lower-level source checkout and model details.
+
+The user-facing profiles map to component profiles as follows:
+
+| Install profile | Local service | Subtitle default | Alias |
+| --- | --- | --- | --- |
+| `basic` | none | `upstream` | `core` |
+| `upstream-dialogue` | none | `upstream` | `native-dialogue` |
+| `precise-subtitles` | none | `project` | none |
+| `precise-voice` | CosyVoice | `project` | `local-voice` |
+| `lip-sync` | CosyVoice + MuseTalk | `project` | `full-dialogue` |
 
 - `core`: no local AI service.
 - `native-dialogue`: no local AI service; uses the configured video provider.

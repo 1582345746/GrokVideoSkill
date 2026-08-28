@@ -1,6 +1,6 @@
 # Grok Video Studio
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.6.2`，提供四个视频入口和五种音频模式：
+面向 Codex 的可恢复 AI 视频制作技能。当前版本 `v1.7.0`，提供四个视频入口、五种音频模式和五个可选安装档位：
 
 - 文生视频：QuickAI 文生视频，支持单镜头和多镜头项目。
 - 图生视频：QuickAI 生图生成角色母版/镜头关键帧，再由 QuickAI New 动画；用户现成图片也走同一路线。
@@ -8,6 +8,8 @@
 - 新闻视频：Codex 先检索当前网络信息，记录来源、事实主张和逐镜头引用关系，通过事实门禁后才能生成。
 
 技能同时支持上游原生人物对白、本地 CosyVoice 精确配音、可选 MuseTalk 口型同步、SRT 字幕、FFmpeg 混音/字幕烧录、断点恢复、请求预算、干净画面约束和音视频 QA。
+
+安装档位：`basic`（基础）、`upstream-dialogue`（上游原声对白）、`precise-subtitles`（精确字幕）、`precise-voice`（精确对白）、`lip-sync`（精确对白 + 口型同步）。旧组件名 `core`、`native-dialogue`、`local-voice`、`full-dialogue` 继续兼容。
 
 ## 安装
 
@@ -22,7 +24,7 @@ QuickAI New 图生视频 Key：<QUICKAINEW_VIDEO_KEY>
 
 请通过标准输入配置凭据，在 Windows 上使用 DPAPI 保存，不要把 Key 写入源码、项目文件或命令行。安装后运行 version 和 doctor；不要发起付费生成测试，除非我明确授权。
 
-安装前先问我选择哪个组件档位：core（默认，不装本地AI）、native-dialogue（上游原生声音，不装本地AI）、local-voice（安装 CosyVoice）、full-dialogue（安装 CosyVoice + MuseTalk）。没有我的明确同意，不要下载模型、构建 Docker 镜像或启动服务。
+安装前先运行 `install-plan --profile <档位>` 展示依赖和磁盘计划。默认不装本地 AI；`precise-voice`/`lip-sync` 只有在我明确同意后才下载模型、构建 Docker 镜像或启动服务。
 ```
 
 也可以只安装仓库内容：
@@ -32,6 +34,14 @@ git clone https://github.com/1582345746/GrokVideoSkill.git
 cd GrokVideoSkill
 .\install.ps1 -Force
 ```
+
+需要独立向导时运行：
+
+```powershell
+.\install.ps1 -Force -Interactive
+```
+
+向导会询问档位、密钥和本地服务下载授权。自动化安装使用 `-InstallProfile`；涉及本地服务时必须额外传 `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`。
 
 配置完成后，凭据按职责分开使用：
 
@@ -44,6 +54,8 @@ cd GrokVideoSkill
 旧版 QuickAI/QuickAI New 配置仍可兼容迁移。Windows 凭据保存在当前用户本地应用数据目录的 DPAPI 加密文件中，不进入技能目录。
 
 本地服务是可选组件。`core` 和 `native-dialogue` 不增加安装负担；`local-voice`/`full-dialogue` 需要 Docker Desktop、NVIDIA GPU 支持和较大的模型下载。Codex 会先运行 `components-plan` 展示来源、固定提交、目录和服务端口，获得同意后才运行安装。服务只发布到本机 `127.0.0.1`，不用时可停止，项目和模型不会被删除。
+
+字幕来源和音频路线独立选择：`audio.subtitle_source=upstream` 保留上游/原片字幕，`project` 生成可审校的确定性 SRT，`none` 不输出字幕。`subtitles --source project` 可在审阅后从上游默认切换到本地字幕；失败时始终保留干净母版，不需要重新付费生成。
 
 ## 使用话术
 

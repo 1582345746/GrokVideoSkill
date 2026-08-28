@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.6.2`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.7.0`.
 
 ## Setup
 
@@ -15,8 +15,23 @@ Create the creative plan with Codex. Use the bundled scripts for credentials, pa
 4. Run `python scripts/grok_video_studio.py doctor` and resolve the configured credential roles and FFmpeg checks before paid generation. A missing unused role is allowed. Skip `doctor` when the user asks to avoid all real upstream tests.
 5. Confirm the requested video mode before creating a project. Defaults are text-to-video -> QuickAI JSON and image-to-video -> QuickAI New multipart. A project-level `video_provider` may explicitly override this route when the corresponding key is configured. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
 6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
-7. Ask whether the user needs character speech and lip sync. Keep the default `core` profile for silent/source-audio work. `native-dialogue` adds no local dependency. `local-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `full-dialogue` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
-8. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
+7. Before choosing optional services, run `python scripts/grok_video_studio.py install-plan --profile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`. This check has no machine side effects and reports missing FFmpeg, Docker, or NVIDIA prerequisites, key roles, model disk estimate, and consent requirements. The old names `core`, `native-dialogue`, `local-voice`, and `full-dialogue` are accepted as aliases.
+8. Ask whether the user needs character speech and lip sync. Keep the default `basic` profile for silent/source-audio work. `upstream-dialogue` adds no local dependency. `precise-subtitles` uses only local FFmpeg. `precise-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `lip-sync` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
+9. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
+
+## Distribution Modes
+
+Codex-managed installation is the default: copy the Skill, run `install-plan`, send provider keys once through `configure --credentials-stdin`, and run `doctor`. For optional local services, Codex must show the component plan and request approval before any Git checkout, Docker build, model download, or service start.
+
+The repository also contains a transparent standalone PowerShell installer:
+
+```powershell
+.\install.ps1 -Force -Interactive
+```
+
+The wizard asks for a capability profile, prompts for keys through the CLI's hidden input, and asks separately before downloading optional services and models. For automation, use `-InstallProfile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`; local downloads additionally require `-InstallComponents -IncludeComponentModels -AcceptComponentDownloads`. `-ConfigureFromStdin` remains the non-echoed JSON path for managed Codex installs.
+
+The selected profile is saved as non-secret metadata in the per-user config directory and is exposed by `capabilities`; project files still need an explicit `audio.mode` and `audio.subtitle_source` so one installation can produce both clean and dialogue deliveries.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
 
@@ -33,13 +48,15 @@ First choose one product route:
 - Episodic series: use `series-init` only for ordered episodes that share canon or continuity. Every episode remains a standard T2V or I2V project internally.
 - Sourced news video: use `news-init`. Codex performs current web research, records sources and claim mappings, and then reuses the standard T2V or I2V pipeline.
 
-Then choose one audio mode:
+Then choose one audio mode and subtitle source:
 
 - `preserve`: keep provider/source audio. This does not ask the model to create spoken dialogue.
 - `mute`: intentional silent delivery.
 - `native-dialogue`: send exact dialogue and `generate_audio=true` to the video provider. This is fastest and requires no local model, but speech wording, voice, baked captions, and lip sync remain generative and require human review.
 - `local-voice`: generate each approved line with CosyVoice, fit it to the declared timeline, preserve/duck source audio, normalize loudness, export deterministic SRT, and keep a resumable `dialogue-state.json`.
 - `local-lipsync`: perform `local-voice`, then send the mixed video and dialogue track to the localhost MuseTalk wrapper. Use this only when mouth synchronization is required.
+
+`audio.subtitle_source` is independent from the audio mode. `upstream` preserves any captions rendered by the provider or supplied source and creates no local SRT; `project` derives deterministic subtitles from dialogue, timed cues, narration, or news segments; `none` intentionally delivers no subtitle sidecar or burn. The CLI accepts `--source auto|upstream|project|none` on `subtitles` and the same choice on `dialogue-render`.
 
 For exact wording or a clean subtitle-free master, recommend `local-voice` or `local-lipsync`; native generation may ignore clean-frame instructions and burn dialogue text into pixels. Read [references/dialogue-and-components.md](references/dialogue-and-components.md) before editing voices or installing local services.
 

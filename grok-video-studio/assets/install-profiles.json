@@ -1,0 +1,66 @@
+{
+  "version": 1,
+  "profiles": {
+    "basic": {
+      "title": "Basic modules",
+      "description": "Core project planning, QuickAI generation, clean-frame rules, resume, assembly, and technical QA.",
+      "component_profile": "core",
+      "audio_mode": "preserve",
+      "subtitle_source": "upstream",
+      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "dependencies": ["ffmpeg"],
+      "model_download_gb": 0,
+      "gpu_required": false
+    },
+    "upstream-dialogue": {
+      "title": "Upstream dialogue",
+      "description": "Provider-generated speech and mouth motion, with no local AI service installation.",
+      "component_profile": "native-dialogue",
+      "audio_mode": "native-dialogue",
+      "subtitle_source": "upstream",
+      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "dependencies": ["ffmpeg"],
+      "model_download_gb": 0,
+      "gpu_required": false
+    },
+    "precise-subtitles": {
+      "title": "Precise subtitles",
+      "description": "Deterministic SRT export and local FFmpeg subtitle burn while retaining a clean master.",
+      "component_profile": "core",
+      "audio_mode": "preserve",
+      "subtitle_source": "project",
+      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "dependencies": ["ffmpeg"],
+      "model_download_gb": 0,
+      "gpu_required": false
+    },
+    "precise-voice": {
+      "title": "Precise dialogue",
+      "description": "Local CosyVoice synthesis, deterministic timing, mixing, and subtitles.",
+      "component_profile": "local-voice",
+      "audio_mode": "local-voice",
+      "subtitle_source": "project",
+      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
+      "model_download_gb": 1.5,
+      "gpu_required": true
+    },
+    "lip-sync": {
+      "title": "Precise dialogue and lip sync",
+      "description": "Local CosyVoice dialogue plus MuseTalk mouth synchronization, staged for limited VRAM.",
+      "component_profile": "full-dialogue",
+      "audio_mode": "local-lipsync",
+      "subtitle_source": "project",
+      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
+      "model_download_gb": 7.0,
+      "gpu_required": true
+    }
+  },
+  "aliases": {
+    "core": "basic",
+    "native-dialogue": "upstream-dialogue",
+    "local-voice": "precise-voice",
+    "full-dialogue": "lip-sync"
+  }
+}

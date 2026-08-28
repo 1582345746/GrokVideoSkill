@@ -1117,6 +1117,45 @@ class SkillIntegrationTests(unittest.TestCase):
         blocked = self.run_cli("components-install", "--profile", "local-voice", expected=1)
         self.assertIn("--accept-downloads", blocked["error"])
 
+    def test_install_profiles_are_side_effect_free_and_alias_compatible(self) -> None:
+        basic = self.run_cli("install-plan", "--profile", "basic")
+        self.assertEqual(basic["profile"], "basic")
+        self.assertFalse(basic["requires_component_downloads"])
+        self.assertEqual(basic["subtitle_source"], "upstream")
+        lip_sync = self.run_cli("install-plan", "--profile", "lip-sync")
+        self.assertEqual(lip_sync["component_profile"], "full-dialogue")
+        self.assertTrue(lip_sync["consent_required"])
+        alias = self.run_cli("install-plan", "--profile", "full-dialogue")
+        self.assertEqual(alias["profile"], "lip-sync")
+        self.assertEqual(alias["component_profile"], "full-dialogue")
+
+    def test_init_persists_audio_and_subtitle_contract(self) -> None:
+        project = self.root / "audio-contract"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Audio contract",
+            "--topic",
+            "Dialogue",
+            "--workflow",
+            "text-to-video",
+            "--mode",
+            "text-to-video",
+            "--audio-mode",
+            "native-dialogue",
+            "--subtitle-source",
+            "upstream",
+            "--shots",
+            "1",
+            "--seconds",
+            "1",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(value["audio"]["mode"], "native-dialogue")
+        self.assertTrue(value["audio"]["generate_audio"])
+        self.assertEqual(value["audio"]["subtitle_source"], "upstream")
+
     def test_full_dialogue_start_requires_an_explicit_gpu_stage(self) -> None:
         configured = self.run_cli(
             "components-configure",
@@ -1139,8 +1178,30 @@ class SkillIntegrationTests(unittest.TestCase):
 
     def test_installer_requires_explicit_stage_for_full_dialogue_start(self) -> None:
         source = (REPO_ROOT / "install.ps1").read_text(encoding="utf-8")
+        self.assertIn("InstallProfile", source)
+        self.assertIn("Interactive", source)
+        self.assertIn("install-plan", source)
         self.assertIn('[ValidateSet("cosyvoice", "musetalk", "all")]', source)
         self.assertIn("-StartComponents with full-dialogue requires -StartComponent", source)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_subtitle_source_can_preserve_upstream_or_disable_delivery(self) -> None:
+        project = self.create_project("subtitle-sources", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["subtitle"] = "A deterministic subtitle"
+        value["shots"][0]["seconds"] = 1
+        value["audio"]["subtitle_source"] = "upstream"
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        upstream = self.run_cli("subtitles", str(project))
+        self.assertEqual(upstream["subtitles"]["source"], "upstream")
+        self.assertFalse((project / "deliverables" / "subtitles.srt").exists())
+        value["audio"]["subtitle_source"] = "none"
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        none = self.run_cli("subtitles", str(project))
+        self.assertEqual(none["subtitles"]["source"], "none")
+        self.assertFalse(none["subtitles"]["preserved"])
+        blocked = self.run_cli("subtitles", str(project), "--burn", expected=1)
+        self.assertIn("has no local SRT", blocked["error"])
 
     def test_component_docker_output_is_decoded_as_utf8_with_replacement(self) -> None:
         completed = subprocess.CompletedProcess(["docker", "version"], 0, stdout="ok", stderr="")

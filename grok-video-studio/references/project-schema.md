@@ -125,6 +125,8 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 `audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
 
+`audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. Older projects without this field use `project` for backwards compatibility. This setting is independent from `audio.mode`.
+
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
 
 ## Narration and subtitles
