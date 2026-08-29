@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.0.0` (`upstream-first`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.0.1` (`upstream-first`).
 
 For v1 projects, read `docs/v2.0-upstream-first-migration.zh-CN.md` before changing audio, subtitle, prompt, retry, or series fields.
 
@@ -140,7 +140,7 @@ For episodic I2V, define multiple characters under `series.json.characters` and 
 - Generate or register the one-sheet master with `generate-character`.
 - Generate only keyframes with `generate-images`.
 - Submit and poll only video shots with `generate-videos`.
-- Resume existing task IDs with `resume`. A resumed task must not create a second paid task.
+- Resume existing task IDs with `resume`. A normal resume must not create a second paid task. If repeated polling has timed out and the user explicitly authorizes replacement, use `resume <project> --shot <id> --replace-lost-task --retry-failed --retry-reason "..."`; this first checks the known task's status and content endpoints. It recovers existing content when available and creates a replacement only when both checks confirm `404`, while preserving the old task ID in history.
 - Add repeatable `--shot <shot-id>` to process selected shots. Partial `run` operations do not auto-assemble.
 - Review one completed asset with `review-shot <project> <shot-id> --kind image|video --decision approve|reject --notes "..."`. Approved images are hash-locked in state. Rejected assets are preserved, and replacement generation requires `--retry-failed --retry-reason "..."` so the additional paid request is explicit.
 - Add `--progress` to generation or resume commands to receive JSONL progress events on stderr while the final JSON result remains on stdout.

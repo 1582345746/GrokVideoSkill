@@ -2,7 +2,7 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.0.0 upstream-first`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.0.1 upstream-first`，发布分支为 `main`。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
 
@@ -183,6 +183,7 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 - [模块使用话术](docs/module-usage-prompts.zh-CN.md)
 - [二次开发与自定义工作流](docs/custom-workflow-development.zh-CN.md)
 - [v2.0 upstream-first 迁移说明](docs/v2.0-upstream-first-migration.zh-CN.md)
+- [v2.0.1 付费生成验收记录](docs/paid-acceptance-2026-08-30.md)
 - [v1.8.0 开发交接文档](HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md)
 - [多角色音频模块开发交接清单](docs/voice-module-development-handoff.zh-CN.md)
 - [多角色音频开发清单与当前状态](docs/multi-tts-implementation-status.zh-CN.md)

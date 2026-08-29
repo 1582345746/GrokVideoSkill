@@ -29,6 +29,7 @@ from gvs_common import (
     configure_utf8_stdio,
     config_path,
     load_settings,
+    locked_project_state,
     normalize_base_url,
     print_json,
     read_json,
@@ -108,7 +109,7 @@ from voice_workflow import (
 from voice_setup import voicebox_setup_plan
 
 
-SKILL_VERSION = "2.0.0"
+SKILL_VERSION = "2.0.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -1390,6 +1391,7 @@ def resolved_character_master(root: Path, project: dict[str, Any], state: dict[s
     raise SkillError("generated character master is missing; run generate-character first")
 
 
+@locked_project_state
 def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: str = "", progress: bool = False) -> dict[str, Any]:
     reason = require_retry_reason(retry_failed, retry_reason)
     project = require_valid_project(root)
@@ -1490,6 +1492,7 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         raise
 
 
+@locked_project_state
 def generate_images(
     root: Path,
     *,
@@ -1630,6 +1633,17 @@ def update_provider_attempt(video: dict[str, Any], *, attempt_id: str, **values:
     del attempts[:-20]
 
 
+def recoverable_known_task_lookup(video: dict[str, Any]) -> bool:
+    category = str(video.get("error_category", "")).strip()
+    message = str(video.get("error", "")).lower()
+    if category == "task_lookup_transient":
+        return True
+    # v2.0.0 originally classified a known-task lookup 404 as an unsupported
+    # capability. Preserve those task IDs and migrate them on the next resume.
+    return category == "capability_unsupported" and "http 404" in message and "not found" in message
+
+
+@locked_project_state
 def generate_videos(
     root: Path,
     *,
@@ -1638,8 +1652,13 @@ def generate_videos(
     progress: bool = False,
     poll_timeout: int,
     shot_ids: list[str] | None = None,
+    replace_lost_task: bool = False,
 ) -> dict[str, Any]:
     reason = require_retry_reason(retry_failed, retry_reason)
+    if replace_lost_task and not retry_failed:
+        raise SkillError("--replace-lost-task requires --retry-failed and --retry-reason because it may create a replacement paid task")
+    if replace_lost_task and not shot_ids:
+        raise SkillError("--replace-lost-task requires --shot so unrelated pending shots cannot be submitted")
     project = require_valid_project(root)
     state = load_state(root)
     _, _, settings = clients()
@@ -1680,6 +1699,8 @@ def generate_videos(
         request_id = str(video.get("request_id", "")).strip() or uuid.uuid4().hex
         video["request_id"] = request_id
         task_id = str(video.get("task_id", "")).strip()
+        if replace_lost_task and not task_id:
+            raise SkillError(f"{shot_id} has no known task ID to verify or replace")
         active_provider = stored_provider or candidates[0]
         if active_provider not in candidates:
             candidates_for_shot = [active_provider]
@@ -1694,6 +1715,115 @@ def generate_videos(
         ):
             raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
         automatic_failover = False
+        if replace_lost_task and task_id:
+            if str(video.get("status", "")) not in {"poll_timeout", "failed"} or str(video.get("error_category", "")) not in {
+                "task_timeout",
+                "task_lookup_transient",
+            }:
+                raise SkillError(
+                    f"{shot_id} is not an unresolved lost-task candidate; use ordinary resume or the confirmed terminal-failure retry path"
+                )
+            verification_client = select_video_client(settings, active_provider)
+            try:
+                status, _ = verification_client.query(task_id)
+            except APIError as error:
+                if error.status != 404:
+                    raise SkillError(f"lost-task verification was inconclusive for {shot_id}: {sanitized_provider_error(error, settings)}") from error
+            else:
+                raise SkillError(f"{shot_id} task {task_id} is still queryable with status {status}; resume it instead of replacing it")
+
+            recovery_output = root / "clips" / f"{shot_id}.mp4"
+            try:
+                verification_client.download(task_id, {}, recovery_output)
+            except SkillError as error:
+                if "HTTP 404" not in str(error):
+                    raise SkillError(f"lost-task content verification was inconclusive for {shot_id}: {error}") from error
+            else:
+                try:
+                    qa = quality_report(recovery_output, expected_size=size, expected_duration=seconds)
+                except SkillError as error:
+                    qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
+                video.update(
+                    {
+                        "status": "completed",
+                        "path": recovery_output.relative_to(root).as_posix(),
+                        "bytes": recovery_output.stat().st_size,
+                        "sha256": file_digest(recovery_output),
+                        "media": qa.get("media", {}),
+                        "progress": 100.0,
+                        "qa": portable_qa(qa),
+                        "final_provider": active_provider,
+                        "error": "",
+                        "error_category": "",
+                    }
+                )
+                update_provider_attempt(
+                    video,
+                    attempt_id=str(video.get("attempt_id", "")).strip() or uuid.uuid4().hex,
+                    status="completed",
+                    finished_at=int(time.time()),
+                    bytes=recovery_output.stat().st_size,
+                )
+                save_state(root, state)
+                write_event(
+                    root,
+                    {
+                        "kind": "video_content_recovered",
+                        "shot_id": shot_id,
+                        "request_id": request_id,
+                        "provider": active_provider,
+                        "task_id": task_id,
+                        "bytes": recovery_output.stat().st_size,
+                    },
+                )
+                completed.append(shot_id)
+                final_providers[shot_id] = active_provider
+                continue
+
+            previous_task_id = task_id
+            archive_runtime_attempt(video, f"confirmed lost upstream task: {reason}")
+            video.update(
+                {
+                    "status": "failed",
+                    "previous_task_id": previous_task_id,
+                    "task_id": "",
+                    "error": "provider status and content endpoints both returned HTTP 404",
+                    "error_category": "provider_task_failed",
+                }
+            )
+            task_id = ""
+            save_state(root, state)
+            write_event(
+                root,
+                {
+                    "kind": "video_lost_task_replacement_authorized",
+                    "shot_id": shot_id,
+                    "request_id": request_id,
+                    "provider": active_provider,
+                    "previous_task_id": previous_task_id,
+                    "reason": reason,
+                },
+            )
+        if task_id and video.get("status") == "failed" and recoverable_known_task_lookup(video):
+            video.update({"status": "queued", "error": "", "error_category": "task_lookup_transient"})
+            update_provider_attempt(
+                video,
+                attempt_id=str(video.get("attempt_id", "")).strip() or uuid.uuid4().hex,
+                status="queued",
+                resumed_at=int(time.time()),
+            )
+            save_state(root, state)
+            write_event(
+                root,
+                {
+                    "kind": "video_known_task_resumed",
+                    "shot_id": shot_id,
+                    "request_id": request_id,
+                    "provider": active_provider,
+                    "task_id": task_id,
+                    "reason": "recoverable task lookup failure",
+                },
+            )
         if task_id and video.get("status") == "failed":
             next_provider = str(video.get("failover_next_provider", "")).strip()
             if next_provider and next_provider in candidates_for_shot:
@@ -2032,6 +2162,7 @@ def assemble_clips(clips: list[Path], output: Path, *, target_size: str, audio_p
     return {"path": str(output), "bytes": output.stat().st_size, "sha256": file_digest(output), **media, "clip_count": len(clips), "audio_policy": audio_policy}
 
 
+@locked_project_state
 def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
     project = require_valid_project(root)
     state = load_state(root)
@@ -2056,6 +2187,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
     return output, media
 
 
+@locked_project_state
 def qa_project(root: Path) -> dict[str, Any]:
     project = require_valid_project(root)
     dialogue = dialogue_preflight(project)
@@ -2546,6 +2678,7 @@ def status_summary(root: Path) -> dict[str, Any]:
     }
 
 
+@locked_project_state
 def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, notes: str) -> dict[str, Any]:
     project = require_valid_project(root)
     known = {str(shot.get("id", "")) for shot in project.get("shots", []) if isinstance(shot, dict)}
@@ -2926,6 +3059,11 @@ def build_parser() -> argparse.ArgumentParser:
         videos.add_argument("--progress", action="store_true", help="Write JSONL progress events to stderr.")
         videos.add_argument("--poll-timeout", type=int, default=1800)
         videos.add_argument("--shot", action="append", help="Process only this shot id; repeat for multiple shots.")
+        videos.add_argument(
+            "--replace-lost-task",
+            action="store_true",
+            help="Verify a timed-out known task through status and content endpoints before authorizing one replacement create.",
+        )
 
     run = commands.add_parser("run")
     run.add_argument("project", type=Path)
@@ -3805,6 +3943,7 @@ def main() -> int:
                         progress=args.progress,
                         poll_timeout=args.poll_timeout,
                         shot_ids=args.shot,
+                        replace_lost_task=args.replace_lost_task,
                     ),
                 }
             )

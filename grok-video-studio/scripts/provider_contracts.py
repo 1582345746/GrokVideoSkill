@@ -11,6 +11,7 @@ from gvs_common import APIError, SkillError
 COMPLETED_STATES = {"completed", "complete", "succeeded", "success", "done", "finished"}
 FAILED_STATES = {"failed", "failure", "error", "cancelled", "canceled", "expired", "rejected"}
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+TASK_POLL_RETRYABLE_HTTP = RETRYABLE_HTTP | {404}
 REPAIRABLE_INPUT_CATEGORIES = {"prompt_too_long", "size_conflict", "aspect_ratio_error", "duration_error", "reference_error"}
 WRAPPER_KEYS = ("data", "result", "output", "response", "task", "video")
 TASK_ID_KEYS = ("id", "task_id", "taskId", "request_id", "requestId", "job_id", "jobId")
@@ -88,6 +89,8 @@ def classify_provider_error(error: Exception, *, phase: str, task_known: bool) -
             return "authentication_or_account"
         if error.status in {400, 409, 422}:
             return _classify_input_message(message)
+        if error.status == 404 and phase == "task" and task_known:
+            return "task_lookup_transient"
         if error.status in {404, 405, 501}:
             return "capability_unsupported"
         if error.status == 429:
@@ -133,7 +136,9 @@ def allows_automatic_failover(error: Exception, *, phase: str, task_known: bool)
         # These responses prove that the provider rejected the write before creating a task.
         return category in {"capability_unsupported", "rate_limited"}
     if phase == "task":
-        return category in {"capability_unsupported", "provider_unavailable", "provider_task_failed"}
+        # Once a task ID exists, read-path failures must be resumed against that
+        # task. Only a confirmed provider terminal state can start failover.
+        return category == "provider_task_failed"
     return False
 
 

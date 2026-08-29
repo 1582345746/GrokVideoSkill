@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import struct
 import wave
@@ -48,7 +49,8 @@ from component_manager import (  # noqa: E402
     component_status,
     load_model_state,
 )
-from grok_video_studio import composed_video_prompt, prompt_bytes, prompt_variants  # noqa: E402
+import grok_video_studio as gvs  # noqa: E402
+from grok_video_studio import composed_video_prompt, prompt_bytes, prompt_variants, review_shot_asset  # noqa: E402
 from media_client import image_reference_report  # noqa: E402
 from media_tools import probe_media as probe_media_tool  # noqa: E402
 from provider_contracts import (  # noqa: E402
@@ -122,12 +124,15 @@ class ProviderContractTests(unittest.TestCase):
         unsupported = APIError(404, "unsupported endpoint")
         ambiguous = APIError(502, "gateway timed out")
         invalid = APIError(422, "invalid prompt")
+        known_lookup = APIError(404, "Video request not found")
         self.assertEqual(classify_provider_error(unsupported, phase="create", task_known=False), "capability_unsupported")
         self.assertTrue(allows_automatic_failover(unsupported, phase="create", task_known=False))
         self.assertEqual(classify_provider_error(ambiguous, phase="create", task_known=False), "submission_unknown")
         self.assertFalse(allows_automatic_failover(ambiguous, phase="create", task_known=False))
         self.assertEqual(classify_provider_error(invalid, phase="create", task_known=False), "invalid_input")
         self.assertFalse(allows_automatic_failover(invalid, phase="create", task_known=False))
+        self.assertEqual(classify_provider_error(known_lookup, phase="task", task_known=True), "task_lookup_transient")
+        self.assertFalse(allows_automatic_failover(known_lookup, phase="task", task_known=True))
 
     def test_input_error_categories_are_specific(self) -> None:
         self.assertEqual(classify_provider_error(APIError(400, "prompt too long"), phase="create", task_known=False), "prompt_too_long")
@@ -165,6 +170,8 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     multipart_video_error = "provider capacity is full"
     json_video_create_status = 0
     json_video_create_error = "provider rejected video create"
+    task_lookup_404_remaining = 0
+    task_content_404_remaining = 0
     tts_creates = 0
     voicebox_generations = 0
     voicebox_profiles: list[dict[str, object]] = []
@@ -236,6 +243,10 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             self.send_bytes(FAKE_WAV, "audio/wav")
             return
         if self.path == "/v1/videos/task-1":
+            if type(self).task_lookup_404_remaining > 0:
+                type(self).task_lookup_404_remaining -= 1
+                self.send_json({"error": {"message": "Video request not found"}}, 404)
+                return
             authorization = self.headers.get("Authorization", "")
             is_json_video = bool(type(self).json_video_authorization) and authorization == type(self).json_video_authorization
             status = (
@@ -249,6 +260,10 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             self.send_json(payload)
             return
         if self.path == "/v1/videos/task-1/content":
+            if type(self).task_content_404_remaining > 0:
+                type(self).task_content_404_remaining -= 1
+                self.send_json({"error": {"message": "Video request not found"}}, 404)
+                return
             self.send_bytes(type(self).video_payload, "video/mp4")
             return
         self.send_json({"error": {"message": "not found"}}, 404)
@@ -415,6 +430,8 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.multipart_video_error = "provider capacity is full"
         FakeProviderHandler.json_video_create_status = 0
         FakeProviderHandler.json_video_create_error = "provider rejected video create"
+        FakeProviderHandler.task_lookup_404_remaining = 0
+        FakeProviderHandler.task_content_404_remaining = 0
         FakeProviderHandler.tts_creates = 0
         FakeProviderHandler.voicebox_generations = 0
         FakeProviderHandler.voicebox_profiles = []
@@ -579,6 +596,46 @@ class SkillIntegrationTests(unittest.TestCase):
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         self.assertNotIn("shot-001", state["shots"])
         self.assertEqual(state["shots"]["shot-002"]["image"]["status"], "completed")
+
+    def test_parallel_reviews_preserve_both_state_updates(self) -> None:
+        project = self.root / "parallel-review"
+        self.run_cli("init", str(project), "--title", "Review", "--topic", "Two shots", "--shots", "2", "--seconds", "6")
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "Two keyframes are reviewed independently."
+        for index, shot in enumerate(value["shots"], 1):
+            shot["image_prompt"] = f"Keyframe {index}."
+            shot["video_prompt"] = f"Motion {index}."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        self.run_cli("generate-images", str(project))
+
+        original_save_state = gvs.save_state
+        start = threading.Barrier(3)
+        errors: list[Exception] = []
+
+        def slow_save(root: Path, state: dict[str, object]) -> None:
+            time.sleep(0.1)
+            original_save_state(root, state)
+
+        def approve(shot_id: str) -> None:
+            try:
+                start.wait()
+                review_shot_asset(project, shot_id, kind="image", decision="approve", notes="parallel review")
+            except Exception as error:  # pragma: no cover - asserted below
+                errors.append(error)
+
+        with mock.patch("grok_video_studio.save_state", side_effect=slow_save):
+            threads = [threading.Thread(target=approve, args=(shot_id,)) for shot_id in ("shot-001", "shot-002")]
+            for thread in threads:
+                thread.start()
+            start.wait()
+            for thread in threads:
+                thread.join(timeout=5)
+
+        self.assertEqual(errors, [])
+        self.assertTrue(all(not thread.is_alive() for thread in threads))
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["image"]["review_status"], "approved")
+        self.assertEqual(state["shots"]["shot-002"]["image"]["review_status"], "approved")
 
     def test_validation_rejects_credentials_and_missing_prompts(self) -> None:
         project = self.create_project("invalid")
@@ -1010,6 +1067,113 @@ class SkillIntegrationTests(unittest.TestCase):
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         history = state["shots"]["shot-001"]["video"]["history"]
         self.assertEqual(history[-1]["reason"], "provider dashboard confirmed no usable task")
+
+    def test_known_task_lookup_404_resumes_without_a_second_create(self) -> None:
+        project = self.create_project("known-task-lookup", generate_image=False)
+        FakeProviderHandler.task_lookup_404_remaining = 1
+        generated = self.run_cli("generate-videos", str(project), "--poll-timeout", "6")
+        self.assertTrue(generated["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
+        state_path = project / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        video.update(
+            {
+                "status": "failed",
+                "error_category": "capability_unsupported",
+                "error": "HTTP 404: Video request not found (request_id=trace-only)",
+                "path": "",
+            }
+        )
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        (project / "clips" / "shot-001.mp4").unlink()
+
+        resumed = self.run_cli("resume", str(project), "--poll-timeout", "6")
+        self.assertTrue(resumed["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "completed")
+
+    def test_explicit_lost_task_replacement_requires_two_404_checks(self) -> None:
+        project = self.create_project("lost-task-replacement", generate_image=False)
+        FakeProviderHandler.task_lookup_404_remaining = 20
+        first = self.run_cli("generate-videos", str(project), "--poll-timeout", "1", expected=1)
+        self.assertIn("timed out", first["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
+        blocked = self.run_cli(
+            "resume",
+            str(project),
+            "--shot",
+            "shot-001",
+            "--replace-lost-task",
+            "--retry-reason",
+            "status and content are gone",
+            expected=1,
+        )
+        self.assertIn("requires --retry-failed", blocked["error"])
+
+        FakeProviderHandler.task_lookup_404_remaining = 0
+        still_queryable = self.run_cli(
+            "resume",
+            str(project),
+            "--shot",
+            "shot-001",
+            "--replace-lost-task",
+            "--retry-failed",
+            "--retry-reason",
+            "operator suspects the task is gone",
+            expected=1,
+        )
+        self.assertIn("still queryable", still_queryable["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
+        FakeProviderHandler.task_lookup_404_remaining = 1
+        FakeProviderHandler.task_content_404_remaining = 1
+        replaced = self.run_cli(
+            "resume",
+            str(project),
+            "--shot",
+            "shot-001",
+            "--poll-timeout",
+            "5",
+            "--replace-lost-task",
+            "--retry-failed",
+            "--retry-reason",
+            "status and content endpoints both confirmed 404",
+        )
+        self.assertTrue(replaced["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 2)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "completed")
+        self.assertEqual(video["previous_task_id"], "task-1")
+        self.assertIn("confirmed lost upstream task", video["history"][-1]["reason"])
+
+    def test_lost_task_replacement_recovers_existing_content_without_create(self) -> None:
+        project = self.create_project("lost-task-content-recovery", generate_image=False)
+        FakeProviderHandler.task_lookup_404_remaining = 20
+        self.run_cli("generate-videos", str(project), "--poll-timeout", "1", expected=1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
+        FakeProviderHandler.task_lookup_404_remaining = 1
+        recovered = self.run_cli(
+            "resume",
+            str(project),
+            "--shot",
+            "shot-001",
+            "--replace-lost-task",
+            "--retry-failed",
+            "--retry-reason",
+            "status endpoint is gone after bounded recovery polling",
+        )
+        self.assertTrue(recovered["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "completed")
+        self.assertTrue((project / video["path"]).is_file())
 
     def test_terminal_failed_task_requires_explicit_retry_authorization(self) -> None:
         self.env.update({"GVS_QUICKAINEW_KEY": "", "GVS_QUICKAINEW_VIDEO_KEY": ""})

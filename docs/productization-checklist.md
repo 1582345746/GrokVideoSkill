@@ -2,7 +2,7 @@
 
 This checklist is the release contract for the two supported distribution paths.
 
-Current decision (2026-08-29): v2.0.0 `upstream-first` is the active contract. Codex-managed installation from the repository is the priority distribution route; the standalone installer remains transparent and backward compatible. The unchecked signing, fresh-machine, and public-release gates below are intentionally deferred rather than treated as complete.
+Current decision (2026-08-30): v2.0.1 `upstream-first` is the active contract. Codex-managed installation from the repository is the priority distribution route; the standalone installer remains transparent and backward compatible. The unchecked signing, fresh-machine, and public-release gates below are intentionally deferred rather than treated as complete.
 
 ## Distribution Contracts
 
@@ -60,7 +60,7 @@ Current decision (2026-08-29): v2.0.0 `upstream-first` is the active contract. C
 ## Release Acceptance
 
 - [x] Python unit/integration suite covers the v2 contracts and passes on the Windows development machine; the same suite is configured for Windows and Ubuntu CI.
-- [x] Installed copy reports version `2.0.0` and passes `-Check`.
+- [x] Installed copy reports version `2.0.1` and passes `-Check`.
 - [x] Real QuickAI/QuickAI New T2V and I2V acceptance artifacts are recorded for this v2 release in `docs/paid-acceptance-2026-08-29.md`.
 - [x] No local service is started by the default `upstream-dialogue` installation.
 - [x] Interactive installer end-to-end test with redacted test credentials in an isolated Windows profile.

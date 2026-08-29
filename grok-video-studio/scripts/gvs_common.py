@@ -8,16 +8,20 @@ import os
 import secrets
 import sys
 import tempfile
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from ctypes import wintypes
+from functools import wraps
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/2.0.0"
+USER_AGENT = "GrokVideoStudioSkill/2.0.1"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
@@ -25,6 +29,11 @@ DEFAULT_VIDEO_MODEL = "grok-imagine-video-1.5"
 MAX_JSON_BYTES = 48 * 1024 * 1024
 MAX_MULTIPART_BYTES = 128 * 1024 * 1024
 MAX_MEDIA_BYTES = 512 * 1024 * 1024
+
+_PROJECT_LOCKS: dict[str, threading.RLock] = {}
+_PROJECT_LOCKS_GUARD = threading.Lock()
+_PROJECT_LOCK_STATE = threading.local()
+_T = TypeVar("_T")
 
 
 class SkillError(RuntimeError):
@@ -37,6 +46,71 @@ class APIError(SkillError):
         self.request_id = request_id
         suffix = f" (request_id={request_id})" if request_id else ""
         super().__init__(f"HTTP {status}: {message}{suffix}")
+
+
+def _process_file_lock(handle: Any, *, acquire: bool) -> None:
+    handle.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        mode = msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK
+        msvcrt.locking(handle.fileno(), mode, 1)
+        return
+    import fcntl
+
+    mode = fcntl.LOCK_EX | fcntl.LOCK_NB if acquire else fcntl.LOCK_UN
+    fcntl.flock(handle.fileno(), mode)
+
+
+@contextmanager
+def project_state_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator[None]:
+    """Serialize project state mutations across threads and CLI processes."""
+    key = str(root.resolve()).casefold() if os.name == "nt" else str(root.resolve())
+    with _PROJECT_LOCKS_GUARD:
+        thread_lock = _PROJECT_LOCKS.setdefault(key, threading.RLock())
+    with thread_lock:
+        held = getattr(_PROJECT_LOCK_STATE, "held", {})
+        if key in held:
+            held[key] += 1
+            try:
+                yield
+            finally:
+                held[key] -= 1
+            return
+
+        root.mkdir(parents=True, exist_ok=True)
+        lock_path = root / ".gvs-state.lock"
+        with lock_path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            deadline = time.monotonic() + timeout_seconds
+            while True:
+                try:
+                    _process_file_lock(handle, acquire=True)
+                    break
+                except (BlockingIOError, OSError) as error:
+                    if time.monotonic() >= deadline:
+                        raise SkillError(f"project is busy in another mutating command: {root}") from error
+                    time.sleep(0.05)
+            held[key] = 1
+            _PROJECT_LOCK_STATE.held = held
+            try:
+                yield
+            finally:
+                held.pop(key, None)
+                _process_file_lock(handle, acquire=False)
+
+
+def locked_project_state(function: Callable[..., _T]) -> Callable[..., _T]:
+    @wraps(function)
+    def wrapped(root: Path, *args: Any, **kwargs: Any) -> _T:
+        with project_state_lock(root):
+            return function(root, *args, **kwargs)
+
+    return wrapped
 
 
 def config_dir() -> Path:

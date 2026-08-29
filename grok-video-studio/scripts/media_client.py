@@ -29,6 +29,7 @@ from gvs_common import (
 from provider_contracts import (
     COMPLETED_STATES,
     FAILED_STATES,
+    TASK_POLL_RETRYABLE_HTTP,
     CircuitBreaker,
     ProviderTaskFailedError,
     is_completed,
@@ -421,7 +422,7 @@ class QuickAINewVideoClient:
             try:
                 status, payload = self.query(task_id)
             except APIError as error:
-                if error.status not in {408, 425, 429, 500, 502, 503, 504}:
+                if error.status not in TASK_POLL_RETRYABLE_HTTP:
                     raise
                 status, payload = last_status, {"warning": str(error)}
             except SkillError as error:
@@ -559,7 +560,7 @@ class QuickAIVideoClient:
             try:
                 status, payload = self.query(task_id)
             except APIError as error:
-                if error.status not in {408, 425, 429, 500, 502, 503, 504}:
+                if error.status not in TASK_POLL_RETRYABLE_HTTP:
                     raise
                 status, payload = last_status, {"warning": str(error)}
             except SkillError as error:
