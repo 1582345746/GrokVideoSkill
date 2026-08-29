@@ -5,7 +5,7 @@
 | Purpose | Base URL | Credential | Path |
 | --- | --- | --- | --- |
 | Model discovery and images | `https://quickai.hn.takin.cc` | QuickAI image key | `/v1/models`, `/v1/images/*` |
-| QuickAI JSON videos | `https://quickai.hn.takin.cc` | QuickAI text-to-video key | `/v1/models`, `/v1/videos/generations*` |
+| QuickAI JSON videos | `https://quickai.hn.takin.cc` | QuickAI video key (T2V/I2V) | `/v1/models`, `/v1/videos/generations*` |
 | Model discovery and QuickAI New videos | `https://quickainew.hn.takin.cc` | QuickAI New video key | `/v1/models`, `/v1/videos/*` |
 
 Store the origin only. The client appends `/v1`; a configured trailing `/v1` is normalized away. Never send one provider's key to the other provider.

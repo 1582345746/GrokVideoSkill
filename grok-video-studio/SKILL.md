@@ -40,7 +40,7 @@ The selected profile is saved as non-secret metadata in the per-user config dire
 
 Use `install.ps1 -Check` to verify an existing installation without changing it, `install.ps1 -Repair -Force` to replace a damaged copy, and `install.ps1 -Uninstall` to remove only the Skill directory. Upgrades move the previous Skill directory to a timestamped sibling backup before copying; a failed copy restores the previous directory. When no `-InstallProfile` is supplied, an upgrade or repair preserves the saved profile. Credentials, projects, component checkouts, and model weights are never removed by uninstall.
 
-Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails.
+Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails. Read [references/workflow-catalog.md](references/workflow-catalog.md) before adding or changing a preset.
 
 ## Select A Workflow
 
@@ -93,6 +93,8 @@ Before rendering local dialogue, keep voice selection as its own approval stage:
 7. Run `audit` to review structured character IDs, wardrobe changes, adjacent-shot continuity notes, and the manual review checklist.
 
 Read [references/project-schema.md](references/project-schema.md) before editing `project.json`. Read [references/prompt-contract.md](references/prompt-contract.md) before writing prompts.
+
+The editable preset catalog currently contains `general-video`, `text-to-video`, `single-image-animation`, `character-consistent-story`, `short-drama`, `product-ad`, `dance-performance`, `comedy-action`, `scene-animation`, and `news-video`. These IDs are stable internal templates; they do not add new provider capabilities or product routes.
 
 ## Create An Episodic Series
 

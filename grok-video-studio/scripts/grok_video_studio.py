@@ -2455,7 +2455,7 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
         if not quickai_image_key:
             quickai_image_key = getpass.getpass("QuickAI image key (optional): ").strip()
         if not quickai_video_key:
-            quickai_video_key = getpass.getpass("QuickAI text-to-video key (optional): ").strip()
+            quickai_video_key = getpass.getpass("QuickAI video key for T2V/I2V (optional): ").strip()
         if not quickainew_video_key:
             quickainew_video_key = getpass.getpass("QuickAI New video key (optional): ").strip()
         credential_source = "environment-or-interactive"

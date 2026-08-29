@@ -1,6 +1,6 @@
 # Grok Video Studio 用户安装与使用话术
 
-本文面向第一次接触 Grok Video Studio 的用户。所有代码块都可以直接复制给 Codex，再把尖括号中的占位内容替换成自己的信息。
+本文面向第一次接触 Grok Video Studio 的用户。所有代码块都可以直接复制给 Codex，再把尖括号中的占位内容替换成自己的信息。模块级完整话术（包括所有内部预设和二次开发）见 [模块使用话术](module-usage-prompts.zh-CN.md)；字段和上游合同见 `grok-video-studio/references/`。
 
 仓库：`https://github.com/1582345746/GrokVideoSkill.git`
 稳定分支：`main`
@@ -80,11 +80,11 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 ### 4.1 默认 QuickAI
 
-不写上游名称时，新项目默认优先 QuickAI，只在安全失败时备用 QuickAI New。QuickAI 和 QuickAI New 都支持 T2V/I2V；当前都不支持 MP4 视频参考、视频编辑/延展或 WAV/预设音色参考，预检会明确阻断。
+不写上游名称时，新项目默认优先使用 QuickAI，并在安全分类失败时自动尝试 QuickAI New。需要完全禁止备用时显式选择 QuickAI；需要固定 QuickAI New 时显式选择 QuickAI New。QuickAI 和 QuickAI New 都支持 T2V/I2V；当前都不支持 MP4 视频参考、视频编辑/延展或 WAV/预设音色参考，预检会明确阻断。
 
 ```text
 使用 $grok-video-studio 制作 <视频主题>。
-默认选择生视频上游：优先 QuickAI，仅在安全分类失败时备用 QuickAI New。
+默认选择生视频上游：优先 QuickAI，在安全分类失败时使用 QuickAI New。只有我明确固定 QuickAI 或固定 QuickAI New 时，才关闭自动回退。
 
 先确认产品路线、画面比例、总时长、镜头数、是否使用参考图、音频模式和字幕来源。然后展示故事、分镜、最终提示词、图片/视频请求数、总视频秒数和预算，不要立即创建付费任务。
 
@@ -118,7 +118,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 不要生成关键帧，不要把旧图片自动带入视频请求。先给我故事、人物设定、风格约束、逐镜头动作、镜头运动、每镜头时长、最终提示词、视频请求数和预算。
 
-默认优先 QuickAI，只有安全失败才备用 QuickAI New。画面禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸。我批准后再生成，完成后逐镜头运行 QA 和人工抽帧检查。
+默认优先 QuickAI，只有安全分类失败才备用 QuickAI New。画面禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸。我批准后再生成，完成后逐镜头运行 QA 和人工抽帧检查。
 ```
 
 ### 5.2 用户现成图片直接动画
