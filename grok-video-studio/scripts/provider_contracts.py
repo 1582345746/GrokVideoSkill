@@ -11,6 +11,7 @@ from gvs_common import APIError, SkillError
 COMPLETED_STATES = {"completed", "complete", "succeeded", "success", "done", "finished"}
 FAILED_STATES = {"failed", "failure", "error", "cancelled", "canceled", "expired", "rejected"}
 RETRYABLE_HTTP = {408, 425, 429, 500, 502, 503, 504}
+REPAIRABLE_INPUT_CATEGORIES = {"prompt_too_long", "size_conflict", "aspect_ratio_error", "duration_error", "reference_error"}
 WRAPPER_KEYS = ("data", "result", "output", "response", "task", "video")
 TASK_ID_KEYS = ("id", "task_id", "taskId", "request_id", "requestId", "job_id", "jobId")
 STATUS_KEYS = ("status", "state", "task_status", "taskStatus")
@@ -25,6 +26,12 @@ class ProviderCapabilities:
     text_to_image: bool
     text_to_video: bool
     image_to_video: bool
+    video_reference: bool
+    video_edit: bool
+    video_extend: bool
+    audio_generation: str
+    preset_voice_reference: bool
+    audio_file_reference: bool
     priority: int
     credential_role: str
 
@@ -36,6 +43,12 @@ PROVIDER_CAPABILITIES = {
         text_to_image=True,
         text_to_video=True,
         image_to_video=True,
+        video_reference=False,
+        video_edit=False,
+        video_extend=False,
+        audio_generation="model_default",
+        preset_voice_reference=False,
+        audio_file_reference=False,
         priority=1,
         credential_role="quickai_video_key",
     ),
@@ -45,6 +58,12 @@ PROVIDER_CAPABILITIES = {
         text_to_image=False,
         text_to_video=True,
         image_to_video=True,
+        video_reference=False,
+        video_edit=False,
+        video_extend=False,
+        audio_generation="explicit_generate_audio",
+        preset_voice_reference=False,
+        audio_file_reference=False,
         priority=2,
         credential_role="quickainew_video_key",
     ),
@@ -68,7 +87,7 @@ def classify_provider_error(error: Exception, *, phase: str, task_known: bool) -
         if error.status in {401, 403}:
             return "authentication_or_account"
         if error.status in {400, 409, 422}:
-            return "invalid_input"
+            return _classify_input_message(message)
         if error.status in {404, 405, 501}:
             return "capability_unsupported"
         if error.status == 429:
@@ -84,12 +103,28 @@ def classify_provider_error(error: Exception, *, phase: str, task_known: bool) -
     if any(value in message for value in ("not supported", "unsupported capability", "unsupported endpoint", "unknown provider for model")):
         return "capability_unsupported"
     if any(value in message for value in ("invalid prompt", "invalid image", "invalid resolution", "validation error")):
-        return "invalid_input"
+        return _classify_input_message(message)
     if "cannot connect to provider" in message or "provider circuit is open" in message:
         return "submission_unknown" if phase == "create" else "provider_unavailable"
     if isinstance(error, ProviderTaskFailedError):
         return "provider_task_failed"
     return "unknown_provider_error"
+
+
+def _classify_input_message(message: str) -> str:
+    if any(value in message for value in ("prompt too long", "prompt is too long", "prompt length", "maximum prompt", "context length", "too many tokens")):
+        return "prompt_too_long"
+    if any(value in message for value in ("size conflict", "invalid size", "size and", "dimensions conflict", "resolution conflict")):
+        return "size_conflict"
+    if any(value in message for value in ("aspect ratio", "aspect_ratio", "ratio is not", "unsupported ratio")):
+        return "aspect_ratio_error"
+    if any(value in message for value in ("duration", "seconds", "length must")):
+        return "duration_error"
+    if any(value in message for value in ("reference", "image", "input_reference", "unsupported media")):
+        return "reference_error"
+    if any(value in message for value in ("model", "not supported", "unsupported capability")):
+        return "capability_unsupported"
+    return "invalid_input"
 
 
 def allows_automatic_failover(error: Exception, *, phase: str, task_known: bool) -> bool:
@@ -188,7 +223,10 @@ def result_urls(payload: dict[str, Any]) -> list[str]:
 
 
 def is_completed(payload: dict[str, Any]) -> bool:
-    return task_status(payload) in COMPLETED_STATES or bool(result_urls(payload))
+    status = task_status(payload)
+    if status in FAILED_STATES:
+        return False
+    return status in COMPLETED_STATES or bool(result_urls(payload))
 
 
 @dataclass

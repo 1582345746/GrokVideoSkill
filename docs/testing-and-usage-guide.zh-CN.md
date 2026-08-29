@@ -1,4 +1,4 @@
-# Grok Video Studio v1.8.0 测试与使用指南
+# Grok Video Studio v2.0.0 upstream-first 测试与使用指南
 
 本文面向技能使用者和验收人员。所有示例都是可以直接发给 Codex 的标准话术，不包含真实 Key。
 
@@ -55,8 +55,8 @@
 
 通过标准：
 
-- 安装版本为 `1.8.0`。
-- 安装目录可读取，`install-plan --profile basic` 成功。
+- 安装版本为 `2.0.0`。
+- 安装目录可读取，默认 `install-plan --profile upstream-dialogue` 成功；需要静音或保留源音频时另验 `basic`。
 - 既有凭据角色仍可用，输出中没有 Key 或 Key 片段。
 - FFmpeg 和 ffprobe 可用。
 - 既有项目、模型目录和 DPAPI 文件没有被删除。
@@ -67,7 +67,7 @@
 费用等级：A/B。
 
 ```text
-使用 $grok-video-studio 做一次只读诊断。运行 version、capabilities、install-plan --profile basic 和 doctor；列出四条产品路线、当前安装档位、已配置的凭据职责、FFmpeg 状态和可选本地组件状态。不要输出任何 Key，不要创建项目，不要发起生图或生视频请求。
+使用 $grok-video-studio 做一次只读诊断。运行 version、capabilities、install-plan --profile upstream-dialogue 和 doctor；列出四条产品路线、QuickAI/QuickAI New 的 T2V/I2V 能力、当前安装档位、已配置的凭据职责、FFmpeg 状态和可选本地组件状态。不要输出任何 Key，不要创建项目，不要发起生图或生视频请求。
 ```
 
 通过标准：

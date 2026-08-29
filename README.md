@@ -2,7 +2,7 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v1.9.0`，仓库只使用 `main` 分支。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.0.0 upstream-first`，仓库只使用 `main` 分支。
 
 它把剧本、分镜、付费请求、断点恢复、连续性、字幕、对白、口型和交付 QA 放进同一个可审计项目，而不是让 Codex 临时拼接若干不可恢复的生成命令。
 
@@ -49,7 +49,7 @@ QuickAI 文生视频 Key：<QUICKAI_VIDEO_KEY>
 QuickAI New 视频 Key：<QUICKAINEW_VIDEO_KEY>
 
 要求：
-1. 使用仓库根目录 install.ps1 安装 basic 档位。
+1. 使用仓库根目录 install.ps1 安装 upstream-dialogue 档位；需要静音或保留源音频时才显式选择 basic。
 2. 通过标准输入把三个 Key 配置给技能；Windows 使用 DPAPI 保存。
 3. 不得把 Key 写入源码、项目文件、临时文件、命令行参数或终端输出。
 4. 安装后运行 version、install.ps1 -Check 和 doctor。
@@ -73,7 +73,7 @@ QuickAI New 视频 Key：<QUICKAINEW_VIDEO_KEY>
 ```powershell
 git clone --branch main --single-branch https://github.com/1582345746/GrokVideoSkill.git
 cd GrokVideoSkill
-.\install.ps1 -Force -InstallProfile basic
+.\install.ps1 -Force -InstallProfile upstream-dialogue
 ```
 
 ## 凭据职责
@@ -99,6 +99,12 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 多角色预设音色采用同一条代码主线中的 Voicebox 路线，不另建第二套技能。先运行无副作用的 `voicebox-setup-plan`，由 Codex 报告源码提交、隔离 Python、GPU、缓存、固定模型 revision、许可证和预计下载量；用户批准后再由 Codex 分阶段安装、启动和试听。基础技能更新不捆绑模型权重，用户无需逐项手动安装。
 
 `precise-subtitles` 根据项目中的对白、旁白或字幕时间轴生成确定性字幕，不等同于对任意视频执行语音识别。可选组件必须先展示安装计划，并在用户明确批准后才下载或启动；服务只监听 `127.0.0.1`。
+
+## 上游能力合同
+
+`capabilities` 会分别报告 QuickAI 和 QuickAI New 的真实能力：两者都支持 T2V 与 I2V；当前均不支持视频参考、视频编辑/延展、预设音色参考或音频文件参考。QuickAI 的音频为模型默认生成，QuickAI New 使用显式 `generate_audio` 字段。MP4/WAV 不能塞进普通 `input_reference`，预检会阻断并指向未来独立路线。
+
+QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检检查参考图格式、尺寸、比例和清晰度，并仅在请求体内将有效静帧中心裁剪为临时 JPEG，原图保持不变。QuickAI New 继续使用原始图片 multipart 上传。
 
 ## 音频与字幕
 
@@ -160,6 +166,7 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 
 - [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
 - [用户安装与使用话术](docs/user-installation-and-usage-prompts.zh-CN.md)
+- [v2.0 upstream-first 迁移说明](docs/v2.0-upstream-first-migration.zh-CN.md)
 - [v1.8.0 开发交接文档](HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md)
 - [多角色音频模块开发交接清单](docs/voice-module-development-handoff.zh-CN.md)
 - [多角色音频开发清单与当前状态](docs/multi-tts-implementation-status.zh-CN.md)
@@ -174,7 +181,7 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 ## 产品边界
 
 - 图像和视频创建请求可能收费；预检、状态查询、下载、FFmpeg 处理和本地 QA 不会创建新的上游生成任务。
-- 提示词硬上限为 4096 字符，建议把最终合成提示词控制在 3800 字符以内。
+- 提示词硬上限为 4096 UTF-8 字节，建议把最终合成提示词控制在 3800 字节以内。预检会同时显示完整、精简、最小版本、字节数、剩余空间和压缩建议，绝不静默截断。
 - 文生视频的人物一致性是文本约束下的尽力而为；严格一致性应使用角色母版、逐镜头关键帧和图生视频。
 - `native-dialogue` 的声音、逐字内容、内嵌字幕和口型是生成式结果，不能承诺完全准确。
 - Voicebox/Qwen、CosyVoice、VoxCPM 和 MuseTalk 都是可选本地组件，不随基础技能静默安装；VoxCPM 当前仍是实验路线。

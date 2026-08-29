@@ -102,7 +102,15 @@ def build_app(source_root: Path, models_root: Path, python: str, timeout: int) -
                     "--version",
                     "v15",
                 ]
-                completed = subprocess.run(command, cwd=source_root, capture_output=True, text=True, timeout=timeout)
+                completed = subprocess.run(
+                    command,
+                    cwd=source_root,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout,
+                )
                 result = result_dir / "v15" / "result.mp4"
                 if completed.returncode != 0 or not result.is_file():
                     detail = (completed.stderr or completed.stdout).strip()[-2000:]

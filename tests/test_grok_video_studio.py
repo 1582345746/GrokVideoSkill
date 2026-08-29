@@ -48,7 +48,9 @@ from component_manager import (  # noqa: E402
     component_status,
     load_model_state,
 )
-from grok_video_studio import composed_video_prompt  # noqa: E402
+from grok_video_studio import composed_video_prompt, prompt_bytes, prompt_variants  # noqa: E402
+from media_client import image_reference_report  # noqa: E402
+from media_tools import probe_media as probe_media_tool  # noqa: E402
 from provider_contracts import (  # noqa: E402
     PROVIDER_CAPABILITIES,
     allows_automatic_failover,
@@ -63,6 +65,32 @@ from provider_contracts import (  # noqa: E402
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_media_probe_decodes_ffprobe_output_as_utf8(self) -> None:
+        payload = {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "pix_fmt": "yuv420p",
+                    "width": 720,
+                    "height": 1280,
+                    "avg_frame_rate": "24/1",
+                }
+            ],
+            "format": {"duration": "10.0", "tags": {"comment": "洪水救援"}},
+        }
+        with tempfile.TemporaryDirectory() as temp_dir:
+            clip = Path(temp_dir) / "clip.mp4"
+            clip.write_bytes(FAKE_MP4)
+            completed = subprocess.CompletedProcess([], 0, stdout=json.dumps(payload, ensure_ascii=False), stderr="")
+            with mock.patch("media_tools.subprocess.run", return_value=completed) as run:
+                media = probe_media_tool(clip)
+
+        self.assertEqual(media["width"], 720)
+        self.assertEqual(media["height"], 1280)
+        self.assertEqual(run.call_args.kwargs["encoding"], "utf-8")
+        self.assertEqual(run.call_args.kwargs["errors"], "replace")
+
     def test_offline_response_fixtures(self) -> None:
         fixtures = json.loads((REPO_ROOT / "tests" / "fixtures" / "provider-contracts.json").read_text(encoding="utf-8"))
         for fixture in fixtures:
@@ -85,6 +113,10 @@ class ProviderContractTests(unittest.TestCase):
         self.assertFalse(PROVIDER_CAPABILITIES["quickainew"].text_to_image)
         self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].text_to_video)
         self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].image_to_video)
+        self.assertFalse(PROVIDER_CAPABILITIES["quickai"].video_reference)
+        self.assertFalse(PROVIDER_CAPABILITIES["quickainew"].video_reference)
+        self.assertEqual(PROVIDER_CAPABILITIES["quickai"].audio_generation, "model_default")
+        self.assertEqual(PROVIDER_CAPABILITIES["quickainew"].audio_generation, "explicit_generate_audio")
         self.assertLess(PROVIDER_CAPABILITIES["quickai"].priority, PROVIDER_CAPABILITIES["quickainew"].priority)
 
         unsupported = APIError(404, "unsupported endpoint")
@@ -96,6 +128,21 @@ class ProviderContractTests(unittest.TestCase):
         self.assertFalse(allows_automatic_failover(ambiguous, phase="create", task_known=False))
         self.assertEqual(classify_provider_error(invalid, phase="create", task_known=False), "invalid_input")
         self.assertFalse(allows_automatic_failover(invalid, phase="create", task_known=False))
+
+    def test_input_error_categories_are_specific(self) -> None:
+        self.assertEqual(classify_provider_error(APIError(400, "prompt too long"), phase="create", task_known=False), "prompt_too_long")
+        self.assertEqual(classify_provider_error(APIError(400, "size and aspect ratio conflict"), phase="create", task_known=False), "size_conflict")
+        self.assertEqual(classify_provider_error(APIError(422, "unsupported reference image"), phase="create", task_known=False), "reference_error")
+
+    def test_failed_payload_with_result_url_is_not_completed(self) -> None:
+        payload = {
+            "status": "failed",
+            "progress": 100,
+            "result": {"url": "http://provider.invalid/failed-task"},
+            "error": {"message": "upstream rejected the source image"},
+        }
+        self.assertFalse(is_completed(payload))
+        self.assertEqual(task_error(payload), "upstream rejected the source image")
 
 
 class FakeProviderHandler(BaseHTTPRequestHandler):
@@ -117,6 +164,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     json_video_error = "provider capacity is full"
     multipart_video_error = "provider capacity is full"
     json_video_create_status = 0
+    json_video_create_error = "provider rejected video create"
     tts_creates = 0
     voicebox_generations = 0
     voicebox_profiles: list[dict[str, object]] = []
@@ -265,7 +313,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": {"message": "temporary upstream failure"}}, 502)
                 return
             if type(self).json_video_create_status:
-                self.send_json({"error": {"message": "provider rejected video create"}}, type(self).json_video_create_status)
+                self.send_json({"error": {"message": type(self).json_video_create_error}}, type(self).json_video_create_status)
                 return
             self.send_json({"request_id": "task-1"})
             return
@@ -366,6 +414,7 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.json_video_error = "provider capacity is full"
         FakeProviderHandler.multipart_video_error = "provider capacity is full"
         FakeProviderHandler.json_video_create_status = 0
+        FakeProviderHandler.json_video_create_error = "provider rejected video create"
         FakeProviderHandler.tts_creates = 0
         FakeProviderHandler.voicebox_generations = 0
         FakeProviderHandler.voicebox_profiles = []
@@ -497,6 +546,24 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(len(references), 2)
         self.assertTrue(all(str(item["url"]).startswith("data:image/png;base64,") for item in references))
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for QuickAI I2V image normalization")
+    def test_quickai_valid_png_reference_is_normalized_to_jpeg(self) -> None:
+        project = self.root / "valid-reference"
+        project = self.create_project("valid-reference", generate_image=False, references=["assets/references/reference.png"])
+        reference = project / "assets" / "references" / "reference.png"
+        reference.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="))
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["video_references"] = ["assets/references/reference.png"]
+        value["shots"][0]["video_prompt"] = "Animate the supplied image with one gentle movement."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+
+        report = image_reference_report(reference, "16:9")
+        self.assertEqual(report["format"], "png")
+        self.assertEqual((report["width"], report["height"]), (1, 1))
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertTrue(result["ok"])
+        self.assertTrue(str(FakeProviderHandler.last_json_video["image"]["url"]).startswith("data:image/jpeg;base64,"))
+
     def test_selected_shot_generation_leaves_other_shots_pending(self) -> None:
         project = self.root / "selected"
         self.run_cli("init", str(project), "--title", "Selected", "--topic", "Shots", "--shots", "2", "--seconds", "6")
@@ -562,6 +629,22 @@ class SkillIntegrationTests(unittest.TestCase):
         preflight = self.run_cli("preflight", str(project))
         self.assertTrue(any("identity continuity is prompt-only" in warning for warning in preflight["preflight"]["warnings"]))
 
+    def test_structured_video_prompt_omits_offscreen_character_bible(self) -> None:
+        project = self.create_project("structured-identity", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["character_bible"] = "Lead identity. Offscreen identity that must not be sent."
+        value["characters"] = [
+            {"id": "lead", "name": "Lead", "identity": "Lead identity.", "wardrobe": "Yellow raincoat."},
+            {"id": "offscreen", "name": "Offscreen", "identity": "Offscreen identity.", "wardrobe": "Blue coat."},
+        ]
+        value["shots"][0]["character_ids"] = ["lead"]
+
+        prompt = composed_video_prompt(value, value["shots"][0])
+
+        self.assertIn("Lead identity.", prompt)
+        self.assertNotIn("Offscreen identity that must not be sent.", prompt)
+        self.assertNotIn("Blue coat.", prompt)
+
     def test_capabilities_and_dynamic_duration_planning(self) -> None:
         capabilities = self.run_cli("capabilities")
         ids = {item["id"] for item in capabilities["workflows"]}
@@ -613,6 +696,12 @@ class SkillIntegrationTests(unittest.TestCase):
         (landscape / "project.json").write_text(json.dumps(value), encoding="utf-8")
         report = self.run_cli("preflight", str(landscape))
         self.assertTrue(any("orientation does not match" in warning for warning in report["preflight"]["warnings"]))
+
+        value["defaults"]["video_size"] = "1280x720"
+        value["shots"][0]["video_aspect_ratio"] = "9:16"
+        (landscape / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        mismatch = self.run_cli("preflight", str(landscape))
+        self.assertTrue(any("video_size 1280x720 orientation" in warning for warning in mismatch["preflight"]["warnings"]))
 
         portrait = self.root / "portrait-i2v"
         self.run_cli(
@@ -728,11 +817,11 @@ class SkillIntegrationTests(unittest.TestCase):
         project = self.create_project("limits")
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         value["shots"][0]["seconds"] = 16
-        value["character_bible"] = "x" * 4090
+        value["character_bible"] = "中" * 1400
         (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
         result = self.run_cli("validate", str(project), expected=1)
         self.assertTrue(any("1 to 15" in error for error in result["errors"]))
-        self.assertTrue(any("maximum is 4096" in error for error in result["errors"]))
+        self.assertTrue(any("UTF-8 bytes" in error for error in result["errors"]))
 
         value["shots"][0]["seconds"] = 15
         value["character_bible"] = "x" * 3500
@@ -745,6 +834,40 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(video_prompt["safe_limit"], 3800)
         self.assertLess(video_prompt["remaining"], 4096)
         self.assertTrue(video_prompt["within_hard_limit"])
+
+    def test_v2_prompt_budget_reports_utf8_variants_and_reference_blockers(self) -> None:
+        project = self.create_project("v2-contract", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["character_bible"] = "角色身份 " + ("中" * 1200)
+        shot = value["shots"][0]
+        shot["character_ids"] = []
+        shot["video_prompt"] = "角色向前走一步并停下。"
+        image_ref = project / "assets" / "references" / "reference.mp4"
+        audio_ref = project / "assets" / "references" / "reference.wav"
+        image_ref.parent.mkdir(parents=True, exist_ok=True)
+        image_ref.write_bytes(FAKE_MP4)
+        audio_ref.write_bytes(FAKE_WAV)
+        shot["video_references"] = ["assets/references/reference.mp4", "assets/references/reference.wav"]
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+        report = self.run_cli("preflight", str(project), expected=1)
+        prompt = next(item for item in report["preflight"]["prompts"] if item["kind"] == "video")
+        self.assertGreater(prompt["versions"]["full"]["utf8_bytes"], prompt["versions"]["full"]["characters"] - 1)
+        self.assertIn("compression_suggestion", prompt)
+        self.assertTrue(any("video reference" in error for error in report["errors"]))
+        self.assertTrue(any("audio reference" in error for error in report["errors"]))
+
+    def test_prompt_error_stops_at_three_total_attempts(self) -> None:
+        project = self.create_project("prompt-retry-limit", generate_image=False)
+        FakeProviderHandler.json_video_create_status = 400
+        FakeProviderHandler.json_video_create_error = "prompt too long"
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 3)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["attempts"], 3)
+        self.assertEqual(video["error_category"], "prompt_too_long")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_assembly_audio_policy_preserves_or_mutes_audio(self) -> None:
@@ -906,6 +1029,9 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("--retry-failed", blocked["error"])
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
 
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["video_prompt"] += " Use the corrected framing."
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
         FakeProviderHandler.video_status = "completed"
         retried = self.run_cli(
             "resume",
@@ -1092,7 +1218,7 @@ class SkillIntegrationTests(unittest.TestCase):
         clean = project / "deliverables" / "final.mp4"
         clean_digest = clean.read_bytes()
 
-        result = self.run_cli("subtitles", str(project), "--burn", "--style", "cinematic")
+        result = self.run_cli("subtitles", str(project), "--source", "project", "--burn", "--style", "cinematic")
         self.assertEqual(result["subtitles"]["cue_count"], 2)
         srt = project / "deliverables" / "subtitles.srt"
         subtitled = project / "deliverables" / "final-subtitled.mp4"
@@ -1120,7 +1246,7 @@ class SkillIntegrationTests(unittest.TestCase):
         blocked = self.run_cli("subtitles", str(project), "--burn", expected=1)
         self.assertIn("may bake captions", blocked["error"])
         self.assertFalse((project / "deliverables" / "final-subtitled.mp4").exists())
-        allowed = self.run_cli("subtitles", str(project), "--burn", "--confirm-source-clean")
+        allowed = self.run_cli("subtitles", str(project), "--source", "project", "--burn", "--confirm-source-clean")
         self.assertGreater(allowed["burned_video"]["duration"], 0)
         self.assertTrue((project / "deliverables" / "final-subtitled.mp4").is_file())
 
@@ -1148,6 +1274,7 @@ class SkillIntegrationTests(unittest.TestCase):
             "generate_audio": False,
             "preserve_source_audio": True,
             "duck_source_audio": True,
+            "subtitle_source": "project",
         }
         (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
         local_prompt = composed_video_prompt(value, value["shots"][0])
@@ -1155,7 +1282,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn("do not show any legible words", local_prompt)
         source = project / "deliverables" / "final.mp4"
         source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_bytes(FakeProviderHandler.video_payload)
+        source.write_bytes(FakeProviderHandler.audio_payload)
 
         validation = self.run_cli("validate", str(project))
         self.assertTrue(validation["ok"])
@@ -1330,7 +1457,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertIn(b'name="resolution"\r\n\r\n720p', FakeProviderHandler.last_video_body)
         self.assertIn(b'name="aspect_ratio"', FakeProviderHandler.last_video_body)
-        self.assertIn(b'name="generate_audio"\r\n\r\nfalse', FakeProviderHandler.last_video_body)
+        self.assertIn(b'name="generate_audio"\r\n\r\ntrue', FakeProviderHandler.last_video_body)
+        self.assertNotIn(b'name="size"', FakeProviderHandler.last_video_body)
         self.assertNotIn(b'name="input_reference"', FakeProviderHandler.last_video_body)
 
     def test_component_profiles_are_explicit_and_configurable_without_downloads(self) -> None:
@@ -1493,7 +1621,7 @@ class SkillIntegrationTests(unittest.TestCase):
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         self.assertEqual(value["audio"]["mode"], "native-dialogue")
         self.assertTrue(value["audio"]["generate_audio"])
-        self.assertEqual(value["audio"]["subtitle_source"], "upstream")
+        self.assertEqual(value["audio"]["subtitle_source"], "none")
 
     def test_full_dialogue_start_requires_an_explicit_gpu_stage(self) -> None:
         configured = self.run_cli(

@@ -2,7 +2,7 @@
 
 This checklist is the release contract for the two supported distribution paths.
 
-Current decision (2026-08-28): the standalone installer route is feature-frozen at v1.8.0. Codex-managed installation from the repository is the priority distribution route. The unchecked signing, fresh-machine, and public-release gates below are intentionally deferred rather than treated as complete.
+Current decision (2026-08-29): v2.0.0 `upstream-first` is the active contract. Codex-managed installation from the repository is the priority distribution route; the standalone installer remains transparent and backward compatible. The unchecked signing, fresh-machine, and public-release gates below are intentionally deferred rather than treated as complete.
 
 ## Distribution Contracts
 
@@ -28,6 +28,13 @@ Current decision (2026-08-28): the standalone installer route is feature-frozen 
 - [x] Native provider dialogue is explicitly labeled generative and requires visual/listening review.
 - [x] Local voice and lip-sync are optional and can resume from cached line audio.
 - [x] Clean-frame prompts default to no UI, comments, captions, logos, watermarks, or stickers.
+- [x] QuickAI and QuickAI New capabilities report T2V and I2V independently, including model-default versus explicit native audio.
+- [x] Video reference/edit/extend and preset/file audio reference are explicitly unsupported and blocked in preflight.
+- [x] New projects default to native upstream dialogue (`generate_audio=true`, `subtitle_source=none`); local subtitles remain opt-in.
+- [x] Prompt limits are counted as UTF-8 bytes with full/compact/minimal variants and no silent truncation.
+- [x] Image, video, and character-master create attempts share a three-total-attempt budget; failover counts and `submission_unknown` is not recreated.
+- [x] Series contracts include theme, escalation, midpoint, climax, ending hook, shot-role taxonomy, continuity ledger inputs, and dynamic shot planning.
+- [x] Technical QA separates clean-frame, embedded subtitle, audio-track, and visual/manual review gates; review frames identify first/key/end.
 
 ## Security And Permissions
 
@@ -52,10 +59,10 @@ Current decision (2026-08-28): the standalone installer route is feature-frozen 
 
 ## Release Acceptance
 
-- [x] Python unit/integration suite: 61 tests passing on the Windows development machine; the same suite is configured for Windows and Ubuntu CI.
-- [x] Installed copy reports version `1.8.0` and passes `-Check`.
-- [x] Real QuickAI provider and real CosyVoice/MuseTalk GPU acceptance artifacts exist from the preceding release gate.
-- [x] No local service is started by the default `basic` installation.
+- [x] Python unit/integration suite covers the v2 contracts and passes on the Windows development machine; the same suite is configured for Windows and Ubuntu CI.
+- [x] Installed copy reports version `2.0.0` and passes `-Check`.
+- [x] Real QuickAI/QuickAI New T2V and I2V acceptance artifacts are recorded for this v2 release in `docs/paid-acceptance-2026-08-29.md`.
+- [x] No local service is started by the default `upstream-dialogue` installation.
 - [x] Interactive installer end-to-end test with redacted test credentials in an isolated Windows profile.
 - [x] All five profiles install, persist their selection, and pass `-Check` in isolated directories.
 - [ ] Fresh-machine acceptance for each of the five profiles.

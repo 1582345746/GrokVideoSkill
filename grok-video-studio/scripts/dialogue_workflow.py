@@ -22,8 +22,8 @@ ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 def audio_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("audio") if isinstance(project.get("audio"), dict) else {}
-    mode = str(value.get("mode", "preserve")).strip().lower()
-    subtitle_source = str(value.get("subtitle_source", "project")).strip().lower() or "project"
+    mode = str(value.get("mode", "native-dialogue")).strip().lower()
+    subtitle_source = str(value.get("subtitle_source", "none")).strip().lower() or "none"
     return {
         "mode": mode,
         "subtitle_source": subtitle_source,
@@ -221,8 +221,16 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         else:
             emotion = str(line.get("emotion", "natural")).strip() or "natural"
             rendered.append(f"{window}, {speaker} performs natural {emotion} speaking motion; do not show any legible words")
+    sound_parts = []
+    for key, label in (("environment_sound", "environment sound"), ("sound_effects", "sound effects"), ("audio_notes", "audio notes")):
+        value = shot.get(key)
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        if str(value or "").strip():
+            sound_parts.append(f"{label}: {str(value).strip()}")
+    sound_context = (" " + "; ".join(sound_parts) + ".") if sound_parts else ""
     if config["mode"] == "native-dialogue":
-        policy = "Generate synchronized spoken audio for the exact dialogue. Do not render the words as on-screen text."
+        policy = "Generate synchronized spoken audio for the exact dialogue, with natural ambience and sound effects where specified. Do not render the words as on-screen text." + sound_context
     else:
         policy = "Show the active speaker naturally talking. Keep the frame text-free; local post-production supplies the final voice and subtitles."
     return policy + "\n" + "\n".join(rendered)

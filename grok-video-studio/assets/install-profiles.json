@@ -17,7 +17,7 @@
       "description": "Provider-generated speech and mouth motion, with no local AI service installation.",
       "component_profile": "native-dialogue",
       "audio_mode": "native-dialogue",
-      "subtitle_source": "upstream",
+      "subtitle_source": "none",
       "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
       "dependencies": ["ffmpeg"],
       "model_download_gb": 0,

@@ -1,5 +1,8 @@
 # Grok Video Studio 多角色音频模块开发交接清单
 
+> [!WARNING]
+> 本文档记录本地音频模块的历史开发边界。当前技能已升级到 v2.0.0 `upstream-first`：新项目默认 `native-dialogue`、`generate_audio=true`、`subtitle_source=none`；本地 TTS/口型组件仍保留为可选维护路线。请同时阅读 [`v2.0 迁移说明`](v2.0-upstream-first-migration.zh-CN.md)。
+
 更新日期：2026-08-29
 适用仓库：`<GROK_VIDEO_SKILL_REPO>`
 当前连续剧项目：`<SERIES_PROJECT>`
@@ -17,7 +20,7 @@
 
 ### 2.1 仓库和设备
 
-- Grok Video Studio 当前版本：`1.8.0`。
+- 本交接清单基于 Grok Video Studio `1.8.0`；当前实现版本为 `2.0.0`。
 - 仓库分支：`main`。
 - 最近已知提交：`d26728a docs: add comprehensive v1.8 handoff`。
 - GPU：NVIDIA GeForce RTX 3060 Ti，8 GB 显存。

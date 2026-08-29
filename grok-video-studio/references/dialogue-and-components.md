@@ -14,6 +14,8 @@ Dialogue is part of the project contract, not prose hidden in a prompt. The same
 
 `native-dialogue` injects timed lines into the video prompt. QuickAI uses its current JSON video contract without a non-standard `generate_audio` field; QuickAI New sends `generate_audio=true` in its multipart contract. A real QuickAI acceptance test confirmed an audible AAC track, but the provider also burned Chinese dialogue into the image despite the clean-frame instruction. Always inspect and listen.
 
+`qa` exposes a `blocking_review_items` entry for native-dialogue clips and deliverables. A human must inspect the exported first/key/end frames; any model-baked captions or dialogue text blocks clean delivery even when the audio track is present and technically healthy.
+
 `local-voice` and `local-lipsync` require an already assembled clean source video. Run:
 
 ```text
@@ -24,16 +26,16 @@ The command synthesizes one WAV per line, resumes unchanged lines from `dialogue
 
 Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SRT, then choose `--style clean`, `cinematic`, or `news` when burning. For `native-dialogue`, first inspect the source for provider-baked captions; the CLI requires `--confirm-source-clean` before it will burn another subtitle layer. If the result is not approved, re-burn another style or deliver the clean master; no paid video regeneration is needed.
 
-`audio.subtitle_source` controls local subtitle artifacts: `upstream` keeps provider/source pixels and creates no local SRT, `project` uses the approved dialogue/cue contract, and `none` suppresses subtitle delivery. Use `subtitles --source project` to deliberately override an upstream default after visual review. This choice does not change the audio track or lip-sync route.
+`audio.subtitle_source` controls local subtitle artifacts: `upstream` keeps provider/source pixels and creates no local SRT, `project` uses the approved dialogue/cue contract, and `none` suppresses subtitle delivery. New projects use `none`; use `subtitles --source project` to deliberately create a reviewed local subtitle derivative. This choice does not change the audio track or lip-sync route.
 
 ## Project fields
 
 ```json
 {
   "audio": {
-    "mode": "local-voice",
+    "mode": "native-dialogue",
     "language": "zh-CN",
-    "generate_audio": false,
+    "generate_audio": true,
     "preserve_source_audio": true,
     "duck_source_audio": true,
     "subtitle_source": "project",
@@ -100,7 +102,7 @@ The user-facing profiles map to component profiles as follows:
 | Install profile | Local service | Subtitle default | Alias |
 | --- | --- | --- | --- |
 | `basic` | none | `upstream` | `core` |
-| `upstream-dialogue` | none | `upstream` | `native-dialogue` |
+| `upstream-dialogue` | none | `none` | `native-dialogue` |
 | `precise-subtitles` | none | `project` | none |
 | `precise-voice` | CosyVoice | `project` | `local-voice` |
 | `lip-sync` | CosyVoice + MuseTalk | `project` | `full-dialogue` |

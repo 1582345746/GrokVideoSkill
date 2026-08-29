@@ -18,7 +18,7 @@
 
 ## 二、首次安装话术
 
-### 2.1 推荐：基础档位，不做付费测试
+### 2.1 推荐：上游原生对白档位，不做付费测试
 
 ```text
 请开启目标模式，从 main 分支安装 Grok Video Studio：
@@ -30,7 +30,7 @@ QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
 
 安装要求：
 1. 检查 Git、PowerShell、Python、FFmpeg 和 ffprobe；缺少系统依赖时先报告，不要静默修改系统。
-2. 使用仓库根目录 install.ps1 安装 basic 档位。
+2. 使用仓库根目录 install.ps1 安装 upstream-dialogue 档位（新项目默认 `native-dialogue`、`generate_audio=true`、`subtitle_source=none`；需要静音或保留源音频时才使用 basic）。
 3. 通过 grok_video_studio.py configure --credentials-stdin 把 Key 传给技能；Windows 使用当前用户 DPAPI 保存。
 4. 不得把 Key 写进 Git 仓库、项目 JSON、源码、文档、命令行参数、日志或测试输出，也不要在回复中复述 Key。
 5. 安装后运行 version、install.ps1 -Check、doctor 和 capabilities。
@@ -44,7 +44,7 @@ QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
 ### 2.2 安装并允许最小付费验收
 
 ```text
-按基础档位安装 Grok Video Studio，并先完成所有离线测试和 doctor。
+按 upstream-dialogue 档位安装 Grok Video Studio，并先完成所有离线测试和 doctor。
 
 离线检查全部通过后，允许执行以下最小真实 API 验收：
 - QuickAI 生图最多 1 次；
@@ -80,7 +80,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 ### 4.1 默认 QuickAI
 
-不写上游名称时，新项目默认优先 QuickAI，只在安全失败时备用 QuickAI New。
+不写上游名称时，新项目默认优先 QuickAI，只在安全失败时备用 QuickAI New。QuickAI 和 QuickAI New 都支持 T2V/I2V；当前都不支持 MP4 视频参考、视频编辑/延展或 WAV/预设音色参考，预检会明确阻断。
 
 ```text
 使用 $grok-video-studio 制作 <视频主题>。
@@ -96,7 +96,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 ```text
 使用 $grok-video-studio 制作 <视频主题>，生视频选择 QuickAI New。
 
-这个项目的文生视频和图生视频都必须固定直连 QuickAI New，不先调用 QuickAI，也不自动切换其他视频上游。QuickAI 只在确实需要生成关键帧时承担生图。
+这个项目的文生视频和图生视频都必须固定直连 QuickAI New，不先调用 QuickAI，也不自动切换其他视频上游。QuickAI New 使用显式 `generate_audio`；QuickAI 的音频能力是模型默认生成。QuickAI 只在确实需要生成关键帧时承担生图。
 
 先展示剧本、分镜、最终提示词、请求数量和预算，等我批准后再生成。状态中必须保存 video_provider=quickainew、video_provider_policy=fixed、最终提供方、任务 ID、尝试历史和文件哈希。
 ```
@@ -146,9 +146,9 @@ https://github.com/1582345746/GrokVideoSkill.git
 ```text
 使用 $grok-video-studio 把下面故事拆成最少必要镜头：<故事>。
 
-每个镜头只描述一段可连续完成的动作，单镜头不超过上游时长限制。先建立角色和风格圣经，列出镜头 ID、场景、角色、连续性、首帧、动作、镜头运动、结束状态、对白、字幕来源和时长。
+每个镜头只描述一段可连续完成的动作，单镜头不超过上游时长限制。先建立角色和风格圣经，列出镜头 ID、shot_role、地点、时间、天气、光线、道具、角色、连续性、首帧、动作、镜头运动、环境声音、结束状态、对白、字幕来源和时长。提示词按 UTF-8 字节计数，硬上限 4096、工作上限 3800；预检必须展示完整/精简/最小版本与压缩建议。
 
-不要固定生成八个镜头，也不要一次并行提交全部付费任务。先预检，等我批准后顺序生成并保存每个镜头的任务状态；最后再拼接、混音、导出字幕副本和运行 QA。
+不要固定生成八个镜头，也不要一次并行提交全部付费任务。默认最多三次总尝试（首次加两次重试），备用上游也计入总次数；`submission_unknown` 不自动重建任务。先预检，等我批准后顺序生成并保存每个镜头的任务状态；最后再拼接、混音、导出字幕副本和运行 QA。
 ```
 
 ### 5.5 连续剧
@@ -156,7 +156,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 ```text
 使用 $grok-video-studio 规划一部 <20> 集连续短剧，每集 <60-90> 秒，题材是：<题材>。
 
-先创建系列合同，写整季大纲、世界观、角色身份和服装、关系、固定场景、每集剧情和当前连续性状态，不生成图片或视频。
+先创建系列合同，写季主题、冲突升级、中点、高潮、结尾钩子、世界观、角色身份和服装、关系、固定场景、每集剧情和当前连续性状态，不生成图片或视频。
 
 先只起草第 1 集，展示分镜、请求数、预算、角色母版计划和音频路线。我批准第一集后才生成；完成后停在 needs_review，逐镜头展示成片和审阅帧。只有我接受本集并记录实际结尾后，才能在我说“生成下一集”时起草下一集。
 ```
@@ -176,7 +176,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 ### 6.1 保留上游音频
 
 ```text
-音频模式使用 preserve，字幕来源使用 upstream。保留上游返回的原始音轨和画面，不主动覆盖声音或烧录本地字幕。QA 必须报告是否存在音轨、编码、采样率、声道、平均/峰值音量和静音比例；有音轨不等于有可听对白。
+需要保留源音频时，显式使用音频模式 `preserve`、字幕来源 `upstream`。新项目默认是 `native-dialogue` + `none`：上游负责原生对白、环境音和口型，技能不自动生成本地字幕。QA 必须报告音轨、对白可听性、口型同步、内嵌字幕、编码、采样率、声道、平均/峰值音量和静音比例；有音轨不等于有可听对白。
 ```
 
 ### 6.2 精确配音和字幕

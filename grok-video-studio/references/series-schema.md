@@ -29,10 +29,16 @@ series-root/
 ```json
 {
   "version": 1,
+  "contract_version": "2.0",
   "id": "city-story",
   "title": "City Story",
   "premise": "The series premise",
   "season_arc": "The beginning, escalation, midpoint, and ending of the season",
+  "season_theme": "The question or emotional theme of the season",
+  "conflict_escalation": "How stakes increase across episodes",
+  "midpoint": "The season midpoint reversal",
+  "climax": "The season climax",
+  "ending_hook": "The final unresolved hook",
   "style_bible": "Stable visual language for every episode",
   "locations": [],
   "props": [],
@@ -64,9 +70,9 @@ series-root/
     }
   }],
   "audio": {
-    "mode": "local-voice",
+    "mode": "native-dialogue",
     "language": "zh-CN",
-    "generate_audio": false,
+    "generate_audio": true,
     "preserve_source_audio": true,
     "duck_source_audio": true,
     "tts_provider": "voicebox",
@@ -87,6 +93,11 @@ series-root/
     "max_character_image_requests": 20,
     "max_episodes": 100
   },
+  "retry_policy": {
+    "max_total_attempts": 3,
+    "max_retries": 2,
+    "counts_provider_failover": true
+  },
   "episodes": [{
     "id": "ep-001",
     "number": 1,
@@ -102,7 +113,7 @@ series-root/
 }
 ```
 
-For image-to-video, a character master is enabled by default and requires a master prompt. For text-to-video, it is disabled by default and no image key is required. Set `master.enabled` explicitly when overriding that rule.
+For image-to-video, a character master is enabled by default and requires a master prompt. For text-to-video, it is disabled by default and no image key is required. Set `master.enabled` explicitly when overriding that rule. Character-master prompts use the same 4096 UTF-8 byte hard limit and full/compact/minimal preflight variants as episode projects.
 
 Series-level `audio` and character `voice` settings are synchronized into every episode project. An owned/licensed/synthetic series voice reference is copied into each episode's `assets/voices/` directory, so episode projects remain self-contained and resumable. Every episode still owns its timed dialogue lines and can be reviewed before generation.
 
@@ -111,11 +122,11 @@ Use `voice-audition` and `voice-approve` at the series root, then run `series-vo
 ## Planning and generation
 
 1. Run `series-init`. It creates the series contract and one standard project skeleton per episode; it does not make a paid request.
-2. Fill the entire season arc, every episode title and synopsis, and every episode project's story and shot prompts. The user can review all of these files before generation.
+2. Fill the season theme, conflict escalation, midpoint, climax, ending hook, every episode title and synopsis, and every episode project's story and shot prompts. Plan each episode dynamically (a two-minute episode typically needs 12-18 shots of 1-15 seconds) and assign each shot a `shot_role`: `establishing`, `wide`, `medium`, `closeup`, `over_shoulder`, `insert`, `reaction`, `transition`, or `ending_hook`. Include environment, action, reaction, and non-dialogue beats; do not make every shot a frontal dialogue closeup. The user can review all of these files before generation.
 3. For image-to-video continuity, run `series-generate-characters`. It creates one reusable single-sheet master per enabled character and copies the same bytes into every episode project that references the character.
 4. Run `series-preflight --episode ep-001`, then `series-approve ep-001`.
 5. Run `series-run --episode ep-001` or `series-run --next`. The episode stops at `needs_review` after generation, assembly, technical QA, and review-frame export.
-6. Inspect the generated video and all review frames. Run `series-accept` with a concise description of the actual end state. That reviewed summary, rather than the planned ending, becomes the next episode's continuity input.
+6. Inspect the generated video, audio track, dialogue intelligibility, mouth timing, clean frame, and all first/key/end review frames. Run `series-accept` with a concise description of the actual end state. That reviewed summary, rather than the planned ending, becomes the next episode's continuity input.
 7. Run `series-next` or `series-context --episode ep-002` before writing or generating the next episode.
 
 ## Episode lifecycle
@@ -141,4 +152,5 @@ Do not treat a planned `intended_continuity_out` as fact. Only `series-accept --
 
 - Series text-to-video uses the same prompt-only T2V behavior as a standalone project. It needs the QuickAI text-to-video credential but does not require character masters or an image credential. Long-range identity remains best-effort.
 - Series image-to-video uses the QuickAI image credential for persistent character masters and per-shot keyframes, then prefers QuickAI for animation. A safely classified QuickAI failure may continue with QuickAI New when configured. The video request receives only the current shot keyframe.
+- Neither provider currently supports MP4 video reference/edit/extend or preset/file audio reference; those requests are blocked and reserved for independent future routes.
 - A supplied-image animation is not a series workflow. Use a standalone `single-image-animation` project with `generate_image=false` and place the supplied image in `video_references`; no QuickAI image credential is required.

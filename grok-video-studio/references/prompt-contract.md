@@ -6,7 +6,7 @@ Write a concise story, then split it into shots that can each be represented by 
 
 ## Prompt budget
 
-The provider limit applies after `character_bible`, `style_bible`, structured shot continuity, series episode continuity, clean-frame policy, and shot text are composed. The tested QuickAI boundary is 4096 characters inclusive; keep each final prompt at or below 4096 characters, with 3800 as the working ceiling. Preflight reports the final length, hard-limit remainder, and safe-limit status. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt.
+The provider limit applies after `character_bible`, `style_bible`, structured shot continuity, series episode continuity, clean-frame policy, audio design, and shot text are composed. The hard boundary is 4096 UTF-8 bytes; keep the selected prompt at or below the 3800-byte working ceiling. Preflight reports full/compact/minimal variants, Unicode character count, UTF-8 byte count, remaining space, selected version, and a compression suggestion. Generation stores the original, all variants, and the final sent version. Prefer concise positive constraints and remove repeated adjectives. Never silently truncate a prompt. If the minimal complete version still exceeds the hard limit, stop and ask for a shorter identity, location, action, dialogue, or ending pose.
 
 ## Single-sheet character master
 
@@ -26,7 +26,7 @@ Combine character identity, environment, framing, lighting, visual style, and co
 
 ## Video prompt
 
-Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Unless the script explicitly calls for an interface, keep the frame clean: no app UI, controls, counters, comments, captions, logos, watermarks, or stickers. Timed dialogue is injected only for `native-dialogue`; local modes ask for natural speaking motion while supplying exact speech and subtitles in post-production. Never ask the video model to draw ordinary subtitles, music controls, or multiple scene cuts.
+Describe one continuous subject motion, one camera motion, environmental motion, pace, and ending pose. Use restrained motion for identity-critical portraits. State that facial features, hairstyle, clothing, body proportions, and background composition remain unchanged when required. Add shot role, location, time, weather, lighting, props, environment sound, sound effects, and emotional delivery when they affect the shot. Unless the script explicitly calls for an interface, keep the frame clean: no app UI, controls, counters, comments, captions, logos, watermarks, or stickers. Native dialogue prompts include approved speaker text plus sound design; local modes ask for natural speaking motion while supplying exact speech and subtitles in post-production. Never ask the video model to draw ordinary subtitles, music controls, or multiple scene cuts.
 
 ## Multi-reference use
 

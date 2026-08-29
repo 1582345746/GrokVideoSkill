@@ -31,7 +31,7 @@ def _frame_rate(value: Any) -> float:
 
 
 def _run(command: list[str], action: str, *, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1200:]
         raise SkillError(f"ffmpeg failed while {action}: {detail}")
@@ -47,6 +47,8 @@ def probe_media(path: Path) -> dict[str, Any]:
         [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
     if result.returncode != 0:
@@ -116,6 +118,8 @@ def probe_audio(path: Path) -> dict[str, Any]:
         [ffprobe, "-v", "error", "-select_streams", "a:0", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
     if result.returncode != 0:
@@ -157,6 +161,8 @@ def analyze_audio(path: Path) -> dict[str, Any]:
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
     )
     log = result.stderr or ""
@@ -248,11 +254,14 @@ def mix_dialogue_track(
     if preserve_source_audio and media["has_audio"]:
         filters.append(f"[0:a]aresample=48000,apad,atrim=0:{media['duration']:.6f}[source]")
         if duck_source_audio:
-            filters.append("[source][dialogue]sidechaincompress=threshold=0.025:ratio=10:attack=15:release=350[ducked]")
+            filters.append("[dialogue]asplit=2[dialogue_sidechain][dialogue_mix]")
+            filters.append("[source][dialogue_sidechain]sidechaincompress=threshold=0.025:ratio=10:attack=15:release=350[ducked]")
             base = "[ducked]"
+            dialogue_input = "[dialogue_mix]"
         else:
             base = "[source]"
-        filters.append(f"{base}[dialogue]amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
+            dialogue_input = "[dialogue]"
+        filters.append(f"{base}{dialogue_input}amix=inputs=2:duration=longest:normalize=0,loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
     else:
         filters.append("[dialogue]loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
     command.extend(
@@ -361,6 +370,8 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=300,
         )
         log = result.stderr or ""
@@ -411,6 +422,7 @@ def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count
     media = probe_media(input_path)
     safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", stem).strip("-") or "video"
     fractions = [0.5] if count == 1 else [0.05 + index * 0.95 / (count - 1) for index in range(count)]
+    labels = (["key"] if count == 1 else (["first", "key", "end"] if count == 3 else [f"frame-{index:02d}" for index in range(1, count + 1)]))
     output_dir.mkdir(parents=True, exist_ok=True)
     frames: list[dict[str, Any]] = []
     for index, fraction in enumerate(fractions, 1):
@@ -423,7 +435,7 @@ def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count
         )
         if not output.is_file() or output.stat().st_size == 0:
             raise SkillError(f"review frame export produced no image: {output.name}")
-        frames.append({"path": str(output.resolve()), "at_seconds": round(at, 3), "bytes": output.stat().st_size})
+        frames.append({"label": labels[index - 1], "path": str(output.resolve()), "at_seconds": round(at, 3), "bytes": output.stat().st_size})
     return frames
 
 

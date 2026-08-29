@@ -9,11 +9,15 @@
 | `unknown provider for model` | Upstream model routing | Confirm the exact model appears in that provider's `/v1/models`; do not retry create. |
 | `404` on `/v1/videos` | Base path or incompatible upstream | Store only the origin; verify the provider implements the OpenAI video endpoint. |
 | `400` with multipart/body validation | Contract mismatch | Inspect field names, model limits, seconds, size, and reference count. |
-| Prompt length exceeds 4096 characters | Prompt budget | Shorten the identity/style bibles and shot text; the limit applies after composition and is checked before a paid request. |
+| Prompt length exceeds 4096 UTF-8 bytes | Prompt budget | Inspect preflight full/compact/minimal variants and remaining bytes. Keep identity, location, core action, dialogue, and ending pose; remove season-wide or unrelated scene detail. If minimal still exceeds the hard limit, shorten the source fields. |
+| `400` prompt-too-long | Prompt repair | The runtime may move from full to compact to minimal within the configured total-attempt budget. It stores every version; it never silently truncates. |
+| `400` size conflict | Provider parameter repair | QuickAI New may omit a conflicting `size` while retaining `resolution` and `aspect_ratio`; inspect the recorded provider attempt. |
+| `400`/`422` reference error | Reference contract | Verify I2V uses still images and only the current shot keyframe. MP4/WAV references are blocked; use future video-edit/video-extend or audio-reference routes when implemented. |
 | `seconds` above 15 | Video contract | Split the action into more shots; never silently clamp a requested duration. |
 | Video receives a multi-view character sheet | Reference selection | Generate a per-shot keyframe from the sheet and send only that keyframe to image-to-video. |
 | `429` | Rate or account limit | Wait before a new create; polling may use backoff. |
 | `502`, `503`, `context deadline exceeded` | Gateway/upstream | Treat create as ambiguous if no task ID was returned. Do not automatically create again. |
+| Retry count exceeded | Cost control | Default is three total attempts (initial plus two retries), including provider failover. A known task is resumed/polled/downloaded only; `submission_unknown` is not recreated automatically. |
 | QuickAI task reaches a confirmed provider failure | Provider task | Record the failed QuickAI attempt, then automatically continue with QuickAI New only when its video key is configured and the failure is not content/account/input related. |
 | QuickAI create is rejected as unsupported or rate-limited before a task exists | Provider routing | It is safe to record a separate QuickAI New attempt. Keep the same internal request ID and a new attempt ID. |
 | `provider circuit is open` | Repeated idempotent reads failed | Wait for the reported cooldown, verify provider health, then resume. No create request was retried. |
@@ -30,6 +34,7 @@
 | News project says `news.json` is incomplete | News evidence gate | Browse current exact source pages, map claims and narration, resolve conflicts, set verified timestamps, then run `news-validate`. No paid request was sent. |
 | News claim lacks support | News evidence gate | Add one primary source or two independent sources from distinct publishers; remove unsupported wording from the script. |
 | Subtitle text is garbled in generated footage | Generation prompt | Keep upstream clean-frame rules enabled. Export SRT and use local `subtitles --burn` instead of asking the model to draw text. |
+| Native video has no audible dialogue or has burned captions | Native audio QA | Treat sound, exact wording, mouth timing, and model-baked captions as generated results requiring human review. Keep `final.mp4` clean; use `subtitle_source=project` only for an explicitly reviewed local derivative. |
 | Subtitle timing is inaccurate after adding voice | Post-production | Replace shot-level cues with word/sentence timestamps from the final TTS or voice track, then burn a new subtitled copy. |
 | I2V reference field rejected | Provider contract | Verify QuickAI JSON uses `image.url` for one first-frame image or `reference_images[].url` for multiple guidance images; QuickAI New uses repeated multipart `input_reference`. |
 | `ffprobe` or assembly validation fails | Local media QA | Install FFmpeg/FFprobe, inspect the reported stream metadata, and normalize clips before assembling. |

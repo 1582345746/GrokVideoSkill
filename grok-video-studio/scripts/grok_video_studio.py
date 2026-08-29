@@ -56,11 +56,19 @@ from dialogue_workflow import (
     render_local_dialogue,
     validate_dialogue,
 )
-from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
+from media_client import (
+    QuickAIImageClient,
+    QuickAINewVideoClient,
+    QuickAIVideoClient,
+    VIDEO_RESOLUTIONS,
+    image_reference_report,
+    save_image_bytes,
+)
 from media_tools import SUBTITLE_STYLES, export_review_frames, extract_cover, postprocess_video, quality_report
 from news_workflow import create_news_contract, load_news_contract, news_context, validate_news_contract
 from provider_contracts import (
     PROVIDER_CAPABILITIES,
+    REPAIRABLE_INPUT_CATEGORIES,
     ProviderTaskFailedError,
     allows_automatic_failover,
     classify_provider_error,
@@ -100,18 +108,32 @@ from voice_workflow import (
 from voice_setup import voicebox_setup_plan
 
 
-SKILL_VERSION = "1.9.0"
+SKILL_VERSION = "2.0.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
-HARD_PROMPT_CHARS = 4096
-SAFE_PROMPT_CHARS = 3800
+HARD_PROMPT_BYTES = 4096
+SAFE_PROMPT_BYTES = 3800
+# Compatibility aliases for external callers that imported the v1 names.
+HARD_PROMPT_CHARS = HARD_PROMPT_BYTES
+SAFE_PROMPT_CHARS = SAFE_PROMPT_BYTES
 MAX_CREDENTIAL_PAYLOAD_CHARS = 32768
 SHOT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 SIZE_RE = re.compile(r"^[1-9]\d{1,4}x[1-9]\d{1,4}$")
 ASPECT_RATIOS = {"16:9", "9:16", "1:1", "4:3", "3:4", "2:3", "3:2"}
 VIDEO_AUDIO_POLICIES = {"preserve", "mute"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+SHOT_ROLES = {
+    "establishing",
+    "wide",
+    "medium",
+    "closeup",
+    "over_shoulder",
+    "insert",
+    "reaction",
+    "transition",
+    "ending_hook",
+}
 TERMINAL_FAILURES = {"failed", "submission_unknown"}
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_ROOT = SKILL_ROOT / "assets" / "workflow-templates"
@@ -304,6 +326,12 @@ def provider_capability_report(settings: dict[str, Any]) -> dict[str, dict[str, 
             "text_to_image": capabilities.text_to_image,
             "text_to_video": capabilities.text_to_video,
             "image_to_video": capabilities.image_to_video,
+            "video_reference": capabilities.video_reference,
+            "video_edit": capabilities.video_edit,
+            "video_extend": capabilities.video_extend,
+            "audio_generation": capabilities.audio_generation,
+            "preset_voice_reference": capabilities.preset_voice_reference,
+            "audio_file_reference": capabilities.audio_file_reference,
             "priority": capabilities.priority,
             "video_configured": video_configured,
         }
@@ -430,6 +458,39 @@ def record_budget_attempt(state: dict[str, Any], project: dict[str, Any], kind: 
     usage["currency"] = str(budget.get("currency") or "CNY")
 
 
+def max_total_attempts(project: dict[str, Any]) -> int:
+    value = project.get("retry_policy") if isinstance(project.get("retry_policy"), dict) else {}
+    try:
+        attempts = int(value.get("max_total_attempts", 3))
+    except (TypeError, ValueError) as error:
+        raise SkillError("retry_policy.max_total_attempts must be a positive integer") from error
+    if attempts < 1:
+        raise SkillError("retry_policy.max_total_attempts must be a positive integer")
+    return attempts
+
+
+def project_prompt_limit(project: dict[str, Any]) -> int:
+    limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
+    raw = limits.get("max_prompt_bytes", limits.get("max_prompt_chars", HARD_PROMPT_BYTES))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return HARD_PROMPT_BYTES
+    return max(1, min(value, HARD_PROMPT_BYTES))
+
+
+def next_prompt_version(variants: dict[str, str], current: str, *, hard_limit: int = HARD_PROMPT_BYTES) -> str:
+    order = ("full", "compact", "minimal")
+    try:
+        index = order.index(current)
+    except ValueError:
+        index = -1
+    for candidate in order[index + 1:]:
+        if prompt_bytes(variants.get(candidate, "")) <= hard_limit:
+            return candidate
+    return "minimal"
+
+
 def require_retry_reason(retry_failed: bool, retry_reason: str) -> str:
     reason = retry_reason.strip()
     if retry_failed and not reason:
@@ -493,6 +554,24 @@ def _reference_errors(root: Path, references: Any, prefix: str, max_references: 
     return errors
 
 
+def _unsupported_reference_errors(root: Path, references: Any, prefix: str, max_references: int) -> list[str]:
+    """Reject non-image media instead of silently treating it as an I2V image."""
+    errors = _reference_errors(root, references, prefix, max_references)
+    if not isinstance(references, list):
+        return errors
+    for reference in references:
+        try:
+            path = resolve_project_path(root, reference)
+        except SkillError:
+            continue
+        suffix = path.suffix.lower()
+        if suffix in {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}:
+            errors.append(f"{prefix} does not support video reference {reference}; use video-edit or video-extend when implemented")
+        elif suffix in {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac"}:
+            errors.append(f"{prefix} does not support audio reference {reference}; use preset_voice_reference or audio_file_reference when implemented")
+    return errors
+
+
 def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if project.get("version") != PROJECT_VERSION:
@@ -521,14 +600,32 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("project.shots must be a non-empty array")
         return errors
     limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
+    try:
+        total_attempts = max_total_attempts(project)
+    except SkillError as error:
+        total_attempts = 3
+        errors.append(str(error))
+    retry_policy = project.get("retry_policy") if isinstance(project.get("retry_policy"), dict) else {}
+    try:
+        max_retries = int(retry_policy.get("max_retries", total_attempts - 1))
+        if max_retries < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        max_retries = total_attempts - 1
+        errors.append("retry_policy.max_retries must be a non-negative integer")
+    if max_retries + 1 > total_attempts:
+        errors.append("retry_policy.max_total_attempts must be at least max_retries + 1 (three retries require four total attempts)")
     max_images = _positive_limit(limits, "max_image_requests", 12, errors)
     max_videos = _positive_limit(limits, "max_video_requests", 8, errors)
     max_seconds = _positive_limit(limits, "max_total_video_seconds", 60, errors)
     max_references = _positive_limit(limits, "max_reference_images", 9, errors)
-    max_prompt_chars = _positive_limit(limits, "max_prompt_chars", HARD_PROMPT_CHARS, errors)
-    if max_prompt_chars > HARD_PROMPT_CHARS:
-        errors.append(f"limits.max_prompt_chars cannot exceed provider limit {HARD_PROMPT_CHARS}")
-        max_prompt_chars = HARD_PROMPT_CHARS
+    # v1 projects may still carry max_prompt_chars. It is accepted as a
+    # migration alias, but the value is enforced against UTF-8 bytes in v2.
+    prompt_limit_key = "max_prompt_bytes" if "max_prompt_bytes" in limits else "max_prompt_chars"
+    max_prompt_bytes = _positive_limit(limits, prompt_limit_key, HARD_PROMPT_BYTES, errors)
+    if max_prompt_bytes > HARD_PROMPT_BYTES:
+        errors.append(f"limits.{prompt_limit_key} cannot exceed provider limit {HARD_PROMPT_BYTES} UTF-8 bytes")
+        max_prompt_bytes = HARD_PROMPT_BYTES
 
     raw_characters = project.get("characters", [])
     character_ids: set[str] = set()
@@ -578,9 +675,10 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             if not str(master.get("prompt", "")).strip():
                 errors.append("character_master.prompt is required when generate is true")
             else:
-                prompt = composed_character_prompt(project)
-                if len(prompt) > max_prompt_chars:
-                    errors.append(f"character_master composed prompt has {len(prompt)} characters; maximum is {max_prompt_chars}")
+                try:
+                    select_prompt_variant(prompt_variants(project, kind="character_master"), hard_limit=max_prompt_bytes)
+                except SkillError as error:
+                    errors.append(f"character_master prompt: {error}")
         errors.extend(_reference_errors(root, master.get("source_references", []), "character_master.source_references", max_references))
 
     if len(shots) > max_videos:
@@ -612,6 +710,9 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         elif shot_id in seen:
             errors.append(f"duplicate shot id: {shot_id}")
         seen.add(shot_id)
+        shot_role = str(raw_shot.get("shot_role", "")).strip().lower()
+        if shot_role and shot_role not in SHOT_ROLES:
+            errors.append(f"{prefix}.shot_role must be one of {', '.join(sorted(SHOT_ROLES))}")
         if bool(raw_shot.get("generate_image", True)) and not str(raw_shot.get("image_prompt", "")).strip():
             errors.append(f"{prefix}.image_prompt is required when generate_image is true")
         if not str(raw_shot.get("video_prompt", "")).strip():
@@ -636,6 +737,15 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.narration must be a string")
         if raw_shot.get("subtitle") is not None and not isinstance(raw_shot.get("subtitle"), str):
             errors.append(f"{prefix}.subtitle must be a string")
+        for field in ("location", "time", "weather", "lighting", "camera", "camera_motion", "environment_motion", "ending_pose", "audio_notes"):
+            if raw_shot.get(field) is not None and not isinstance(raw_shot.get(field), (str, list)):
+                errors.append(f"{prefix}.{field} must be a string or array")
+        if raw_shot.get("props") is not None and not isinstance(raw_shot.get("props"), (str, list)):
+            errors.append(f"{prefix}.props must be a string or array")
+        if raw_shot.get("environment_sound") is not None and not isinstance(raw_shot.get("environment_sound"), (str, list)):
+            errors.append(f"{prefix}.environment_sound must be a string or array")
+        if raw_shot.get("sound_effects") is not None and not isinstance(raw_shot.get("sound_effects"), (str, list)):
+            errors.append(f"{prefix}.sound_effects must be a string or array")
         subtitle_items = raw_shot.get("subtitles")
         if subtitle_items is not None:
             if raw_shot.get("subtitle"):
@@ -664,13 +774,15 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
                         errors.append(f"{cue_prefix} overlaps the previous subtitle cue")
                     previous_end = max(previous_end, end)
         if str(raw_shot.get("image_prompt", "")).strip():
-            image_prompt = composed_image_prompt(project, raw_shot)
-            if len(image_prompt) > max_prompt_chars:
-                errors.append(f"{prefix} composed image prompt has {len(image_prompt)} characters; maximum is {max_prompt_chars}")
+            try:
+                select_prompt_variant(prompt_variants(project, raw_shot, kind="image"), hard_limit=max_prompt_bytes)
+            except SkillError as error:
+                errors.append(f"{prefix} image prompt: {error}")
         if str(raw_shot.get("video_prompt", "")).strip():
-            video_prompt = composed_video_prompt(project, raw_shot)
-            if len(video_prompt) > max_prompt_chars:
-                errors.append(f"{prefix} composed video prompt has {len(video_prompt)} characters; maximum is {max_prompt_chars}")
+            try:
+                select_prompt_variant(prompt_variants(project, raw_shot, kind="video"), hard_limit=max_prompt_bytes)
+            except SkillError as error:
+                errors.append(f"{prefix} video prompt: {error}")
         seconds = shot_value(project, raw_shot, "seconds", 6)
         if not isinstance(seconds, int) or isinstance(seconds, bool) or seconds < 1 or seconds > MAX_VIDEO_SECONDS:
             errors.append(f"{prefix}.seconds must be an integer from 1 to {MAX_VIDEO_SECONDS}")
@@ -688,7 +800,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
                 errors.append(f"{prefix}.{size_name} must be WIDTHxHEIGHT or auto")
         for ref_name in ("image_references", "video_references"):
             references = raw_shot.get(ref_name, [])
-            errors.extend(_reference_errors(root, references, f"{prefix}.{ref_name}", max_references))
+            errors.extend(_unsupported_reference_errors(root, references, f"{prefix}.{ref_name}", max_references))
         if bool(raw_shot.get("generate_image", True)) and isinstance(shot_character_ids, list):
             by_character_id = {
                 str(character.get("id", "")): character for character in raw_characters if isinstance(character, dict)
@@ -786,6 +898,23 @@ def structured_shot_context(project: dict[str, Any], shot: dict[str, Any]) -> st
     continuity = str(shot.get("continuity_notes", "")).strip()
     if scene_id:
         lines.append(f"Scene: {scene_id}.")
+    for key, label in (
+        ("shot_role", "Shot role"),
+        ("location", "Location"),
+        ("time", "Time"),
+        ("weather", "Weather"),
+        ("lighting", "Lighting"),
+        ("props", "Props"),
+        ("camera", "Camera"),
+        ("camera_motion", "Camera motion"),
+        ("environment_motion", "Environment motion"),
+        ("ending_pose", "Ending pose"),
+    ):
+        value = shot.get(key)
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        if str(value or "").strip() and not (key == "scene_id"):
+            lines.append(f"{label}: {str(value).strip()}")
     if continuity:
         lines.append(f"Continuity: {continuity}")
     return "\n".join(lines)
@@ -830,14 +959,15 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
     character = str(project.get("character_bible", "")).strip()
     style = str(project.get("style_bible", "")).strip()
+    structured = structured_shot_context(project, shot)
+    requested_characters = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
     if character:
-        sections.append(
-            "[IDENTITY LOCK]\n"
-            "Same character every shot; preserve face, hair, body, clothes, props, and colors.\n" + character
-        )
+        identity_lock = "Same character every shot; preserve face, hair, body, clothes, props, and colors."
+        if not requested_characters or not project_characters(project):
+            identity_lock += "\n" + character
+        sections.append("[IDENTITY LOCK]\n" + identity_lock)
     if style:
         sections.append("[STYLE LOCK]\n" + style)
-    structured = structured_shot_context(project, shot)
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
     episode_continuity = episode_continuity_context(project)
@@ -851,8 +981,166 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     spoken = dialogue_prompt(project, shot)
     if spoken:
         sections.append("[DIALOGUE]\n" + spoken)
+    sound_parts = []
+    for key, label in (("environment_sound", "Environment sound"), ("sound_effects", "Sound effects"), ("audio_notes", "Audio design")):
+        value = shot.get(key)
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        if str(value or "").strip():
+            sound_parts.append(f"{label}: {str(value).strip()}")
+    if sound_parts and audio_config(project)["mode"] == "native-dialogue":
+        sections.append("[AUDIO DESIGN]\n" + "\n".join(sound_parts))
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
     return "\n\n".join(sections)
+
+
+def prompt_bytes(value: str) -> int:
+    return len(str(value).encode("utf-8"))
+
+
+def _compact_character_identity(project: dict[str, Any], shot: dict[str, Any] | None = None) -> str:
+    requested = set()
+    if isinstance(shot, dict) and isinstance(shot.get("character_ids"), list):
+        requested = {str(item) for item in shot["character_ids"]}
+    characters = project_characters(project)
+    selected = [item for item in characters if not requested or str(item.get("id", "")) in requested]
+    if selected:
+        values = []
+        for item in selected:
+            identity = str(item.get("identity", "")).strip()
+            wardrobe = str(item.get("wardrobe", "")).strip()
+            suffix = f"; wardrobe: {wardrobe}" if wardrobe else ""
+            if identity:
+                values.append(f"{item.get('name', item.get('id', 'character'))}: {identity}{suffix}")
+        if values:
+            return " | ".join(values)
+    return str(project.get("character_bible", "")).strip()
+
+
+def _compact_shot_facts(project: dict[str, Any], shot: dict[str, Any], *, kind: str) -> list[str]:
+    facts: list[str] = []
+    identity = _compact_character_identity(project, shot)
+    if identity:
+        facts.append("Identity: " + identity)
+    for key, label in (
+        ("scene_id", "Location"),
+        ("location", "Location"),
+        ("time", "Time"),
+        ("weather", "Weather"),
+        ("lighting", "Lighting"),
+        ("props", "Props"),
+        ("shot_role", "Shot role"),
+        ("camera", "Camera"),
+        ("camera_motion", "Camera motion"),
+        ("environment_motion", "Environment motion"),
+        ("ending_pose", "Ending pose"),
+        ("continuity_notes", "Continuity"),
+    ):
+        value = shot.get(key)
+        if isinstance(value, list):
+            value = ", ".join(str(item) for item in value)
+        if str(value or "").strip():
+            facts.append(f"{label}: {str(value).strip()}")
+    source_key = "image_prompt" if kind == "image" else "video_prompt"
+    if str(shot.get("summary", "")).strip():
+        facts.append("Action: " + str(shot["summary"]).strip())
+    if str(shot.get(source_key, "")).strip():
+        facts.append(("Keyframe: " if kind == "image" else "Motion: ") + str(shot[source_key]).strip())
+    spoken = dialogue_prompt(project, shot) if kind == "video" else ""
+    if spoken:
+        facts.append("Dialogue and sound: " + spoken)
+    return facts
+
+
+def prompt_variants(project: dict[str, Any], shot: dict[str, Any] | None = None, *, kind: str) -> dict[str, str]:
+    """Build deterministic full/compact/minimal prompts without truncating text."""
+    if kind not in {"image", "video", "character_master"}:
+        raise SkillError("prompt kind must be image, video, or character_master")
+    if kind == "character_master":
+        full = composed_character_prompt(project)
+        identity = _compact_character_identity(project)
+        master = character_master_config(project)
+        compact = "\n\n".join(item for item in (
+            "[CHARACTER IDENTITY]\n" + identity if identity else "",
+            "[MASTER]\n" + str(master.get("prompt", "")).strip(),
+            "Clean single-sheet turnaround, one person only, consistent face, hair, clothing, body proportions, and signature props.",
+        ) if item)
+        minimal = "One clean single-sheet character master: " + (identity or str(master.get("prompt", "")).strip())
+        return {"full": full, "compact": compact, "minimal": minimal}
+    if shot is None:
+        raise SkillError("shot is required for image and video prompts")
+    full = composed_image_prompt(project, shot) if kind == "image" else composed_video_prompt(project, shot)
+    facts = _compact_shot_facts(project, shot, kind=kind)
+    compact = "\n".join(facts)
+    # A minimal retry keeps the fields that determine continuity and intent;
+    # it never takes an arbitrary character slice that could drop identity or
+    # the actual action.
+    def first_fact(*prefixes: str) -> str:
+        return next((item for item in facts if item.startswith(prefixes)), "")
+
+    mandatory = [
+        first_fact("Identity:"),
+        first_fact("Location:"),
+        first_fact("Action:", "Motion:", "Keyframe:"),
+        first_fact("Dialogue and sound:"),
+        first_fact("Ending pose:"),
+        first_fact("Camera:", "Camera motion:"),
+    ]
+    mandatory = [item for item in mandatory if item]
+    if not mandatory:
+        mandatory = ["Character identity, location, core action, and composition remain consistent."]
+    minimal = " ".join(dict.fromkeys(item for item in mandatory if item.strip()))
+    if kind == "video":
+        minimal += " One continuous motion; preserve the ending pose; clean frame with no captions, logos, watermarks, or UI."
+    return {"full": full, "compact": compact, "minimal": minimal}
+
+
+def select_prompt_variant(variants: dict[str, str], *, hard_limit: int = HARD_PROMPT_BYTES, safe_limit: int = SAFE_PROMPT_BYTES, preferred: str = "") -> tuple[str, str]:
+    order = [name for name in ("full", "compact", "minimal") if name in variants]
+    if preferred in order:
+        order = order[order.index(preferred):]
+    for name in order:
+        value = variants.get(name, "")
+        if prompt_bytes(value) <= safe_limit:
+            return name, value
+    minimal = variants.get("minimal", "")
+    if prompt_bytes(minimal) <= hard_limit:
+        return "minimal", minimal
+    raise SkillError(f"minimum prompt exceeds {hard_limit} UTF-8 bytes; shorten the character, location, action, dialogue, or ending pose")
+
+
+def prompt_budget_entry(kind: str, identifier: str, variants: dict[str, str], *, hard_limit: int) -> dict[str, Any]:
+    selection_error = ""
+    try:
+        selected, _ = select_prompt_variant(variants, hard_limit=hard_limit)
+    except SkillError as error:
+        # Preflight must remain a report even when the smallest version cannot
+        # fit; generation/validation will still block the request.
+        selected = "minimal" if "minimal" in variants else next(iter(variants), "")
+        selection_error = str(error)
+    values = {
+        name: {"characters": len(value), "utf8_bytes": prompt_bytes(value), "text": value}
+        for name, value in variants.items()
+    }
+    return {
+        "kind": kind,
+        "id": identifier,
+        "versions": values,
+        "selected_version": selected,
+        "characters": values[selected]["characters"],
+        "utf8_bytes": values[selected]["utf8_bytes"],
+        "hard_limit": hard_limit,
+        "safe_limit": SAFE_PROMPT_BYTES,
+        "remaining": hard_limit - values[selected]["utf8_bytes"],
+        "within_hard_limit": values[selected]["utf8_bytes"] <= hard_limit,
+        "compression_needed": selected != "full",
+        "compression_suggestion": (
+            f"use {selected} version; remove season-wide and unrelated scene detail while retaining identity, location, action, dialogue, and ending pose"
+            if selected != "full"
+            else "full prompt fits the safe provider budget"
+        ),
+        "selection_error": selection_error,
+    }
 
 
 def shot_character_references(root: Path, project: dict[str, Any], shot: dict[str, Any]) -> list[Path]:
@@ -870,29 +1158,15 @@ def shot_character_references(root: Path, project: dict[str, Any], shot: dict[st
     return references
 
 
-def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
+def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[str, Any]:
     master = character_master_config(project)
-    limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
-    try:
-        prompt_limit = min(int(limits.get("max_prompt_chars", HARD_PROMPT_CHARS)), HARD_PROMPT_CHARS)
-    except (TypeError, ValueError):
-        prompt_limit = HARD_PROMPT_CHARS
+    prompt_limit = project_prompt_limit(project)
     prompts: list[dict[str, Any]] = []
+    references_report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    state_for_references = load_state(root) if root is not None else None
     if bool(master.get("enabled", False)) and bool(master.get("generate", False)) and str(master.get("prompt", "")).strip():
-        value = composed_character_prompt(project)
-        characters = len(value)
-        prompts.append(
-            {
-                "kind": "character_master",
-                "id": "character-master",
-                "characters": characters,
-                "hard_limit": prompt_limit,
-                "safe_limit": SAFE_PROMPT_CHARS,
-                "remaining": prompt_limit - characters,
-                "within_hard_limit": characters <= prompt_limit,
-            }
-        )
+        prompts.append(prompt_budget_entry("character_master", "character-master", prompt_variants(project, kind="character_master"), hard_limit=prompt_limit))
     total_seconds = 0
     image_requests = int(bool(master.get("enabled", False)) and bool(master.get("generate", False)))
     for shot in project.get("shots", []):
@@ -915,43 +1189,58 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
                         f"{shot_id}: image_size {image_size} orientation does not match video aspect ratio {aspect_ratio}; "
                         f"use {expected} to reduce keyframe cropping and composition drift"
                     )
+        video_size = str(shot_value(project, shot, "video_size", "1280x720"))
+        aspect_ratio = video_aspect_ratio(project, shot)
+        if video_size != "auto" and SIZE_RE.fullmatch(video_size) and aspect_ratio in ASPECT_RATIOS:
+            width, height = (int(item) for item in video_size.split("x", 1))
+            ratio_width, ratio_height = (int(item) for item in aspect_ratio.split(":", 1))
+            orientation_matches = (width > height) == (ratio_width > ratio_height) and (width < height) == (
+                ratio_width < ratio_height
+            )
+            if not orientation_matches:
+                warnings.append(
+                    f"{shot_id}: video_size {video_size} orientation does not match video aspect ratio {aspect_ratio}; "
+                    "QuickAI New will omit the conflicting size and use resolution plus aspect_ratio"
+                )
         if str(shot.get("image_prompt", "")).strip():
-            value = composed_image_prompt(project, shot)
-            characters = len(value)
-            prompts.append(
-                {
-                    "kind": "image",
-                    "id": shot_id,
-                    "characters": characters,
-                    "hard_limit": prompt_limit,
-                    "safe_limit": SAFE_PROMPT_CHARS,
-                    "remaining": prompt_limit - characters,
-                    "within_hard_limit": characters <= prompt_limit,
-                }
-            )
+            prompts.append(prompt_budget_entry("image", shot_id, prompt_variants(project, shot, kind="image"), hard_limit=prompt_limit))
         if str(shot.get("video_prompt", "")).strip():
-            value = composed_video_prompt(project, shot)
-            characters = len(value)
-            prompts.append(
-                {
-                    "kind": "video",
-                    "id": shot_id,
-                    "characters": characters,
-                    "hard_limit": prompt_limit,
-                    "safe_limit": SAFE_PROMPT_CHARS,
-                    "remaining": prompt_limit - characters,
-                    "within_hard_limit": characters <= prompt_limit,
-                }
-            )
+            prompts.append(prompt_budget_entry("video", shot_id, prompt_variants(project, shot, kind="video"), hard_limit=prompt_limit))
         seconds = shot_value(project, shot, "seconds", 6)
         if isinstance(seconds, int) and not isinstance(seconds, bool):
             total_seconds += seconds
         if bool(shot.get("use_character_master", False)) and shot.get("video_references"):
             warnings.append(f"{shot_id}: explicit video_references bypass the generated keyframe; do not send a multi-view master sheet directly to video")
+        if root is not None and video_mode(project) == "image-to-video":
+            reference_values = shot.get("video_references", []) if isinstance(shot.get("video_references", []), list) else []
+            if not reference_values and isinstance(state_for_references, dict):
+                runtime = (state_for_references.get("shots") or {}).get(shot_id, {})
+                image_runtime = runtime.get("image") if isinstance(runtime, dict) else {}
+                if isinstance(image_runtime, dict) and image_runtime.get("status") == "completed" and image_runtime.get("path"):
+                    reference_values = [str(image_runtime["path"])]
+            for reference_value in reference_values:
+                try:
+                    reference_path = resolve_project_path(root, str(reference_value))
+                except (SkillError, TypeError):
+                    continue
+                reference_report = image_reference_report(reference_path, aspect_ratio)
+                references_report.append({**reference_report, "shot": shot_id, "path": str(reference_value)})
+                for warning in reference_report.get("warnings", []):
+                    warnings.append(f"{shot_id}: {reference_value}: {warning}")
+                for error in reference_report.get("errors", []):
+                    warnings.append(f"{shot_id}: {reference_value}: {error}")
     for item in prompts:
-        if item["characters"] > SAFE_PROMPT_CHARS:
+        prompt_size = int(item["utf8_bytes"])
+        full_size = int(item["versions"].get("full", {}).get("utf8_bytes", prompt_size))
+        if item.get("selection_error"):
+            warnings.append(f"{item['kind']} prompt {item['id']} cannot fit the {prompt_limit}-byte hard limit: {item['selection_error']}")
+        if item.get("compression_needed"):
             warnings.append(
-                f"{item['kind']} prompt {item['id']} uses {item['characters']} characters; keep it at or below {SAFE_PROMPT_CHARS} for provider headroom"
+                f"{item['kind']} prompt {item['id']} compressed from {full_size} to {prompt_size} UTF-8 bytes ({item['selected_version']}) for provider headroom; {item['compression_suggestion']}"
+            )
+        elif prompt_size > SAFE_PROMPT_BYTES:
+            warnings.append(
+                f"{item['kind']} prompt {item['id']} uses {prompt_size} UTF-8 bytes; selected {item['selected_version']} prompt and keep it at or below {SAFE_PROMPT_BYTES} for provider headroom"
             )
     shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
     if video_mode(project) == "text-to-video" and len(shots) > 1 and (str(project.get("character_bible", "")).strip() or project_characters(project)):
@@ -973,9 +1262,14 @@ def preflight_report(project: dict[str, Any]) -> dict[str, Any]:
         },
         "total_video_seconds": total_seconds,
         "max_clip_seconds": MAX_VIDEO_SECONDS,
+        "prompt_hard_limit_bytes": prompt_limit,
+        "prompt_safe_limit_bytes": SAFE_PROMPT_BYTES,
+        # Keep the v1 names in machine output for clients that have not yet
+        # migrated; both values refer to UTF-8 byte limits in v2.
         "prompt_hard_limit": prompt_limit,
-        "prompt_safe_limit": SAFE_PROMPT_CHARS,
+        "prompt_safe_limit": SAFE_PROMPT_BYTES,
         "prompts": prompts,
+        "references": references_report,
         "budget": cost,
         "warnings": warnings,
         "dialogue": dialogue_preflight(project),
@@ -986,10 +1280,21 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
     errors = validate_project(root, project)
     warnings: list[str] = []
     shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    role_counts = {role: 0 for role in sorted(SHOT_ROLES)}
+    dialogue_shots = 0
+    non_dialogue_shots = 0
+    action_shots = 0
     characters = {str(item.get("id")): item for item in project_characters(project)}
     previous: dict[str, Any] | None = None
     for shot in shots:
         shot_id = str(shot.get("id", ""))
+        role = str(shot.get("shot_role", "")).strip().lower()
+        if role in role_counts:
+            role_counts[role] += 1
+        has_dialogue = bool(shot.get("dialogue") or shot.get("narration") or shot.get("subtitle"))
+        dialogue_shots += int(has_dialogue)
+        non_dialogue_shots += int(not has_dialogue)
+        action_shots += int(role in {"medium", "wide", "over_shoulder", "insert"})
         character_ids = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
         if characters and not character_ids:
             warnings.append(f"{shot_id}: no character_ids selected; structured identity locks will not be added")
@@ -1004,10 +1309,28 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
             if (same_scene or shared_characters) and not str(shot.get("continuity_notes", "")).strip():
                 warnings.append(f"{shot_id}: adjacent scene/character continuity has no continuity_notes")
         previous = shot
+    cinematic_workflow = project.get("workflow") in {"character-consistent-story", "episodic-series"} or bool(project.get("series_context"))
+    if cinematic_workflow:
+        required_roles = ("establishing", "reaction", "ending_hook")
+        for role in required_roles:
+            if shots and role_counts[role] == 0:
+                warnings.append(f"shot coverage is missing {role}; add a dedicated cinematic beat")
+        if shots and non_dialogue_shots == 0:
+            warnings.append("shot coverage has no non-dialogue visual beat")
+        if shots and action_shots == 0:
+            warnings.append("shot coverage has no action-oriented beat")
     return {
         "ok": not errors,
         "errors": errors,
         "warnings": warnings,
+        "coverage": {
+            "shot_count": len(shots),
+            "role_counts": role_counts,
+            "dialogue_shots": dialogue_shots,
+            "non_dialogue_shots": non_dialogue_shots,
+            "action_shots": action_shots,
+            "dialogue_ratio": round(dialogue_shots / len(shots), 3) if shots else 0.0,
+        },
         "manual_review_required": [
             "character identity and wardrobe across adjacent shots",
             "screen direction, eyeline, prop placement, and scene lighting",
@@ -1094,7 +1417,8 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
     if not settings.get("quickai_image_key"):
         raise SkillError("QuickAI image key is required for image generation")
     references = [resolve_project_path(root, value) for value in master.get("source_references", [])]
-    prompt = composed_character_prompt(project)
+    prompt_variants_value = prompt_variants(project, kind="character_master")
+    prompt_version, prompt = select_prompt_variant(prompt_variants_value, preferred=str(runtime.get("prompt_version_override", "")))
     size = str(master.get("image_size") or project.get("defaults", {}).get("image_size") or "1024x1024")
     quality = str(master.get("image_quality") or project.get("defaults", {}).get("image_quality") or "auto")
     current_signature = signature({"model": settings["image_model"], "prompt": prompt, "size": size, "quality": quality}, references)
@@ -1103,6 +1427,8 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
     if runtime.get("status") == "completed" and existing and existing.is_file() and runtime.get("signature") == current_signature:
         return {"status": "completed", "path": str(existing), "source": "generated", "skipped": True}
     attempts = int(runtime.get("attempts", 0))
+    if attempts >= max_total_attempts(project) and runtime.get("status") != "completed":
+        raise SkillError(f"character master reached max_total_attempts={max_total_attempts(project)}; inspect state and create a new authorized run")
     if attempts > 0 and not retry_failed:
         raise SkillError("character master creation was already attempted; inspect state.json and use --retry-failed to authorize another billable request")
     if attempts > 0:
@@ -1119,6 +1445,10 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
             "provider": "quickai",
             "model": settings["image_model"],
             "prompt": prompt,
+            "prompt_original": prompt_variants_value["full"],
+            "prompt_versions": prompt_variants_value,
+            "prompt_version": prompt_version,
+            "prompt_utf8_bytes": prompt_bytes(prompt),
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "error": "",
         }
@@ -1147,9 +1477,16 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         emit_progress(progress, phase="character_master_create", status="completed", bytes=output.stat().st_size)
         return {"status": "completed", "path": str(output), "source": "generated", "skipped": False}
     except Exception as error:
-        runtime.update({"status": "failed", "error": str(error)[:1000]})
+        category = classify_provider_error(error, phase="create", task_known=False)
+        runtime.update({"status": "failed", "error": str(error)[:1000], "error_category": category})
         save_state(root, state)
         write_event(root, {"kind": "character_master_failed", "error": str(error)[:1000]})
+        if category in REPAIRABLE_INPUT_CATEGORIES and runtime["attempts"] < max_total_attempts(project):
+            runtime["prompt_version_override"] = next_prompt_version(
+                prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+            )
+            save_state(root, state)
+            return generate_character_master(root, retry_failed=True, retry_reason=f"automatic prompt repair: {category}", progress=progress)
         raise
 
 
@@ -1184,16 +1521,19 @@ def generate_images(
             master_path = resolved_character_master(root, project, state)
             if master_path not in references:
                 references.insert(0, master_path)
-        prompt = composed_image_prompt(project, shot)
+        runtime = shot_state(state, shot_id)["image"]
+        prompt_variants_value = prompt_variants(project, shot, kind="image")
+        prompt_version, prompt = select_prompt_variant(prompt_variants_value, preferred=str(runtime.get("prompt_version_override", "")))
         size = str(shot_value(project, shot, "image_size", "1024x1024"))
         quality = str(shot_value(project, shot, "image_quality", "auto"))
         current_signature = signature({"model": settings["image_model"], "prompt": prompt, "size": size, "quality": quality}, references)
-        runtime = shot_state(state, shot_id)["image"]
         existing_path = str(runtime.get("path", ""))
         existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
         if runtime.get("status") == "completed" and existing and existing.is_file() and runtime.get("signature") == current_signature:
             skipped.append(shot_id)
             continue
+        if int(runtime.get("attempts", 0)) >= max_total_attempts(project):
+            raise SkillError(f"image generation for {shot_id} reached max_total_attempts={max_total_attempts(project)}")
         if int(runtime.get("attempts", 0)) > 0 and not retry_failed:
             raise SkillError(f"image create was already attempted for {shot_id}; inspect state.json and use --retry-failed to authorize another billable request")
         if int(runtime.get("attempts", 0)) > 0:
@@ -1210,6 +1550,10 @@ def generate_images(
                 "provider": "quickai",
                 "model": settings["image_model"],
                 "prompt": prompt,
+                "prompt_original": prompt_variants_value["full"],
+                "prompt_versions": prompt_variants_value,
+                "prompt_version": prompt_version,
+                "prompt_utf8_bytes": prompt_bytes(prompt),
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "reference_sha256": [file_digest(path) for path in references],
                 "error": "",
@@ -1236,9 +1580,16 @@ def generate_images(
             save_state(root, state)
             emit_progress(progress, phase="image_create", shot_id=shot_id, status="completed", bytes=output.stat().st_size)
         except Exception as error:
-            runtime.update({"status": "failed", "error": str(error)[:1000]})
+            category = classify_provider_error(error, phase="create", task_known=False)
+            runtime.update({"status": "failed", "error": str(error)[:1000], "error_category": category})
             save_state(root, state)
             write_event(root, {"kind": "image_failed", "shot_id": shot_id, "error": str(error)[:1000]})
+            if category in REPAIRABLE_INPUT_CATEGORIES and runtime["attempts"] < max_total_attempts(project):
+                runtime["prompt_version_override"] = next_prompt_version(
+                    prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+                )
+                save_state(root, state)
+                return generate_images(root, retry_failed=True, retry_reason=f"automatic prompt repair: {category}", progress=progress, shot_ids=shot_ids)
             raise
     return {"completed": completed, "skipped": skipped}
 
@@ -1305,9 +1656,10 @@ def generate_videos(
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
         references = video_references(root, shot, runtime) if mode == "image-to-video" else []
-        prompt = composed_video_prompt(project, shot)
+        prompt_variants_value = prompt_variants(project, shot, kind="video")
+        prompt_version, prompt = select_prompt_variant(prompt_variants_value, preferred=str(video.get("prompt_version_override", "")))
         seconds = int(shot_value(project, shot, "seconds", 6))
-        size = str(shot_value(project, shot, "video_size", "1280x720"))
+        size = "auto" if bool(video.get("omit_size", False)) else str(shot_value(project, shot, "video_size", "1280x720"))
         resolution = video_resolution(project, shot)
         aspect_ratio = video_aspect_ratio(project, shot)
         def provider_signature(provider_name: str) -> str:
@@ -1333,7 +1685,13 @@ def generate_videos(
             candidates_for_shot = [active_provider]
         else:
             candidates_for_shot = candidates
-        if task_id and video.get("signature") and video.get("signature") != provider_signature(active_provider):
+        changed_failed_retry = video.get("status") == "failed" and retry_failed
+        if (
+            task_id
+            and video.get("signature")
+            and video.get("signature") != provider_signature(active_provider)
+            and not changed_failed_retry
+        ):
             raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
         automatic_failover = False
         if task_id and video.get("status") == "failed":
@@ -1362,6 +1720,8 @@ def generate_videos(
             video_client = select_video_client(settings, active_provider)
             if not task_id:
                 attempts = int(video.get("attempts", 0))
+                if attempts >= max_total_attempts(project):
+                    raise SkillError(f"video generation for {shot_id} reached max_total_attempts={max_total_attempts(project)}")
                 if attempts > 0 and not retry_failed and not automatic_failover:
                     raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
                 if attempts > 0 and retry_failed and not automatic_failover and video.get("status") != "failed":
@@ -1375,6 +1735,11 @@ def generate_videos(
                         "attempt_id": attempt_id,
                         "signature": provider_signature(active_provider),
                         "mode": mode,
+                        "prompt": prompt,
+                        "prompt_original": prompt_variants_value["full"],
+                        "prompt_versions": prompt_variants_value,
+                        "prompt_version": prompt_version,
+                        "prompt_utf8_bytes": prompt_bytes(prompt),
                         "provider": active_provider,
                         "model": settings["video_model"],
                         "seconds": seconds,
@@ -1417,6 +1782,14 @@ def generate_videos(
                     update_provider_attempt(video, attempt_id=attempt_id, status=status, error=message, error_category=category, finished_at=int(time.time()))
                     save_state(root, state)
                     write_event(root, {"kind": "video_create_failed", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "status": status, "error_category": category, "error": message})
+                    if category in REPAIRABLE_INPUT_CATEGORIES and video["attempts"] < max_total_attempts(project):
+                        if category == "size_conflict":
+                            video["omit_size"] = True
+                        video["prompt_version_override"] = next_prompt_version(
+                            prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+                        )
+                        save_state(root, state)
+                        return generate_videos(root, retry_failed=True, retry_reason=f"automatic parameter/prompt repair: {category}", progress=progress, poll_timeout=poll_timeout, shot_ids=shot_ids)
                     can_failover = provider_index + 1 < len(candidates_for_shot) and allows_automatic_failover(error, phase="create", task_known=False)
                     if not can_failover:
                         raise SkillError(message) from error
@@ -1446,8 +1819,10 @@ def generate_videos(
                 save_state(root, state)
                 emit_progress(progress, phase="video_poll", shot_id=shot_id, provider=active_provider, task_id=task_id, status=status, progress=provider_progress)
 
+            upstream_completed = False
             try:
                 status_payload = video_client.poll(task_id, timeout_seconds=poll_timeout, on_status=on_status)
+                upstream_completed = True
                 output = root / "clips" / f"{shot_id}.mp4"
                 video_client.download(task_id, status_payload, output)
                 try:
@@ -1471,6 +1846,12 @@ def generate_videos(
             except Exception as error:
                 category = classify_provider_error(error, phase="task", task_known=True)
                 message = sanitized_provider_error(error, settings)
+                if upstream_completed:
+                    video.update({"status": "local_processing_failed", "error": message, "error_category": "local_processing"})
+                    update_provider_attempt(video, attempt_id=attempt_id, status="local_processing_failed", error=message, error_category="local_processing")
+                    save_state(root, state)
+                    write_event(root, {"kind": "video_local_processing_failed", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "task_id": task_id, "error_category": "local_processing", "error": message})
+                    raise SkillError(message) from error
                 video.update({"status": "failed", "error": message, "error_category": category})
                 update_provider_attempt(video, attempt_id=attempt_id, status="failed", error=message, error_category=category, finished_at=int(time.time()))
                 can_failover = provider_index + 1 < len(candidates_for_shot) and allows_automatic_failover(error, phase="task", task_known=True)
@@ -1515,6 +1896,8 @@ def probe_media(path: Path) -> dict[str, Any]:
         [ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=60,
     )
     if result.returncode != 0:
@@ -1575,7 +1958,7 @@ def probe_media(path: Path) -> dict[str, Any]:
 
 
 def _run_ffmpeg(command: list[str], action: str) -> None:
-    result = subprocess.run(command, capture_output=True, text=True, timeout=1800)
+    result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=1800)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()[-1000:]
         raise SkillError(f"ffmpeg failed while {action}: {detail}")
@@ -1691,6 +2074,16 @@ def qa_project(root: Path) -> dict[str, Any]:
             expected_size=str(shot_value(project, shot, "video_size", "1280x720")),
             expected_duration=float(shot_value(project, shot, "seconds", 6)),
         )
+        if report["media"].get("has_subtitles") and audio_config(project).get("subtitle_source") == "none":
+            report["errors"].append("clean delivery contains an embedded subtitle stream while audio.subtitle_source is none")
+            report["ok"] = False
+        if dialogue["mode"] == "native-dialogue" and dialogue["line_count"] and not report["media"].get("has_audio"):
+            report["errors"].append("native-dialogue shot has no audio track")
+            report["ok"] = False
+        if dialogue["mode"] == "native-dialogue" and dialogue["line_count"]:
+            report.setdefault("blocking_review_items", []).append(
+                "inspect rendered pixels for model-baked dialogue, captions, or other text; any detected text blocks clean delivery"
+            )
         review_frames = export_review_frames(path, review_root, stem=shot_id)
         report["review_frames"] = [
             {**frame, "path": Path(str(frame["path"])).relative_to(root).as_posix()} for frame in review_frames
@@ -1703,7 +2096,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         report = quality_report(
             final_path,
             expected_size=str(project.get("defaults", {}).get("video_size") or "auto"),
-            expected_duration=float(preflight_report(project)["total_video_seconds"]),
+            expected_duration=float(preflight_report(project, root)["total_video_seconds"]),
         )
         expected_audio_policy = audio_policy(project)
         if expected_audio_policy == "preserve" and not report["media"]["has_audio"]:
@@ -1712,6 +2105,16 @@ def qa_project(root: Path) -> dict[str, Any]:
         elif expected_audio_policy == "mute" and report["media"]["has_audio"]:
             report["errors"].append("final delivery contains audio while defaults.audio_policy is mute")
             report["ok"] = False
+        if report["media"].get("has_subtitles") and audio_config(project).get("subtitle_source") == "none":
+            report["errors"].append("clean final contains an embedded subtitle stream while audio.subtitle_source is none")
+            report["ok"] = False
+        if dialogue["mode"] == "native-dialogue" and dialogue["line_count"] and not report["media"].get("has_audio"):
+            report["errors"].append("native-dialogue final has no audio track")
+            report["ok"] = False
+        if dialogue["mode"] == "native-dialogue" and dialogue["line_count"]:
+            report.setdefault("blocking_review_items", []).append(
+                "inspect rendered pixels for model-baked dialogue, captions, or other text; any detected text blocks clean delivery"
+            )
         review_frames = export_review_frames(final_path, review_root, stem="final")
         report["review_frames"] = [
             {**frame, "path": Path(str(frame["path"])).relative_to(root).as_posix()} for frame in review_frames
@@ -1789,8 +2192,8 @@ def init_project(
     video_provider_policy_value: str,
     video_resolution_value: str,
     video_aspect_ratio_value: str,
-    audio_mode_value: str = "preserve",
-    subtitle_source_value: str = "project",
+    audio_mode_value: str = "native-dialogue",
+    subtitle_source_value: str = "none",
 ) -> Path:
     root = root.resolve()
     path = project_file(root)
@@ -1804,6 +2207,7 @@ def init_project(
         {
             "id": f"shot-{index:03d}",
             "summary": "",
+            "shot_role": "medium",
             "scene_id": "",
             "character_ids": [],
             "continuity_notes": "",
@@ -1871,13 +2275,18 @@ def init_project(
             "max_video_requests": max(8, len(shot_durations)),
             "max_total_video_seconds": max(60, sum(shot_durations)),
             "max_reference_images": 9,
-            "max_prompt_chars": HARD_PROMPT_CHARS,
+            "max_prompt_bytes": HARD_PROMPT_BYTES,
         },
         "budget": {
             "currency": "CNY",
             "image_request": 0.0,
             "video_request": 0.0,
             "max_estimated_cost": None,
+        },
+        "retry_policy": {
+            "max_total_attempts": 3,
+            "max_retries": 2,
+            "counts_provider_failover": True,
         },
         "postproduction": {
             "music": "",
@@ -2308,9 +2717,8 @@ def resolve_project_audio_options(
     selected_mode = str(audio_mode or "").strip().lower()
     selected_source = str(subtitle_source or "").strip().lower()
     selected_profile = str(install_profile or "").strip()
-    # An installer-selected profile is the default for new projects. A
-    # command-line profile still wins, and an isolated test/portable checkout
-    # with no profile file retains the historical project-subtitle default.
+    # An installer-selected profile is the default for new projects. Without a
+    # profile, v2 projects use upstream dialogue and no generated subtitle.
     if not selected_profile and install_profile_settings_path().is_file():
         selected_profile = str(load_install_profile().get("profile", "")).strip()
     if selected_profile:
@@ -2319,7 +2727,7 @@ def resolve_project_audio_options(
             selected_mode = str(plan["audio_mode"])
         if not selected_source:
             selected_source = str(plan["subtitle_source"])
-    return selected_mode or "preserve", selected_source or "project"
+    return selected_mode or "native-dialogue", selected_source or "none"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2352,7 +2760,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     # Aliases such as full-dialogue are resolved by install_profiles.py so old
     # automation can keep using the command after the profile rename.
-    install_plan.add_argument("--profile", default="basic")
+    install_plan.add_argument("--profile", default="upstream-dialogue")
     install_configure = commands.add_parser(
         "install-configure", help="Persist the selected capability profile without storing provider secrets."
     )
@@ -2947,7 +3355,7 @@ def main() -> int:
                             "errors": errors,
                         }
                         if args.command == "series-preflight":
-                            result["preflight"] = preflight_report(project)
+                            result["preflight"] = preflight_report(project, project_root)
                             result["audit"] = audit_project(project_root, project)
                     except SkillError as error:
                         result = {"id": episode_id, "ok": False, "errors": [str(error)]}
@@ -3165,7 +3573,7 @@ def main() -> int:
                     "ok": not errors,
                     "project": str(root),
                     "errors": errors,
-                    "preflight": preflight_report(context["project"]),
+                    "preflight": preflight_report(context["project"], root),
                     "audit": audit_project(root, context["project"]),
                     "news": context["news"],
                 }
@@ -3241,17 +3649,22 @@ def main() -> int:
         if args.command == "subtitles":
             root = args.project.resolve()
             project = require_valid_project(root)
+            if (
+                args.burn
+                and audio_config(project)["mode"] == "native-dialogue"
+                and dialogue_preflight(project)["line_count"]
+                and not args.confirm_source_clean
+            ):
+                raise SkillError(
+                    "native-dialogue providers may bake captions into pixels; inspect the source video first, then re-run with "
+                    "--confirm-source-clean only when the source is visually caption-free"
+                )
             subtitle_source = resolve_subtitle_source(project, args.source)
             if args.output_video and not args.burn:
                 raise SkillError("--output-video requires --burn")
             if args.burn and subtitle_source != "project":
                 raise SkillError(
                     f"subtitle source {subtitle_source!r} has no local SRT to burn; use --source project for a deterministic subtitle copy"
-                )
-            if args.burn and audio_config(project)["mode"] == "native-dialogue" and not args.confirm_source_clean:
-                raise SkillError(
-                    "native-dialogue providers may bake captions into pixels; inspect the source video first, then re-run with "
-                    "--confirm-source-clean only when the source is visually caption-free"
                 )
             subtitle_result: dict[str, Any] = {"source": subtitle_source, "preserved": subtitle_source == "upstream"}
             if subtitle_source == "project":
@@ -3324,7 +3737,7 @@ def main() -> int:
                     "ok": not errors,
                     "project": str(root),
                     "errors": errors,
-                    "preflight": preflight_report(project),
+                    "preflight": preflight_report(project, root),
                     "audit": audit_project(root, project),
                 }
             )

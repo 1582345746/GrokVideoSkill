@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from gvs_common import SkillError, atomic_write_json, load_settings, read_json
 from media_client import QuickAIImageClient, save_image_bytes
+from provider_contracts import REPAIRABLE_INPUT_CATEGORIES, classify_provider_error
 from voice_contracts import canonical_voice_contract, duplicate_voice_errors, validate_voice_contract
 
 
@@ -20,8 +21,11 @@ EPISODE_ID_RE = re.compile(r"^ep-[0-9]{3,4}$")
 ASSET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 EPISODE_STATUSES = {"draft", "approved", "generating", "needs_review", "completed", "failed"}
-MAX_PROMPT_CHARS = 4096
-SAFE_PROMPT_CHARS = 3800
+HARD_PROMPT_BYTES = 4096
+SAFE_PROMPT_BYTES = 3800
+# Compatibility aliases for v1 callers; v2 enforcement is UTF-8 bytes.
+MAX_PROMPT_CHARS = HARD_PROMPT_BYTES
+SAFE_PROMPT_CHARS = SAFE_PROMPT_BYTES
 AUDIO_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
 
@@ -146,8 +150,8 @@ def create_series_contract(
     video_size: str,
     video_resolution: str,
     video_aspect_ratio: str,
-    audio_mode: str = "preserve",
-    subtitle_source: str = "project",
+    audio_mode: str = "native-dialogue",
+    subtitle_source: str = "none",
 ) -> dict[str, Any]:
     root = root.resolve()
     if series_file(root).exists() or series_state_file(root).exists():
@@ -173,10 +177,16 @@ def create_series_contract(
     ]
     series = {
         "version": SERIES_VERSION,
+        "contract_version": "2.0",
         "id": re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:64] or "video-series",
         "title": title.strip(),
         "premise": premise.strip(),
         "season_arc": "",
+        "season_theme": "",
+        "conflict_escalation": "",
+        "midpoint": "",
+        "climax": "",
+        "ending_hook": "",
         "style_bible": "",
         "locations": [],
         "props": [],
@@ -200,6 +210,7 @@ def create_series_contract(
             "video_aspect_ratio": video_aspect_ratio,
         },
         "limits": {"max_character_image_requests": 20, "max_episodes": 100},
+        "retry_policy": {"max_total_attempts": 3, "max_retries": 2, "counts_provider_failover": True},
         "episodes": episodes,
     }
     atomic_write_json(series_file(root), series)
@@ -236,11 +247,16 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
             errors.append(f"series.{name} is required")
     if _contains_secret(series):
         errors.append("series contains a credential-like field; credentials must stay outside projects")
+    if series.get("contract_version", "2.0") != "2.0":
+        errors.append("series.contract_version must be 2.0")
+    for field in ("season_arc", "season_theme", "conflict_escalation", "midpoint", "climax", "ending_hook", "style_bible"):
+        if series.get(field) is not None and not isinstance(series.get(field), str):
+            errors.append(f"series.{field} must be a string")
     audio = series.get("audio") if isinstance(series.get("audio"), dict) else {}
     if series.get("audio") is not None and not isinstance(series.get("audio"), dict):
         errors.append("series.audio must be an object")
     audio_mode = str(audio.get("mode", "preserve")).strip().lower()
-    subtitle_source = str(audio.get("subtitle_source", "project")).strip().lower() or "project"
+    subtitle_source = str(audio.get("subtitle_source", "none")).strip().lower() or "none"
     if audio_mode not in AUDIO_MODES:
         errors.append("series.audio.mode is invalid")
     generate_audio = bool(audio.get("generate_audio", audio_mode == "native-dialogue"))
@@ -260,6 +276,23 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         errors.append("series.defaults.video_provider must be quickai or quickainew")
     if defaults.get("video_provider_policy", "automatic") not in {"automatic", "fixed"}:
         errors.append("series.defaults.video_provider_policy must be automatic or fixed")
+    retry_policy = series.get("retry_policy") if isinstance(series.get("retry_policy"), dict) else {}
+    try:
+        max_attempts = int(retry_policy.get("max_total_attempts", 3))
+        if max_attempts < 1:
+            raise ValueError
+    except (TypeError, ValueError):
+        max_attempts = 3
+        errors.append("series.retry_policy.max_total_attempts must be a positive integer")
+    try:
+        max_retries = int(retry_policy.get("max_retries", max_attempts - 1))
+        if max_retries < 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        max_retries = max_attempts - 1
+        errors.append("series.retry_policy.max_retries must be a non-negative integer")
+    if max_retries + 1 > max_attempts:
+        errors.append("series.retry_policy.max_total_attempts must be at least max_retries + 1")
     characters = series.get("characters", [])
     if not isinstance(characters, list):
         errors.append("series.characters must be an array")
@@ -305,10 +338,10 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
             if bool(master["generate"]) and not str(master.get("prompt", "")).strip():
                 errors.append(f"{prefix}.master.prompt is required when generate is true")
             elif bool(master["generate"]):
-                prompt = series_character_prompt(series, character)
-                if len(prompt) > MAX_PROMPT_CHARS:
+                variants = series_character_prompt_variants(series, character)
+                if min(len(value.encode("utf-8")) for value in variants.values()) > HARD_PROMPT_BYTES:
                     errors.append(
-                        f"{prefix}.master composed prompt has {len(prompt)} characters; maximum is {MAX_PROMPT_CHARS}"
+                        f"{prefix}.master minimum prompt exceeds {HARD_PROMPT_BYTES} UTF-8 bytes; shorten identity, wardrobe, or master prompt"
                     )
             sources = master.get("source_references", [])
             if not isinstance(sources, list) or not all(isinstance(item, str) and item.strip() for item in sources):
@@ -372,7 +405,26 @@ def episode_contract_digest(root: Path, series: dict[str, Any], episode: dict[st
     project_root = episode_root(root, episode)
     creative_series = {
         key: series.get(key)
-        for key in ("version", "id", "title", "premise", "season_arc", "style_bible", "locations", "props", "characters", "audio", "defaults")
+        for key in (
+            "version",
+            "contract_version",
+            "id",
+            "title",
+            "premise",
+            "season_arc",
+            "season_theme",
+            "conflict_escalation",
+            "midpoint",
+            "climax",
+            "ending_hook",
+            "style_bible",
+            "locations",
+            "props",
+            "characters",
+            "audio",
+            "defaults",
+            "retry_policy",
+        )
     }
     value = {
         "series": creative_series,
@@ -425,6 +477,11 @@ def sync_episode_contract(
     project["series_context"] = {
         "series_id": series.get("id", ""),
         "series_title": series.get("title", ""),
+        "season_theme": str(series.get("season_theme", "")).strip(),
+        "conflict_escalation": str(series.get("conflict_escalation", "")).strip(),
+        "midpoint": str(series.get("midpoint", "")).strip(),
+        "climax": str(series.get("climax", "")).strip(),
+        "ending_hook": str(series.get("ending_hook", "")).strip(),
         "episode_id": episode.get("id", ""),
         "episode_number": episode.get("number"),
         "continuity_in": str(episode.get("continuity_in", "")).strip(),
@@ -558,7 +615,7 @@ def approve_episode(root: Path, episode_id: str) -> dict[str, Any]:
     if blockers:
         raise SkillError(f"complete earlier episode(s) before approving {episode_id}: {', '.join(blockers)}")
     runtime = _episode_runtime(state, episode_id)
-    if runtime.get("status") not in {"draft", "approved"}:
+    if runtime.get("status") not in {"draft", "approved", "failed"}:
         raise SkillError(f"{episode_id} cannot be approved from status {runtime.get('status')}")
     runtime.update({"status": "approved", "approved_at": int(time.time()), "error": ""})
     runtime["approved_contract_sha256"] = episode_contract_digest(root, series, episode)
@@ -775,7 +832,19 @@ def series_context(root: Path, episode_id: str | None = None) -> dict[str, Any]:
                         for key in (
                             "id",
                             "summary",
+                            "shot_role",
                             "scene_id",
+                            "location",
+                            "time",
+                            "weather",
+                            "lighting",
+                            "props",
+                            "camera",
+                            "camera_motion",
+                            "environment_motion",
+                            "ending_pose",
+                            "environment_sound",
+                            "sound_effects",
                             "character_ids",
                             "continuity_notes",
                             "image_prompt",
@@ -792,7 +861,24 @@ def series_context(root: Path, episode_id: str | None = None) -> dict[str, Any]:
     return {
         "series": {
             key: series.get(key)
-            for key in ("id", "title", "premise", "season_arc", "style_bible", "locations", "props", "characters", "defaults")
+            for key in (
+                "id",
+                "title",
+                "premise",
+                "season_arc",
+                "season_theme",
+                "conflict_escalation",
+                "midpoint",
+                "climax",
+                "ending_hook",
+                "style_bible",
+                "locations",
+                "props",
+                "characters",
+                "defaults",
+                "audio",
+                "retry_policy",
+            )
         },
         "planned_episodes": planned,
         "previous_episodes": previous,
@@ -823,10 +909,45 @@ def series_character_prompt(series: dict[str, Any], character: dict[str, Any]) -
     return "\n\n".join(section for section in sections if section.split("\n", 1)[-1].strip())
 
 
+def series_character_prompt_variants(series: dict[str, Any], character: dict[str, Any]) -> dict[str, str]:
+    full = series_character_prompt(series, character)
+    identity = str(character.get("identity", "")).strip()
+    wardrobe = str(character.get("wardrobe", "")).strip()
+    master = series_character_master_config(series, character)
+    compact = "\n".join(
+        item
+        for item in (
+            f"Identity: {identity}" if identity else "",
+            f"Wardrobe: {wardrobe}" if wardrobe else "",
+            f"Master: {str(master.get('prompt', '')).strip()}" if str(master.get("prompt", "")).strip() else "",
+            "Clean single-sheet turnaround; one person; consistent face, hair, clothing, proportions, and signature props.",
+        )
+        if item
+    )
+    minimal = "Clean single-sheet character master. " + ". ".join(
+        item for item in (f"Identity: {identity}" if identity else "", f"Wardrobe: {wardrobe}" if wardrobe else "") if item
+    )
+    return {"full": full, "compact": compact, "minimal": minimal}
+
+
+def select_series_prompt_variant(variants: dict[str, str], *, preferred: str = "", hard_limit: int = HARD_PROMPT_BYTES) -> tuple[str, str]:
+    order = [name for name in ("full", "compact", "minimal") if name in variants]
+    if preferred in order:
+        order = order[order.index(preferred):]
+    for name in order:
+        if len(variants[name].encode("utf-8")) <= SAFE_PROMPT_BYTES:
+            return name, variants[name]
+    minimal = variants.get("minimal", "")
+    if len(minimal.encode("utf-8")) <= hard_limit:
+        return "minimal", minimal
+    raise SkillError(f"minimum series character prompt exceeds {hard_limit} UTF-8 bytes")
+
+
 def series_character_preflight(root: Path, series: dict[str, Any] | None = None) -> dict[str, Any]:
     series = series or load_series(root)
     state = load_series_state(root, series)
     prompts = []
+    warnings: list[str] = []
     pending_requests = 0
     planned_requests = 0
     for character in character_records(series):
@@ -838,23 +959,42 @@ def series_character_preflight(root: Path, series: dict[str, Any] | None = None)
         runtime = (state.get("characters", {}).get(character_id) or {})
         if runtime.get("status") != "completed":
             pending_requests += 1
-        prompt = series_character_prompt(series, character)
+        variants = series_character_prompt_variants(series, character)
+        selection_error = ""
+        try:
+            selected, prompt = select_series_prompt_variant(variants)
+        except SkillError as error:
+            selected, prompt = "minimal", variants.get("minimal", "")
+            selection_error = str(error)
         prompts.append(
             {
                 "kind": "series_character_master",
                 "id": character_id,
                 "status": runtime.get("status", "pending"),
+                "versions": {
+                    name: {"characters": len(value), "utf8_bytes": len(value.encode("utf-8")), "text": value}
+                    for name, value in variants.items()
+                },
+                "selected_version": selected,
                 "characters": len(prompt),
-                "hard_limit": MAX_PROMPT_CHARS,
-                "safe_limit": SAFE_PROMPT_CHARS,
-                "remaining": MAX_PROMPT_CHARS - len(prompt),
-                "within_hard_limit": len(prompt) <= MAX_PROMPT_CHARS,
+                "utf8_bytes": len(prompt.encode("utf-8")),
+                "hard_limit": HARD_PROMPT_BYTES,
+                "safe_limit": SAFE_PROMPT_BYTES,
+                "remaining": HARD_PROMPT_BYTES - len(prompt.encode("utf-8")),
+                "within_hard_limit": len(prompt.encode("utf-8")) <= HARD_PROMPT_BYTES,
+                "selection_error": selection_error,
+                "compression_needed": selected != "full",
             }
         )
+        if selection_error:
+            warnings.append(f"{character_id}: {selection_error}")
+        elif selected != "full":
+            warnings.append(f"{character_id}: full character prompt exceeds the safe budget; selected {selected} UTF-8 variant")
     return {
         "planned_character_master_images": planned_requests,
         "pending_character_master_images": pending_requests,
         "prompts": prompts,
+        "warnings": warnings,
     }
 
 
@@ -913,7 +1053,12 @@ def generate_series_characters(
             skipped.append(character_id)
             continue
         references = [resolve_series_path(root, value) for value in master.get("source_references", [])]
-        prompt = series_character_prompt(series, character)
+        prompt_variants = series_character_prompt_variants(series, character)
+        prompt_version, prompt = select_series_prompt_variant(
+            prompt_variants,
+            preferred=str(runtime.get("prompt_version_override", "")),
+            hard_limit=HARD_PROMPT_BYTES,
+        )
         size = str(master.get("image_size", "1024x1024"))
         quality = str(master.get("image_quality", "auto"))
         current_signature = _file_signature(
@@ -925,6 +1070,13 @@ def generate_series_characters(
             skipped.append(character_id)
             continue
         attempts = int(runtime.get("attempts", 0))
+        retry_policy = series.get("retry_policy") if isinstance(series.get("retry_policy"), dict) else {}
+        try:
+            max_attempts = max(1, int(retry_policy.get("max_total_attempts", 3)))
+        except (TypeError, ValueError) as error:
+            raise SkillError("series.retry_policy.max_total_attempts must be a positive integer") from error
+        if attempts >= max_attempts:
+            raise SkillError(f"character master reached max_total_attempts={max_attempts} for {character_id}")
         if attempts > 0 and not retry_failed:
             raise SkillError(
                 f"character master was already attempted for {character_id}; use --retry-failed with a reason to authorize another billable request"
@@ -935,6 +1087,10 @@ def generate_series_characters(
                 "attempts": attempts + 1,
                 "signature": current_signature,
                 "error": "",
+                "prompt_original": prompt_variants["full"],
+                "prompt_versions": prompt_variants,
+                "prompt_version": prompt_version,
+                "prompt_utf8_bytes": len(prompt.encode("utf-8")),
                 "retry_reason": retry_reason.strip() if attempts else "",
             }
         )
@@ -961,9 +1117,28 @@ def generate_series_characters(
             if on_progress:
                 on_progress({"phase": "series_character", "character_id": character_id, "status": "completed"})
         except Exception as error:
-            runtime.update({"status": "failed", "error": str(error)[:1000]})
+            category = classify_provider_error(error, phase="create", task_known=False)
+            runtime.update({"status": "failed", "error": str(error)[:1000], "error_category": category})
             save_series_state(root, state)
             write_series_event(root, {"kind": "character_master_failed", "character_id": character_id, "error": str(error)[:1000]})
+            if category in REPAIRABLE_INPUT_CATEGORIES and runtime["attempts"] < max_attempts:
+                order = ("full", "compact", "minimal")
+                current_index = order.index(prompt_version) if prompt_version in order else -1
+                runtime["prompt_version_override"] = next(
+                    (candidate for candidate in order[current_index + 1:] if len(prompt_variants[candidate].encode("utf-8")) <= HARD_PROMPT_BYTES),
+                    "minimal",
+                )
+                runtime.setdefault("history", []).append(
+                    {"at": int(time.time()), "reason": f"automatic prompt repair: {category}", "attempts": runtime["attempts"], "error_category": category}
+                )
+                save_series_state(root, state)
+                return generate_series_characters(
+                    root,
+                    character_ids=requested,
+                    retry_failed=True,
+                    retry_reason=f"automatic prompt repair: {category}",
+                    on_progress=on_progress,
+                )
             raise
     synced = sync_all_episode_contracts(root, series)
     return {"completed": completed, "skipped": skipped, "synced_episodes": synced}

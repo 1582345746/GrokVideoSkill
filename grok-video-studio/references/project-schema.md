@@ -32,11 +32,12 @@
     }
   }],
   "audio": {
-    "mode": "local-voice",
+    "mode": "native-dialogue",
     "language": "zh-CN",
-    "generate_audio": false,
+    "generate_audio": true,
     "preserve_source_audio": true,
-    "duck_source_audio": true
+    "duck_source_audio": true,
+    "subtitle_source": "none"
   },
   "character_master": {
     "enabled": true,
@@ -63,7 +64,12 @@
     "max_video_requests": 8,
     "max_total_video_seconds": 60,
     "max_reference_images": 9,
-    "max_prompt_chars": 4096
+    "max_prompt_bytes": 4096
+  },
+  "retry_policy": {
+    "max_total_attempts": 3,
+    "max_retries": 2,
+    "counts_provider_failover": true
   },
   "budget": {
     "currency": "CNY",
@@ -74,7 +80,19 @@
   "shots": [{
     "id": "shot-001",
     "summary": "What happens",
+    "shot_role": "medium",
     "scene_id": "office",
+    "location": "Office",
+    "time": "late afternoon",
+    "weather": "clear",
+    "lighting": "soft window light",
+    "props": ["phone"],
+    "camera": "medium shot",
+    "camera_motion": "slow push-in",
+    "environment_motion": "curtains move gently",
+    "ending_pose": "hands resting at the desk",
+    "environment_sound": "quiet room tone",
+    "sound_effects": [],
     "character_ids": ["lead"],
     "continuity_notes": "Keep wardrobe, eyeline, lighting, and prop position from the previous shot",
     "narration": "",
@@ -116,7 +134,7 @@ Every character selected by `shot.character_ids` also contributes its `character
 
 ## Limits and state
 
-Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed 4096 characters; 3800 is the recommended working ceiling. Limits are hard preflight gates and request counts include a generated character master.
+Every clip is 1-15 seconds. Final composed image, video, and character-master prompts cannot exceed 4096 UTF-8 bytes; 3800 is the recommended working ceiling. Preflight exposes full/compact/minimal versions and remaining byte space. Limits are hard preflight gates and request counts include a generated character master.
 
 `video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to QuickAI plus `automatic`. Supplying `--video-provider quickai|quickainew` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic QuickAI safely fails and the QuickAI New video key is configured, the runtime records a separate provider attempt and can continue with QuickAI New. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
 
@@ -126,7 +144,11 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 `audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
 
-`audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. Older projects without this field use `project` for backwards compatibility. This setting is independent from `audio.mode`.
+`audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. New projects default to `none`; older projects without this field retain `project` for backwards compatibility. This setting is independent from `audio.mode`.
+
+`retry_policy.max_total_attempts` defaults to three total billable attempts (initial request plus two retries). `max_retries` must not imply more attempts than this total; configure four total attempts explicitly when three retries are required. Provider failover consumes one of the same attempts. `submission_unknown` is never recreated automatically.
+
+Video reference/edit/extend and audio reference are separate future capabilities. Current `image_references` and `video_references` accept still images only; MP4/WAV files are blocked during validation rather than silently ignored.
 
 New projects can inherit this pair from an installation profile with `init`, `series-init`, or `news-init --install-profile <profile>`. The profile is only a default; explicit project flags override it, and changing the installation profile never rewrites existing projects.
 

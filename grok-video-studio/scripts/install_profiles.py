@@ -77,7 +77,7 @@ def _dependency_status(dependency: str) -> dict[str, Any]:
     }
 
 
-def install_profile_plan(profile: str = "basic") -> dict[str, Any]:
+def install_profile_plan(profile: str = "upstream-dialogue") -> dict[str, Any]:
     canonical, value = resolve_install_profile(profile)
     dependencies = [_dependency_status(str(item)) for item in value.get("dependencies", [])]
     missing = [item["id"] for item in dependencies if not item["installed"]]
@@ -128,7 +128,7 @@ def save_install_profile(profile: str) -> dict[str, Any]:
 def load_install_profile() -> dict[str, Any]:
     path = install_profile_settings_path()
     if not path.is_file():
-        return {"version": PROFILE_SETTINGS_VERSION, "profile": "basic", "component_profile": "core"}
+        return {"version": PROFILE_SETTINGS_VERSION, "profile": "upstream-dialogue", "component_profile": "native-dialogue"}
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:

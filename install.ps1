@@ -10,7 +10,7 @@ param(
     [switch]$ConfigureFromStdin,
     [switch]$SkipProviderTest,
     [ValidateSet("basic", "upstream-dialogue", "precise-subtitles", "precise-voice", "lip-sync")]
-    [string]$InstallProfile = "basic",
+    [string]$InstallProfile = "upstream-dialogue",
     [switch]$Interactive,
     [ValidateSet("core", "native-dialogue", "local-voice", "full-dialogue")]
     [string]$ComponentProfile = "core",
@@ -61,7 +61,7 @@ if ($Check) {
     if ($LASTEXITCODE -ne 0) {
         throw "Installed Skill did not pass the version check."
     }
-    & $Python $installedCli install-plan --profile basic
+    & $Python $installedCli install-plan --profile upstream-dialogue
     if ($LASTEXITCODE -ne 0) {
         throw "Installed Skill install-plan check failed."
     }
