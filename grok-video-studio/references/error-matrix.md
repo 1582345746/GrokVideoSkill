@@ -14,6 +14,8 @@
 | Video receives a multi-view character sheet | Reference selection | Generate a per-shot keyframe from the sheet and send only that keyframe to image-to-video. |
 | `429` | Rate or account limit | Wait before a new create; polling may use backoff. |
 | `502`, `503`, `context deadline exceeded` | Gateway/upstream | Treat create as ambiguous if no task ID was returned. Do not automatically create again. |
+| QuickAI task reaches a confirmed provider failure | Provider task | Record the failed QuickAI attempt, then automatically continue with QuickAI New only when its video key is configured and the failure is not content/account/input related. |
+| QuickAI create is rejected as unsupported or rate-limited before a task exists | Provider routing | It is safe to record a separate QuickAI New attempt. Keep the same internal request ID and a new attempt ID. |
 | `provider circuit is open` | Repeated idempotent reads failed | Wait for the reported cooldown, verify provider health, then resume. No create request was retried. |
 | Budget gate blocked | Project cost control | Raise the ceiling, lower request counts/rates, or stop. The blocked request was not sent. |
 | Completed status but no playable file | Result retrieval | Retry `/content`, then an advertised HTTPS result URL; verify MP4 bytes. |
@@ -29,7 +31,7 @@
 | News claim lacks support | News evidence gate | Add one primary source or two independent sources from distinct publishers; remove unsupported wording from the script. |
 | Subtitle text is garbled in generated footage | Generation prompt | Keep upstream clean-frame rules enabled. Export SRT and use local `subtitles --burn` instead of asking the model to draw text. |
 | Subtitle timing is inaccurate after adding voice | Post-production | Replace shot-level cues with word/sentence timestamps from the final TTS or voice track, then burn a new subtitled copy. |
-| I2V reference field rejected | Provider contract | Verify QuickAI JSON uses `input_reference` for one image or `reference_images` for multiple; QuickAI New uses repeated multipart `input_reference`. |
+| I2V reference field rejected | Provider contract | Verify QuickAI JSON uses `image.url` for one first-frame image or `reference_images[].url` for multiple guidance images; QuickAI New uses repeated multipart `input_reference`. |
 | `ffprobe` or assembly validation fails | Local media QA | Install FFmpeg/FFprobe, inspect the reported stream metadata, and normalize clips before assembling. |
 | Browser history lacks the task | Expected direct mode behavior | The local project is the source of truth; direct Skill tasks do not enter Canvas IndexedDB. |
 

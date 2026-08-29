@@ -2,7 +2,7 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v1.8.0`，仓库只使用 `main` 分支。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v1.9.0`，仓库只使用 `main` 分支。
 
 它把剧本、分镜、付费请求、断点恢复、连续性、字幕、对白、口型和交付 QA 放进同一个可审计项目，而不是让 Codex 临时拼接若干不可恢复的生成命令。
 
@@ -11,11 +11,13 @@
 | 路线 | 适用场景 | 默认生成链路 |
 | --- | --- | --- |
 | 文生视频 | 单条视频、多镜头故事、无参考图创作 | QuickAI 文生视频 |
-| 图生视频 | 用户现成图片动画、产品图、角色母版和镜头关键帧 | QuickAI 生图 + QuickAI New 图生视频 |
+| 图生视频 | 用户现成图片动画、产品图、角色母版和镜头关键帧 | QuickAI 生图 + QuickAI 图生视频，安全失败时备用 QuickAI New |
 | 连续剧 | 多集共享角色、世界观和剧情连续性 | 每集使用文生视频或图生视频，逐集审批与验收 |
 | 新闻视频 | 当前热点、来源核验、旁白型资讯视频 | Codex 联网检索并建立证据合同，再进入标准视频链路 |
 
 用户现成图片的动画属于图生视频，不是第五条产品路线。
+
+文生视频和图生视频在未指定上游时都以 QuickAI 为主，并只在安全分类的失败后使用 QuickAI New。用户明确说“生视频选择 QuickAI New”时，新项目必须传入 `--video-provider quickainew` 并固定走 QuickAI New，不先调用 QuickAI；明确选择 QuickAI 时同理。只有用户要求自动备用链时才使用 `--video-provider-policy automatic`。
 
 ## 核心能力
 
@@ -32,6 +34,8 @@
 
 推荐直接让 Codex 从仓库安装或更新。独立安装器路线已经冻结，代码仍保留，但不再作为优先分发方式。
 
+完整的复制即用安装、升级、上游选择和制作话术见 [用户安装与使用话术](docs/user-installation-and-usage-prompts.zh-CN.md)。
+
 ### 新用户安装话术
 
 把下面内容连同自己的 Key 发给 Codex。不要把真实 Key 提交到 GitHub、项目 JSON 或文档中。
@@ -42,7 +46,7 @@
 
 QuickAI 生图 Key：<QUICKAI_IMAGE_KEY>
 QuickAI 文生视频 Key：<QUICKAI_VIDEO_KEY>
-QuickAI New 图生视频 Key：<QUICKAINEW_VIDEO_KEY>
+QuickAI New 视频 Key：<QUICKAINEW_VIDEO_KEY>
 
 要求：
 1. 使用仓库根目录 install.ps1 安装 basic 档位。
@@ -78,7 +82,7 @@ cd GrokVideoSkill
 | --- | --- |
 | QuickAI 生图 Key | 角色母版和镜头关键帧 |
 | QuickAI 文生视频 Key | 无参考图的文生视频 |
-| QuickAI New 图生视频 Key | 用户图片或当前镜头关键帧的动画 |
+| QuickAI New 视频 Key | QuickAI 视频安全失败后的备用，或显式指定的文生/图生视频 |
 
 Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，不进入技能目录。旧版 `quickai_key` 和 `quickainew_key` 配置仍可迁移，但新安装应按职责分开配置。
 
@@ -92,6 +96,8 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 | `precise-voice` | CosyVoice 精确配音、时间轴、混音和字幕 | Docker、NVIDIA GPU、约 10 GB 模型空间 |
 | `lip-sync` | 精确配音并使用 MuseTalk 修正人物口型 | Docker、NVIDIA GPU、约 17 GB 模型空间 |
 
+多角色预设音色采用同一条代码主线中的 Voicebox 路线，不另建第二套技能。先运行无副作用的 `voicebox-setup-plan`，由 Codex 报告源码提交、隔离 Python、GPU、缓存、固定模型 revision、许可证和预计下载量；用户批准后再由 Codex 分阶段安装、启动和试听。基础技能更新不捆绑模型权重，用户无需逐项手动安装。
+
 `precise-subtitles` 根据项目中的对白、旁白或字幕时间轴生成确定性字幕，不等同于对任意视频执行语音识别。可选组件必须先展示安装计划，并在用户明确批准后才下载或启动；服务只监听 `127.0.0.1`。
 
 ## 音频与字幕
@@ -103,7 +109,7 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 | `preserve` | 保留上游或用户源视频音频 |
 | `mute` | 明确交付静音版本 |
 | `native-dialogue` | 上游生成对白、声音和口型，速度快但逐字内容与内嵌字幕不可控 |
-| `local-voice` | CosyVoice 按批准文本生成精确对白，FFmpeg 对齐、混音和归一化 |
+| `local-voice` | 按角色选择 Voicebox/Qwen 或 CosyVoice 已批准音色，FFmpeg 对齐、混音和归一化 |
 | `local-lipsync` | 在精确对白基础上调用 MuseTalk 做口型同步 |
 
 字幕来源：
@@ -113,6 +119,8 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 - `none`：不交付字幕。
 
 始终保留 `deliverables/final.mp4` 干净母版。字幕样式不满意时重新烧录即可，不需要重新付费生成视频。上游原生对白可能自行把字幕画进视频，烧录本地字幕前必须先人工确认源画面干净。
+
+多角色音色必须先试听后使用：`voice-list` 列出预设，`voice-audition` 只生成候选 WAV，用户听审后运行 `voice-approve` 或 `voice-reject`，连续剧再运行 `series-voice-sync`。未批准音色、无授权参考音频和不同角色误用同一音色都会阻断预检；所有候选与模型 revision、seed、授权、音频哈希和技术 QA 记录在项目级 `voice-catalog.json`。
 
 ## 四个最常用话术
 
@@ -125,13 +133,19 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 ### 图生视频
 
 ```text
-使用 $grok-video-studio 把我提供的图片制作成 8 秒 9:16 图生视频。不要重新生图，锁定人物身份、服装、构图和背景，只增加自然眨眼、呼吸和轻微转头。先预检并等我批准，再调用 QuickAI New；完成后交付原片和 QA 报告。
+使用 $grok-video-studio 把我提供的图片制作成 8 秒 9:16 图生视频。不要重新生图，锁定人物身份、服装、构图和背景，只增加自然眨眼、呼吸和轻微转头。先预检并等我批准，再优先调用 QuickAI；只有安全分类的失败才自动切换 QuickAI New。完成后交付原片、最终提供方、尝试历史和 QA 报告。
 ```
 
 ### 连续剧
 
 ```text
 使用 $grok-video-studio 规划一部 20 集连续短剧，每集 60-90 秒。先创建系列项目，写完整季大纲、角色设定、每集剧情和分镜提示词供我审核，不要生成。审核后只预检并生成第一集；以后我说“生成下一集”时，先读取上一集验收后的实际结尾和连续性状态，再等待我批准。
+```
+
+连续剧进入配音选角阶段时可继续发送：
+
+```text
+使用 $grok-video-studio 继续这个连续剧项目。先读取 series.json、voice-catalog.json 和第 1 集 project.json，只处理本集实际说话角色。先运行 voicebox-setup-plan 和 voice-doctor，不下载、不启动、不生成正片；报告固定模型、许可证、下载量和本机状态。得到我批准后，为每个角色分别生成试听并把 WAV 给我听，每个候选都等我接受或拒绝。全部通过后运行 series-voice-sync 和 series-preflight --episode ep-001；不要自动生成图片、视频、整集对白或启动 MuseTalk。
 ```
 
 ### 新闻视频
@@ -145,7 +159,10 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 逐模块标准话术、费用边界、操作顺序和验收标准见：
 
 - [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
+- [用户安装与使用话术](docs/user-installation-and-usage-prompts.zh-CN.md)
 - [v1.8.0 开发交接文档](HANDOFF-GROK-VIDEO-STUDIO-v1.8.0.zh-CN.md)
+- [多角色音频模块开发交接清单](docs/voice-module-development-handoff.zh-CN.md)
+- [多角色音频开发清单与当前状态](docs/multi-tts-implementation-status.zh-CN.md)
 - [产品化验收清单](docs/productization-checklist.md)
 - [技能运行说明](grok-video-studio/SKILL.md)
 - [项目字段规范](grok-video-studio/references/project-schema.md)
@@ -160,7 +177,7 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 - 提示词硬上限为 4096 字符，建议把最终合成提示词控制在 3800 字符以内。
 - 文生视频的人物一致性是文本约束下的尽力而为；严格一致性应使用角色母版、逐镜头关键帧和图生视频。
 - `native-dialogue` 的声音、逐字内容、内嵌字幕和口型是生成式结果，不能承诺完全准确。
-- CosyVoice 和 MuseTalk 是可选本地组件，不随基础技能静默安装。
+- Voicebox/Qwen、CosyVoice、VoxCPM 和 MuseTalk 都是可选本地组件，不随基础技能静默安装；VoxCPM 当前仍是实验路线。
 - 精确字幕来自批准文本与时间轴；当前没有把任意带声音视频自动转写成精确字幕的 ASR 产品入口。
 - 技术 QA 不能代替人工观片和听审。人物漂移、异常肢体、意外界面元素、错误对白和不自然口型必须人工确认。
 - 新闻事实必须来自当前网络来源；AI 生成画面不得冒充真实新闻现场。

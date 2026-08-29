@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from gvs_common import SkillError, atomic_write_json, load_settings, read_json
 from media_client import QuickAIImageClient, save_image_bytes
+from voice_contracts import canonical_voice_contract, duplicate_voice_errors, validate_voice_contract
 
 
 SERIES_VERSION = 1
@@ -23,7 +24,6 @@ MAX_PROMPT_CHARS = 4096
 SAFE_PROMPT_CHARS = 3800
 AUDIO_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
-VOICE_CONSENTS = {"synthetic", "owned", "licensed"}
 
 
 def series_file(root: Path) -> Path:
@@ -142,6 +142,7 @@ def create_series_contract(
     workflow: str,
     video_mode: str,
     video_provider: str,
+    video_provider_policy: str,
     video_size: str,
     video_resolution: str,
     video_aspect_ratio: str,
@@ -193,6 +194,7 @@ def create_series_contract(
             "workflow": workflow,
             "video_mode": video_mode,
             "video_provider": video_provider,
+            "video_provider_policy": video_provider_policy,
             "video_size": video_size,
             "video_resolution": video_resolution,
             "video_aspect_ratio": video_aspect_ratio,
@@ -248,11 +250,16 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         errors.append(f"series.audio.generate_audio must be false for {audio_mode}")
     if subtitle_source not in SUBTITLE_SOURCES:
         errors.append("series.audio.subtitle_source must be upstream, project, or none")
+    tts_provider = str(audio.get("tts_provider", "cosyvoice")).strip().lower() or "cosyvoice"
+    if tts_provider not in {"cosyvoice", "voicebox", "voxcpm"}:
+        errors.append("series.audio.tts_provider must be cosyvoice, voicebox, or voxcpm")
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
     if defaults.get("video_mode") not in {"text-to-video", "image-to-video"}:
         errors.append("series.defaults.video_mode must be text-to-video or image-to-video")
     if defaults.get("video_provider") not in {"quickai", "quickainew"}:
         errors.append("series.defaults.video_provider must be quickai or quickainew")
+    if defaults.get("video_provider_policy", "automatic") not in {"automatic", "fixed"}:
+        errors.append("series.defaults.video_provider_policy must be automatic or fixed")
     characters = series.get("characters", [])
     if not isinstance(characters, list):
         errors.append("series.characters must be an array")
@@ -276,16 +283,16 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         if voice is not None and not isinstance(voice, dict):
             errors.append(f"{prefix}.voice must be an object")
         elif isinstance(voice, dict):
-            reference = str(voice.get("reference_audio", "")).strip()
-            if reference:
-                if str(voice.get("consent", "")).strip().lower() not in VOICE_CONSENTS:
-                    errors.append(f"{prefix}.voice.consent must be synthetic, owned, or licensed")
-                if not str(voice.get("reference_text", "")).strip():
-                    errors.append(f"{prefix}.voice.reference_text is required")
-                try:
-                    resolve_series_path(root, reference)
-                except SkillError as error:
-                    errors.append(str(error))
+            errors.extend(
+                validate_voice_contract(
+                    voice,
+                    prefix=f"{prefix}.voice",
+                    default_provider=tts_provider,
+                    resolve_path=lambda value: resolve_series_path(root, value),
+                    require_identity=False,
+                    require_approved=False,
+                )
+            )
         master = series_character_master_config(series, character)
         if bool(master["enabled"]):
             path_value = str(master.get("path", f"assets/character-masters/{character_id}.png")).strip()
@@ -306,6 +313,14 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
             sources = master.get("source_references", [])
             if not isinstance(sources, list) or not all(isinstance(item, str) and item.strip() for item in sources):
                 errors.append(f"{prefix}.master.source_references must be an array of relative paths")
+    errors.extend(
+        duplicate_voice_errors(
+            [item for item in characters if isinstance(item, dict)],
+            default_provider=tts_provider,
+            resolve_path=lambda value: resolve_series_path(root, value),
+            allow_shared=bool(audio.get("allow_shared_voices", False)),
+        )
+    )
     episodes = series.get("episodes", [])
     if not isinstance(episodes, list) or not episodes:
         errors.append("series.episodes must be a non-empty array")
@@ -390,7 +405,13 @@ def _same_file(source: Path, target: Path) -> bool:
     return hashlib.sha256(source.read_bytes()).digest() == hashlib.sha256(target.read_bytes()).digest()
 
 
-def sync_episode_contract(root: Path, series: dict[str, Any], episode: dict[str, Any]) -> dict[str, Any]:
+def sync_episode_contract(
+    root: Path,
+    series: dict[str, Any],
+    episode: dict[str, Any],
+    *,
+    approved_voices_only: bool = False,
+) -> dict[str, Any]:
     project_root = episode_root(root, episode)
     project_path = project_root / "project.json"
     project = read_json(project_path)
@@ -417,6 +438,9 @@ def sync_episode_contract(root: Path, series: dict[str, Any], episode: dict[str,
     project["character_bible"] = canonical_character_bible(series)
     if isinstance(series.get("audio"), dict):
         project["audio"] = dict(series["audio"])
+    defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
+    project["video_provider"] = str(defaults.get("video_provider", "quickai"))
+    project["video_provider_policy"] = str(defaults.get("video_provider_policy", "automatic"))
     if str(series.get("style_bible", "")).strip():
         project["style_bible"] = str(series["style_bible"]).strip()
     old_characters = {
@@ -459,6 +483,14 @@ def sync_episode_contract(root: Path, series: dict[str, Any], episode: dict[str,
         existing["references"] = list(dict.fromkeys(references))
         if isinstance(character.get("voice"), dict):
             voice = dict(character["voice"])
+            if approved_voices_only:
+                default_provider = str((series.get("audio") or {}).get("tts_provider", "cosyvoice"))
+                status = canonical_voice_contract(voice, default_provider)["voice_status"]
+                temporary_allowed = bool((series.get("audio") or {}).get("allow_temporary_voices", False))
+                if status != "approved" and not (status == "temporary-test" and temporary_allowed):
+                    existing.pop("voice", None)
+                    synced_characters.append(existing)
+                    continue
             reference_value = str(voice.get("reference_audio", "")).strip()
             if reference_value:
                 source = resolve_series_path(root, reference_value)
@@ -488,6 +520,17 @@ def sync_all_episode_contracts(root: Path, series: dict[str, Any] | None = None)
         project_root = episode_root(root, episode, must_exist=False)
         if (project_root / "project.json").is_file():
             sync_episode_contract(root, series, episode)
+            synced.append(str(episode.get("id", "")))
+    return synced
+
+
+def sync_approved_episode_voices(root: Path, series: dict[str, Any] | None = None) -> list[str]:
+    series = series or load_series(root)
+    synced = []
+    for episode in episode_records(series):
+        project_root = episode_root(root, episode, must_exist=False)
+        if (project_root / "project.json").is_file():
+            sync_episode_contract(root, series, episode, approved_voices_only=True)
             synced.append(str(episode.get("id", "")))
     return synced
 

@@ -11,7 +11,8 @@
   "workflow_title": "角色一致性故事",
   "workflow_guidance": {},
   "video_mode": "image-to-video",
-  "video_provider": "quickainew",
+  "video_provider": "quickai",
+  "video_provider_policy": "automatic",
   "target_duration_seconds": 18,
   "story": "Short screenplay",
   "character_bible": "Concise stable identity, clothing, and props",
@@ -117,7 +118,7 @@ Every character selected by `shot.character_ids` also contributes its `character
 
 Every clip is 1-15 seconds. Final composed image and video prompts cannot exceed 4096 characters; 3800 is the recommended working ceiling. Limits are hard preflight gates and request counts include a generated character master.
 
-`video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`. New text-to-video projects default to QuickAI and do not generate keyframes. New image-to-video projects default to QuickAI New. Projects created before these fields existed retain the legacy image-to-video plus QuickAI New interpretation. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+`video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to QuickAI plus `automatic`. Supplying `--video-provider quickai|quickainew` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic QuickAI safely fails and the QuickAI New video key is configured, the runtime records a separate provider attempt and can continue with QuickAI New. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
 
 New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536x1024`, `9:16`/`3:4`/`2:3` use `1024x1536`, and `1:1` uses `1024x1024`. Character master sheets remain square. Preflight warns when a generated keyframe's orientation conflicts with its target video aspect ratio because that mismatch increases cropping and composition drift.
 
@@ -129,7 +130,9 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 New projects can inherit this pair from an installation profile with `init`, `series-init`, or `news-init --install-profile <profile>`. The profile is only a default; explicit project flags override it, and changing the installation profile never rewrites existing projects.
 
-Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. Paths must be project-relative and stay inside the project.
+Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. `request_id` stays stable across safe provider fallback, while every billable write has a distinct `attempt_id` under `provider_attempts`. Paths must be project-relative and stay inside the project.
+
+`review-shot` records the reviewed file SHA-256, decision, notes, and timestamp. An approved image is marked `locked=true`; a rejected image or video keeps its original asset and task metadata but moves to a failed review state. Regeneration then requires the normal explicit retry reason.
 
 ## Narration and subtitles
 

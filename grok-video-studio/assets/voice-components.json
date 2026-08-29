@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "providers": {
+    "voicebox": {
+      "title": "Voicebox local TTS service",
+      "repository": "https://github.com/jamiepine/voicebox.git",
+      "commit": "51f49dea198384b4eb6087b72c17057c6eb1c1cd",
+      "license": "MIT",
+      "python": "3.12",
+      "service_url": "http://127.0.0.1:17493",
+      "service_environment": {
+        "HF_HUB_OFFLINE": "1"
+      },
+      "models": [
+        {
+          "id": "qwen-custom-voice-0.6b",
+          "repository": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+          "revision": "85e237c12c027371202489a0ec509ded67b5e4b5",
+          "license": "Apache-2.0",
+          "estimated_size_gb": 2.5,
+          "required_patterns": [
+            "config.json",
+            "model.safetensors",
+            "speech_tokenizer/config.json",
+            "speech_tokenizer/model.safetensors"
+          ],
+          "engine": "qwen_custom_voice",
+          "model_size": "0.6B",
+          "supported_chinese_presets": ["Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric"]
+        }
+      ]
+    },
+    "voxcpm": {
+      "title": "VoxCPM experimental voice design",
+      "repository": "https://github.com/OpenBMB/VoxCPM.git",
+      "commit": "f5a1c6a6b901bc732e20f0d59a369f6829ad717a",
+      "license": "Apache-2.0",
+      "service_url": "http://127.0.0.1:9882",
+      "experimental": true
+    }
+  }
+}

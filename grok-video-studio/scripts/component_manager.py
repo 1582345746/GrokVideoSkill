@@ -231,6 +231,8 @@ def save_component_settings(
     models_root: Path | None = None,
     cosyvoice_url: str | None = None,
     musetalk_url: str | None = None,
+    voicebox_url: str | None = None,
+    voxcpm_url: str | None = None,
 ) -> dict[str, Any]:
     manifest = load_manifest()
     if profile not in manifest["profiles"]:
@@ -242,7 +244,12 @@ def save_component_settings(
     if models_root is not None:
         settings["models_root"] = str(models_root.expanduser().resolve())
     services = settings.setdefault("services", {})
-    for name, value in (("cosyvoice", cosyvoice_url), ("musetalk", musetalk_url)):
+    for name, value in (
+        ("cosyvoice", cosyvoice_url),
+        ("musetalk", musetalk_url),
+        ("voicebox", voicebox_url),
+        ("voxcpm", voxcpm_url),
+    ):
         if value is not None:
             normalized = normalize_base_url(value)
             hostname = urllib.parse.urlsplit(normalized).hostname

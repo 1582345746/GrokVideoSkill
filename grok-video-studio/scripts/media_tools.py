@@ -19,6 +19,17 @@ SUBTITLE_STYLES = {
 }
 
 
+def _frame_rate(value: Any) -> float:
+    text = str(value or "").strip()
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            return round(float(numerator) / float(denominator), 3) if float(denominator) else 0.0
+        return round(float(text), 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
+
+
 def _run(command: list[str], action: str, *, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
     if result.returncode != 0:
@@ -56,13 +67,42 @@ def probe_media(path: Path) -> dict[str, Any]:
         raise SkillError(f"invalid media metadata: {path}") from error
     if duration <= 0 or width <= 0 or height <= 0:
         raise SkillError(f"media duration or dimensions are invalid: {path}")
+    audio = next((item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"), None)
+    subtitles = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "subtitle"]
+    audio_metadata: dict[str, Any] = {}
+    if audio:
+        tags = audio.get("tags") if isinstance(audio.get("tags"), dict) else {}
+        try:
+            sample_rate = int(audio.get("sample_rate") or 0)
+            channels = int(audio.get("channels") or 0)
+            audio_duration = float(audio.get("duration") or duration)
+        except (TypeError, ValueError):
+            sample_rate, channels, audio_duration = 0, 0, duration
+        audio_metadata = {
+            "codec": str(audio.get("codec_name") or ""),
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "duration": round(audio_duration, 3),
+            "language": str(tags.get("language") or ""),
+        }
     return {
         "duration": round(duration, 3),
         "width": width,
         "height": height,
         "codec": str(video.get("codec_name") or ""),
         "pixel_format": str(video.get("pix_fmt") or ""),
-        "has_audio": any(isinstance(item, dict) and item.get("codec_type") == "audio" for item in streams),
+        "frame_rate": _frame_rate(video.get("avg_frame_rate") or video.get("r_frame_rate")),
+        "has_audio": bool(audio),
+        "audio": audio_metadata,
+        "has_subtitles": bool(subtitles),
+        "subtitle_streams": [
+            {
+                "codec": str(item.get("codec_name") or ""),
+                "language": str((item.get("tags") or {}).get("language") or "") if isinstance(item.get("tags"), dict) else "",
+                "title": str((item.get("tags") or {}).get("title") or "") if isinstance(item.get("tags"), dict) else "",
+            }
+            for item in subtitles
+        ],
     }
 
 

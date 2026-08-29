@@ -42,10 +42,16 @@ series-root/
     "identity": "Stable age, face, hair, build, and distinguishing details",
     "wardrobe": "Canonical wardrobe and signature props",
     "voice": {
-      "provider": "cosyvoice",
-      "reference_audio": "assets/voices/lead.wav",
-      "reference_text": "Exact transcript of the owned series voice reference",
-      "consent": "owned"
+      "provider": "voicebox",
+      "voice_type": "preset",
+      "voice_status": "approved",
+      "preset_engine": "qwen_custom_voice",
+      "preset_voice_id": "Dylan",
+      "provider_profile_id": "voicebox-profile-id",
+      "model_revision": "85e237c12c027371202489a0ec509ded67b5e4b5",
+      "seed": 42,
+      "source_license": "Apache-2.0",
+      "approved_by": "user"
     },
     "master": {
       "enabled": true,
@@ -62,13 +68,17 @@ series-root/
     "language": "zh-CN",
     "generate_audio": false,
     "preserve_source_audio": true,
-    "duck_source_audio": true
+    "duck_source_audio": true,
+    "tts_provider": "voicebox",
+    "allow_temporary_voices": false,
+    "allow_shared_voices": false
   },
   "defaults": {
     "episode_target_seconds": 90,
     "workflow": "character-consistent-story",
     "video_mode": "image-to-video",
-    "video_provider": "quickainew",
+    "video_provider": "quickai",
+    "video_provider_policy": "automatic",
     "video_size": "1280x720",
     "video_resolution": "480p",
     "video_aspect_ratio": "9:16"
@@ -95,6 +105,8 @@ series-root/
 For image-to-video, a character master is enabled by default and requires a master prompt. For text-to-video, it is disabled by default and no image key is required. Set `master.enabled` explicitly when overriding that rule.
 
 Series-level `audio` and character `voice` settings are synchronized into every episode project. An owned/licensed/synthetic series voice reference is copied into each episode's `assets/voices/` directory, so episode projects remain self-contained and resumable. Every episode still owns its timed dialogue lines and can be reviewed before generation.
+
+Use `voice-audition` and `voice-approve` at the series root, then run `series-voice-sync`. That command removes stale unapproved voices from episodes and copies only approved voices (or an explicitly allowed `temporary-test`). A normal `series-sync` still copies the whole editable contract for planning and lets preflight report incomplete voice fields. Episode approval remains blocked until every actual dialogue speaker has an approved renderable identity.
 
 ## Planning and generation
 
@@ -128,5 +140,5 @@ Do not treat a planned `intended_continuity_out` as fact. Only `series-accept --
 ## Route alignment
 
 - Series text-to-video uses the same prompt-only T2V behavior as a standalone project. It needs the QuickAI text-to-video credential but does not require character masters or an image credential. Long-range identity remains best-effort.
-- Series image-to-video uses the QuickAI image credential for persistent character masters and per-shot keyframes, then the QuickAI New image-to-video credential for animation. The video request receives only the current shot keyframe.
+- Series image-to-video uses the QuickAI image credential for persistent character masters and per-shot keyframes, then prefers QuickAI for animation. A safely classified QuickAI failure may continue with QuickAI New when configured. The video request receives only the current shot keyframe.
 - A supplied-image animation is not a series workflow. Use a standalone `single-image-animation` project with `generate_image=false` and place the supplied image in `video_references`; no QuickAI image credential is required.

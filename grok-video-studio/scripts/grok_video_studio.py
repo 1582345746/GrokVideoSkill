@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable
 
@@ -30,12 +31,15 @@ from gvs_common import (
     load_settings,
     normalize_base_url,
     print_json,
+    read_json,
+    redact,
     save_settings,
 )
 from component_manager import (
     component_plan,
     component_status,
     install_component_sources,
+    load_component_settings,
     save_component_settings,
     setup_component_runtimes,
     start_components,
@@ -55,7 +59,13 @@ from dialogue_workflow import (
 from media_client import QuickAIImageClient, QuickAINewVideoClient, QuickAIVideoClient, VIDEO_RESOLUTIONS, save_image_bytes
 from media_tools import SUBTITLE_STYLES, export_review_frames, extract_cover, postprocess_video, quality_report
 from news_workflow import create_news_contract, load_news_contract, news_context, validate_news_contract
-from provider_contracts import task_progress
+from provider_contracts import (
+    PROVIDER_CAPABILITIES,
+    ProviderTaskFailedError,
+    allows_automatic_failover,
+    classify_provider_error,
+    task_progress,
+)
 from series_workflow import (
     accept_episode,
     approve_episode,
@@ -75,12 +85,22 @@ from series_workflow import (
     series_character_preflight,
     series_status,
     sync_all_episode_contracts,
+    sync_approved_episode_voices,
     sync_episode_contract,
     validate_series,
 )
+from voice_workflow import (
+    audition_voice,
+    import_voice_candidate,
+    list_provider_voices,
+    review_voice_candidate,
+    voice_catalog_summary,
+    voice_doctor,
+)
+from voice_setup import voicebox_setup_plan
 
 
-SKILL_VERSION = "1.8.0"
+SKILL_VERSION = "1.9.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -246,7 +266,84 @@ def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = No
     value = str(project.get("video_provider", "")).strip()
     if value:
         return value
-    return str((settings or {}).get("default_video_provider", "quickainew" if video_mode(project) == "image-to-video" else "quickai"))
+    return str((settings or {}).get("default_video_provider", "quickai"))
+
+
+def video_provider_policy(project: dict[str, Any]) -> str:
+    value = str(project.get("video_provider_policy", "")).strip().lower()
+    if value:
+        return value
+    return "fixed" if video_provider(project) == "quickainew" else "automatic"
+
+
+def configured_default_video_provider() -> str:
+    path = config_path()
+    if not path.is_file():
+        return "quickai"
+    try:
+        value = str(read_json(path).get("default_video_provider", "quickai")).strip().lower()
+    except SkillError:
+        return "quickai"
+    return value if value in PROVIDER_CAPABILITIES else "quickai"
+
+
+def resolve_video_provider_options(provider: str | None, policy: str | None) -> tuple[str, str]:
+    selected_provider = str(provider or configured_default_video_provider()).strip().lower()
+    selected_policy = str(policy or "").strip().lower()
+    if not selected_policy:
+        selected_policy = "fixed" if provider or selected_provider == "quickainew" else "automatic"
+    return selected_provider, selected_policy
+
+
+def provider_capability_report(settings: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    report: dict[str, dict[str, Any]] = {}
+    for provider, capabilities in PROVIDER_CAPABILITIES.items():
+        video_configured = bool(settings.get(capabilities.credential_role))
+        value = {
+            "title": capabilities.title,
+            "text_to_image": capabilities.text_to_image,
+            "text_to_video": capabilities.text_to_video,
+            "image_to_video": capabilities.image_to_video,
+            "priority": capabilities.priority,
+            "video_configured": video_configured,
+        }
+        if provider == "quickai":
+            value["image_configured"] = bool(settings.get("quickai_image_key"))
+        report[provider] = value
+    return report
+
+
+def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+    preferred = video_provider(project, settings)
+    policy = video_provider_policy(project)
+    mode = video_mode(project)
+    capability_name = "text_to_video" if mode == "text-to-video" else "image_to_video"
+    if preferred not in PROVIDER_CAPABILITIES:
+        raise SkillError("video_provider must be quickai or quickainew")
+    if not getattr(PROVIDER_CAPABILITIES[preferred], capability_name):
+        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} does not support {mode}")
+
+    if policy == "fixed":
+        credential_role = PROVIDER_CAPABILITIES[preferred].credential_role
+        if settings.get(credential_role):
+            return [preferred]
+        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} 视频 Key 未配置，无法执行固定提供方视频任务")
+    if policy != "automatic":
+        raise SkillError("video_provider_policy must be automatic or fixed")
+
+    if preferred == "quickainew":
+        if settings.get("quickainew_video_key"):
+            return ["quickainew"]
+        raise SkillError("QuickAI New 视频 Key 未配置，无法执行明确指定的 QuickAI New 视频任务")
+
+    candidates = []
+    if settings.get("quickai_video_key"):
+        candidates.append("quickai")
+    if settings.get("quickainew_video_key"):
+        candidates.append("quickainew")
+    if not candidates:
+        raise SkillError("未配置可用的视频 Key：请配置 QuickAI 视频 Key 或 QuickAI New 视频 Key")
+    return candidates
 
 
 def video_resolution(project: dict[str, Any], shot: dict[str, Any]) -> str:
@@ -346,6 +443,9 @@ def archive_runtime_attempt(runtime: dict[str, Any], reason: str) -> None:
         "reason": reason,
         "status": runtime.get("status", ""),
         "attempts": runtime.get("attempts", 0),
+        "request_id": runtime.get("request_id", ""),
+        "attempt_id": runtime.get("attempt_id", ""),
+        "provider": runtime.get("provider", ""),
         "task_id": runtime.get("task_id", ""),
         "path": runtime.get("path", ""),
         "error": runtime.get("error", ""),
@@ -408,6 +508,9 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("project.video_mode must be text-to-video or image-to-video")
     if provider and provider not in {"quickai", "quickainew"}:
         errors.append("project.video_provider must be quickai or quickainew")
+    policy = str(project.get("video_provider_policy", "automatic" if provider != "quickainew" else "fixed")).strip()
+    if policy not in {"automatic", "fixed"}:
+        errors.append("project.video_provider_policy must be automatic or fixed")
     if project.get("allow_ui_elements") is not None and not isinstance(project.get("allow_ui_elements"), bool):
         errors.append("project.allow_ui_elements must be a boolean")
     if audio_policy(project) not in VIDEO_AUDIO_POLICIES:
@@ -974,7 +1077,16 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         return {"status": "disabled", "skipped": True}
     if not bool(master.get("generate", False)):
         path = resolve_project_path(root, str(master["path"]))
-        runtime.update({"status": "completed", "path": path.relative_to(root).as_posix(), "source": "external", "error": ""})
+        runtime.update(
+            {
+                "status": "completed",
+                "path": path.relative_to(root).as_posix(),
+                "source": "external",
+                "sha256": file_digest(path),
+                "locked": True,
+                "error": "",
+            }
+        )
         save_state(root, state)
         return {"status": "completed", "path": str(path), "source": "external", "skipped": True}
 
@@ -997,7 +1109,20 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         archive_runtime_attempt(runtime, reason)
         write_event(root, {"kind": "character_master_retry_authorized", "reason": reason, "previous_status": runtime.get("status", "")})
     record_budget_attempt(state, project, "image")
-    runtime.update({"status": "submitting", "attempts": attempts + 1, "signature": current_signature, "error": ""})
+    runtime.update(
+        {
+            "status": "submitting",
+            "attempts": attempts + 1,
+            "request_id": uuid.uuid4().hex,
+            "attempt_id": uuid.uuid4().hex,
+            "signature": current_signature,
+            "provider": "quickai",
+            "model": settings["image_model"],
+            "prompt": prompt,
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "error": "",
+        }
+    )
     save_state(root, state)
     write_event(root, {"kind": "character_master_create", "attempt": runtime["attempts"]})
     emit_progress(progress, phase="character_master_create", status="submitting", attempt=runtime["attempts"])
@@ -1011,6 +1136,9 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
                 "path": output.relative_to(root).as_posix(),
                 "source": "generated",
                 "bytes": output.stat().st_size,
+                "sha256": file_digest(output),
+                "generated_at": int(time.time()),
+                "locked": False,
                 "error": "",
             }
         )
@@ -1072,14 +1200,38 @@ def generate_images(
             archive_runtime_attempt(runtime, reason)
             write_event(root, {"kind": "image_retry_authorized", "shot_id": shot_id, "reason": reason, "previous_status": runtime.get("status", "")})
         record_budget_attempt(state, project, "image")
-        runtime.update({"status": "submitting", "attempts": int(runtime.get("attempts", 0)) + 1, "signature": current_signature, "error": ""})
+        runtime.update(
+            {
+                "status": "submitting",
+                "attempts": int(runtime.get("attempts", 0)) + 1,
+                "request_id": uuid.uuid4().hex,
+                "attempt_id": uuid.uuid4().hex,
+                "signature": current_signature,
+                "provider": "quickai",
+                "model": settings["image_model"],
+                "prompt": prompt,
+                "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                "reference_sha256": [file_digest(path) for path in references],
+                "error": "",
+            }
+        )
         save_state(root, state)
         write_event(root, {"kind": "image_create", "shot_id": shot_id, "attempt": runtime["attempts"]})
         emit_progress(progress, phase="image_create", shot_id=shot_id, status="submitting", attempt=runtime["attempts"])
         try:
             data = image_client.edit(prompt, references, size=size, quality=quality) if references else image_client.generate(prompt, size=size, quality=quality)
             output = save_image_bytes(data, root / "assets" / "keyframes" / shot_id)
-            runtime.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "error": ""})
+            runtime.update(
+                {
+                    "status": "completed",
+                    "path": output.relative_to(root).as_posix(),
+                    "bytes": output.stat().st_size,
+                    "sha256": file_digest(output),
+                    "generated_at": int(time.time()),
+                    "locked": False,
+                    "error": "",
+                }
+            )
             completed.append(shot_id)
             save_state(root, state)
             emit_progress(progress, phase="image_create", shot_id=shot_id, status="completed", bytes=output.stat().st_size)
@@ -1103,6 +1255,30 @@ def video_references(root: Path, shot: dict[str, Any], runtime: dict[str, Any]) 
     return []
 
 
+def sanitized_provider_error(error: Exception, settings: dict[str, Any]) -> str:
+    return redact(
+        str(error)[:1000],
+        [
+            str(settings.get("quickai_image_key", "")),
+            str(settings.get("quickai_video_key", "")),
+            str(settings.get("quickainew_video_key", "")),
+        ],
+    )
+
+
+def update_provider_attempt(video: dict[str, Any], *, attempt_id: str, **values: Any) -> None:
+    attempts = video.setdefault("provider_attempts", [])
+    if not isinstance(attempts, list):
+        attempts = []
+        video["provider_attempts"] = attempts
+    record = next((item for item in reversed(attempts) if isinstance(item, dict) and item.get("attempt_id") == attempt_id), None)
+    if record is None:
+        record = {"attempt_id": attempt_id}
+        attempts.append(record)
+    record.update(values)
+    del attempts[:-20]
+
+
 def generate_videos(
     root: Path,
     *,
@@ -1117,13 +1293,13 @@ def generate_videos(
     state = load_state(root)
     _, _, settings = clients()
     mode = video_mode(project)
-    provider = video_provider(project, settings)
+    candidates = video_provider_candidates(project, settings)
     generate_audio = bool(audio_config(project)["generate_audio"])
     if mode not in {"text-to-video", "image-to-video"}:
         raise SkillError("video_mode must be text-to-video or image-to-video")
-    video_client = select_video_client(settings, provider)
     completed: list[str] = []
     skipped: list[str] = []
+    final_providers: dict[str, str] = {}
     for shot in selected_shots(project, shot_ids):
         shot_id = str(shot["id"])
         runtime = shot_state(state, shot_id)
@@ -1134,131 +1310,200 @@ def generate_videos(
         size = str(shot_value(project, shot, "video_size", "1280x720"))
         resolution = video_resolution(project, shot)
         aspect_ratio = video_aspect_ratio(project, shot)
-        current_signature = signature(
-            {"mode": mode, "provider": provider, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
-            references,
-        )
+        def provider_signature(provider_name: str) -> str:
+            return signature(
+                {"mode": mode, "provider": provider_name, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
+                references,
+            )
+
+        stored_provider = str(video.get("provider", "")).strip()
+        current_signature = provider_signature(stored_provider or candidates[0])
         existing_path = str(video.get("path", ""))
         existing = resolve_project_path(root, existing_path, must_exist=False) if existing_path else None
         if video.get("status") == "completed" and existing and existing.is_file() and video.get("signature") == current_signature:
             assert_mp4(existing)
             skipped.append(shot_id)
+            final_providers[shot_id] = stored_provider
             continue
+        request_id = str(video.get("request_id", "")).strip() or uuid.uuid4().hex
+        video["request_id"] = request_id
         task_id = str(video.get("task_id", "")).strip()
-        if task_id and video.get("signature") and video.get("signature") != current_signature:
+        active_provider = stored_provider or candidates[0]
+        if active_provider not in candidates:
+            candidates_for_shot = [active_provider]
+        else:
+            candidates_for_shot = candidates
+        if task_id and video.get("signature") and video.get("signature") != provider_signature(active_provider):
             raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
-        archived_for_retry = False
+        automatic_failover = False
         if task_id and video.get("status") == "failed":
-            if not retry_failed:
-                raise SkillError(
-                    f"video task failed for {shot_id} ({task_id}); inspect the provider and use --retry-failed only to authorize a new billable task"
-                )
-            archive_runtime_attempt(video, reason)
-            archived_for_retry = True
-            write_event(root, {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": task_id, "reason": reason})
-            video["previous_task_id"] = task_id
-            video["task_id"] = ""
-            task_id = ""
-        if not task_id:
-            attempts = int(video.get("attempts", 0))
-            if attempts > 0 and not retry_failed:
-                raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
-            if attempts > 0 and not archived_for_retry:
+            next_provider = str(video.get("failover_next_provider", "")).strip()
+            if next_provider and next_provider in candidates_for_shot:
+                archive_runtime_attempt(video, "automatic provider failover")
+                automatic_failover = True
+                active_provider = next_provider
+            elif retry_failed:
                 archive_runtime_attempt(video, reason)
                 write_event(
                     root,
                     {"kind": "video_retry_authorized", "shot_id": shot_id, "previous_task_id": video.get("task_id", ""), "reason": reason},
                 )
-            record_budget_attempt(state, project, "video")
-            video.update(
-                {
-                    "status": "submitting",
-                    "attempts": attempts + 1,
-                    "signature": current_signature,
-                    "mode": mode,
-                    "provider": provider,
-                    "model": settings["video_model"],
-                    "seconds": seconds,
-                    "resolution": resolution,
-                    "aspect_ratio": aspect_ratio,
-                    "reference_count": len(references),
-                    "generate_audio": generate_audio,
-                    "error": "",
-                    "create_attempted_at": int(time.time()),
-                }
-            )
-            save_state(root, state)
-            write_event(root, {"kind": "video_create", "shot_id": shot_id, "attempt": video["attempts"]})
-            emit_progress(progress, phase="video_create", shot_id=shot_id, status="submitting", attempt=video["attempts"])
-            try:
-                task_id = video_client.create(
-                    prompt,
-                    seconds=seconds,
-                    size=size,
-                    resolution=resolution,
-                    aspect_ratio=aspect_ratio,
-                    generate_audio=generate_audio,
-                    references=references,
+            else:
+                raise SkillError(
+                    f"video task failed for {shot_id} ({task_id}); inspect the provider and use --retry-failed only to authorize a new billable task"
                 )
-            except Exception as error:
-                status = "failed" if isinstance(error, APIError) and error.status in {400, 401, 403, 404, 409, 422} else "submission_unknown"
-                video.update({"status": status, "error": str(error)[:1000]})
+            video["previous_task_id"] = task_id
+            video["task_id"] = ""
+            video.pop("failover_next_provider", None)
+            task_id = ""
+
+        while True:
+            provider_index = candidates_for_shot.index(active_provider) if active_provider in candidates_for_shot else 0
+            video_client = select_video_client(settings, active_provider)
+            if not task_id:
+                attempts = int(video.get("attempts", 0))
+                if attempts > 0 and not retry_failed and not automatic_failover:
+                    raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
+                if attempts > 0 and retry_failed and not automatic_failover and video.get("status") != "failed":
+                    archive_runtime_attempt(video, reason)
+                record_budget_attempt(state, project, "video")
+                attempt_id = uuid.uuid4().hex
+                video.update(
+                    {
+                        "status": "submitting",
+                        "attempts": attempts + 1,
+                        "attempt_id": attempt_id,
+                        "signature": provider_signature(active_provider),
+                        "mode": mode,
+                        "provider": active_provider,
+                        "model": settings["video_model"],
+                        "seconds": seconds,
+                        "resolution": resolution,
+                        "aspect_ratio": aspect_ratio,
+                        "reference_count": len(references),
+                        "generate_audio": generate_audio,
+                        "error": "",
+                        "error_category": "",
+                        "create_attempted_at": int(time.time()),
+                    }
+                )
+                update_provider_attempt(
+                    video,
+                    attempt_id=attempt_id,
+                    request_id=request_id,
+                    provider=active_provider,
+                    task_id="",
+                    status="submitting",
+                    created_at=int(time.time()),
+                )
                 save_state(root, state)
-                write_event(root, {"kind": "video_create_failed", "shot_id": shot_id, "status": status, "error": str(error)[:1000]})
-                raise
-            video.update({"status": "queued", "task_id": task_id, "error": ""})
-            save_state(root, state)
-            emit_progress(progress, phase="video_create", shot_id=shot_id, status="queued", task_id=task_id)
+                write_event(root, {"kind": "video_create", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "attempt": video["attempts"]})
+                emit_progress(progress, phase="video_create", shot_id=shot_id, provider=active_provider, status="submitting", attempt=video["attempts"])
+                try:
+                    task_id = video_client.create(
+                        prompt,
+                        seconds=seconds,
+                        size=size,
+                        resolution=resolution,
+                        aspect_ratio=aspect_ratio,
+                        generate_audio=generate_audio,
+                        references=references,
+                    )
+                except Exception as error:
+                    category = classify_provider_error(error, phase="create", task_known=False)
+                    message = sanitized_provider_error(error, settings)
+                    status = "submission_unknown" if category == "submission_unknown" else "failed"
+                    video.update({"status": status, "error": message, "error_category": category})
+                    update_provider_attempt(video, attempt_id=attempt_id, status=status, error=message, error_category=category, finished_at=int(time.time()))
+                    save_state(root, state)
+                    write_event(root, {"kind": "video_create_failed", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "status": status, "error_category": category, "error": message})
+                    can_failover = provider_index + 1 < len(candidates_for_shot) and allows_automatic_failover(error, phase="create", task_known=False)
+                    if not can_failover:
+                        raise SkillError(message) from error
+                    next_provider = candidates_for_shot[provider_index + 1]
+                    archive_runtime_attempt(video, "automatic provider failover")
+                    write_event(root, {"kind": "video_provider_failover", "shot_id": shot_id, "request_id": request_id, "from_provider": active_provider, "to_provider": next_provider, "error_category": category})
+                    emit_progress(progress, phase="video_failover", shot_id=shot_id, from_provider=active_provider, to_provider=next_provider, status="switching")
+                    active_provider = next_provider
+                    automatic_failover = True
+                    continue
+                video.update({"status": "queued", "task_id": task_id, "error": "", "error_category": ""})
+                update_provider_attempt(video, attempt_id=attempt_id, task_id=task_id, status="queued")
+                save_state(root, state)
+                emit_progress(progress, phase="video_create", shot_id=shot_id, provider=active_provider, status="queued", task_id=task_id)
+            else:
+                attempt_id = str(video.get("attempt_id", "")).strip() or uuid.uuid4().hex
+                video["attempt_id"] = attempt_id
+                update_provider_attempt(video, attempt_id=attempt_id, request_id=request_id, provider=active_provider, task_id=task_id, status=str(video.get("status", "queued")))
 
-        def on_status(status: str, payload: dict[str, Any]) -> None:
-            video["status"] = status
-            video["last_polled_at"] = int(time.time())
-            provider_progress = task_progress(payload)
-            if provider_progress is not None:
-                video["progress"] = provider_progress
-            save_state(root, state)
-            emit_progress(
-                progress,
-                phase="video_poll",
-                shot_id=shot_id,
-                task_id=task_id,
-                status=status,
-                progress=provider_progress,
-            )
+            def on_status(status: str, payload: dict[str, Any]) -> None:
+                video["status"] = status
+                video["last_polled_at"] = int(time.time())
+                provider_progress = task_progress(payload)
+                if provider_progress is not None:
+                    video["progress"] = provider_progress
+                update_provider_attempt(video, attempt_id=attempt_id, status=status, progress=provider_progress)
+                save_state(root, state)
+                emit_progress(progress, phase="video_poll", shot_id=shot_id, provider=active_provider, task_id=task_id, status=status, progress=provider_progress)
 
-        try:
-            status_payload = video_client.poll(task_id, timeout_seconds=poll_timeout, on_status=on_status)
-            output = root / "clips" / f"{shot_id}.mp4"
-            video_client.download(task_id, status_payload, output)
             try:
-                qa = quality_report(output, expected_size=size, expected_duration=seconds)
-            except SkillError as error:
-                qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
-            video.update(
-                {
-                    "status": "completed",
-                    "path": output.relative_to(root).as_posix(),
-                    "bytes": output.stat().st_size,
-                    "progress": 100.0,
-                    "qa": portable_qa(qa),
-                    "error": "",
-                }
-            )
-            save_state(root, state)
-            write_event(root, {"kind": "video_completed", "shot_id": shot_id, "task_id": task_id, "bytes": output.stat().st_size})
-            emit_progress(progress, phase="video_download", shot_id=shot_id, task_id=task_id, status="completed", bytes=output.stat().st_size)
-            completed.append(shot_id)
-        except TimeoutError as error:
-            video.update({"status": "poll_timeout", "error": str(error)[:1000]})
-            save_state(root, state)
-            raise SkillError(str(error)) from error
-        except Exception as error:
-            if video.get("status") not in {"poll_timeout", "submission_unknown"}:
-                video.update({"status": "failed", "error": str(error)[:1000]})
-            save_state(root, state)
-            write_event(root, {"kind": "video_failed", "shot_id": shot_id, "task_id": task_id, "error": str(error)[:1000]})
-            raise
-    return {"completed": completed, "skipped": skipped}
+                status_payload = video_client.poll(task_id, timeout_seconds=poll_timeout, on_status=on_status)
+                output = root / "clips" / f"{shot_id}.mp4"
+                video_client.download(task_id, status_payload, output)
+                try:
+                    qa = quality_report(output, expected_size=size, expected_duration=seconds)
+                except SkillError as error:
+                    qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
+                video.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "sha256": file_digest(output), "media": qa.get("media", {}), "progress": 100.0, "qa": portable_qa(qa), "final_provider": active_provider, "error": "", "error_category": ""})
+                update_provider_attempt(video, attempt_id=attempt_id, status="completed", finished_at=int(time.time()), bytes=output.stat().st_size)
+                save_state(root, state)
+                write_event(root, {"kind": "video_completed", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "task_id": task_id, "bytes": output.stat().st_size})
+                emit_progress(progress, phase="video_download", shot_id=shot_id, provider=active_provider, task_id=task_id, status="completed", bytes=output.stat().st_size)
+                completed.append(shot_id)
+                final_providers[shot_id] = active_provider
+                break
+            except TimeoutError as error:
+                message = sanitized_provider_error(error, settings)
+                video.update({"status": "poll_timeout", "error": message, "error_category": "task_timeout"})
+                update_provider_attempt(video, attempt_id=attempt_id, status="poll_timeout", error=message, error_category="task_timeout")
+                save_state(root, state)
+                raise SkillError(message) from error
+            except Exception as error:
+                category = classify_provider_error(error, phase="task", task_known=True)
+                message = sanitized_provider_error(error, settings)
+                video.update({"status": "failed", "error": message, "error_category": category})
+                update_provider_attempt(video, attempt_id=attempt_id, status="failed", error=message, error_category=category, finished_at=int(time.time()))
+                can_failover = provider_index + 1 < len(candidates_for_shot) and allows_automatic_failover(error, phase="task", task_known=True)
+                if can_failover:
+                    next_provider = candidates_for_shot[provider_index + 1]
+                    video["failover_next_provider"] = next_provider
+                save_state(root, state)
+                write_event(root, {"kind": "video_failed", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "task_id": task_id, "error_category": category, "error": message})
+                if not can_failover:
+                    raise SkillError(message) from error
+                next_provider = candidates_for_shot[provider_index + 1]
+                archive_runtime_attempt(video, "automatic provider failover")
+                write_event(root, {"kind": "video_provider_failover", "shot_id": shot_id, "request_id": request_id, "from_provider": active_provider, "to_provider": next_provider, "error_category": category})
+                emit_progress(progress, phase="video_failover", shot_id=shot_id, from_provider=active_provider, to_provider=next_provider, status="switching")
+                video["previous_task_id"] = task_id
+                video["task_id"] = ""
+                video.pop("failover_next_provider", None)
+                task_id = ""
+                active_provider = next_provider
+                automatic_failover = True
+                continue
+    return {"completed": completed, "skipped": skipped, "final_providers": final_providers}
+
+
+def media_frame_rate(value: Any) -> float:
+    text = str(value or "").strip()
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            return round(float(numerator) / float(denominator), 3) if float(denominator) else 0.0
+        return round(float(text), 3)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def probe_media(path: Path) -> dict[str, Any]:
@@ -1290,13 +1535,42 @@ def probe_media(path: Path) -> dict[str, Any]:
         raise SkillError(f"invalid media metadata: {path}") from error
     if duration <= 0 or width <= 0 or height <= 0:
         raise SkillError(f"media duration or dimensions are invalid: {path}")
+    audio = next((item for item in streams if isinstance(item, dict) and item.get("codec_type") == "audio"), None)
+    subtitles = [item for item in streams if isinstance(item, dict) and item.get("codec_type") == "subtitle"]
+    audio_metadata: dict[str, Any] = {}
+    if audio:
+        tags = audio.get("tags") if isinstance(audio.get("tags"), dict) else {}
+        try:
+            sample_rate = int(audio.get("sample_rate") or 0)
+            channels = int(audio.get("channels") or 0)
+            audio_duration = float(audio.get("duration") or duration)
+        except (TypeError, ValueError):
+            sample_rate, channels, audio_duration = 0, 0, duration
+        audio_metadata = {
+            "codec": str(audio.get("codec_name") or ""),
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "duration": round(audio_duration, 3),
+            "language": str(tags.get("language") or ""),
+        }
     return {
         "duration": round(duration, 3),
         "width": width,
         "height": height,
         "codec": str(video.get("codec_name") or ""),
         "pixel_format": str(video.get("pix_fmt") or ""),
-        "has_audio": any(isinstance(item, dict) and item.get("codec_type") == "audio" for item in streams),
+        "frame_rate": media_frame_rate(video.get("avg_frame_rate") or video.get("r_frame_rate")),
+        "has_audio": bool(audio),
+        "audio": audio_metadata,
+        "has_subtitles": bool(subtitles),
+        "subtitle_streams": [
+            {
+                "codec": str(item.get("codec_name") or ""),
+                "language": str((item.get("tags") or {}).get("language") or "") if isinstance(item.get("tags"), dict) else "",
+                "title": str((item.get("tags") or {}).get("title") or "") if isinstance(item.get("tags"), dict) else "",
+            }
+            for item in subtitles
+        ],
     }
 
 
@@ -1372,7 +1646,7 @@ def assemble_clips(clips: list[Path], output: Path, *, target_size: str, audio_p
         raise SkillError("assembled video contains audio despite mute policy")
     if media["duration"] < expected_duration * 0.85:
         raise SkillError("assembled video duration is unexpectedly shorter than its input clips")
-    return {"path": str(output), "bytes": output.stat().st_size, **media, "clip_count": len(clips), "audio_policy": audio_policy}
+    return {"path": str(output), "bytes": output.stat().st_size, "sha256": file_digest(output), **media, "clip_count": len(clips), "audio_policy": audio_policy}
 
 
 def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
@@ -1512,6 +1786,7 @@ def init_project(
     video_size: str,
     video_mode_value: str,
     video_provider_value: str,
+    video_provider_policy_value: str,
     video_resolution_value: str,
     video_aspect_ratio_value: str,
     audio_mode_value: str = "preserve",
@@ -1557,6 +1832,7 @@ def init_project(
         "workflow_guidance": workflow.get("guidance", {}),
         "video_mode": video_mode_value,
         "video_provider": video_provider_value,
+        "video_provider_policy": video_provider_policy_value,
         "target_duration_seconds": sum(shot_durations),
         "story": "",
         "character_bible": "",
@@ -1638,6 +1914,8 @@ def doctor() -> tuple[int, dict[str, Any]]:
         "skill_version": SKILL_VERSION,
         "config": str(config_path()),
         "providers": {},
+        "capabilities": provider_capability_report(settings),
+        "diagnostics_zh": [],
         "ffmpeg": shutil.which("ffmpeg") or "not_found",
         "ffprobe": shutil.which("ffprobe") or "not_found",
     }
@@ -1656,7 +1934,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
             settings.get("quickai_video_key", ""),
             settings["video_model"],
             QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_video_key"], settings["video_model"]),
-            settings.get("default_video_provider") == "quickai",
+            False,
         ),
         (
             "quickainew_video",
@@ -1665,7 +1943,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
             QuickAINewVideoClient(
                 settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"]
             ),
-            settings.get("default_video_provider") == "quickainew",
+            False,
         ),
     ]
     for name, key, model, client, required in checks:
@@ -1708,6 +1986,12 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "circuit": client.health_snapshot(),
             }
             result["ok"] = False
+    if not settings.get("quickai_image_key"):
+        result["diagnostics_zh"].append("QuickAI 生图 Key 未配置：生图会在付费请求前停止，且不会切换到 QuickAI New。")
+    if not settings.get("quickai_video_key") and not settings.get("quickainew_video_key"):
+        result["diagnostics_zh"].append("QuickAI 与 QuickAI New 视频 Key 均未配置：当前不能生成视频。")
+    elif not settings.get("quickainew_video_key"):
+        result["diagnostics_zh"].append("QuickAI New 视频 Key 未配置：QuickAI 视频失败时不会进入备用提供方。")
     return (0 if result["ok"] else 1), result
 
 
@@ -1744,15 +2028,27 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
     else:
         legacy_quickai = os.environ.get("GVS_QUICKAI_KEY", "").strip()
         legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
-        quickai_image_key = os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip() or legacy_quickai
-        quickai_video_key = os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip() or legacy_quickai
-        quickainew_video_key = os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip() or legacy_quickainew
+        quickai_image_key = (
+            os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip()
+            or os.environ.get("QUICKAI_IMAGE_API_KEY", "").strip()
+            or legacy_quickai
+        )
+        quickai_video_key = (
+            os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip()
+            or os.environ.get("QUICKAI_VIDEO_API_KEY", "").strip()
+            or legacy_quickai
+        )
+        quickainew_video_key = (
+            os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip()
+            or os.environ.get("QUICKAI_NEW_VIDEO_API_KEY", "").strip()
+            or legacy_quickainew
+        )
         if not quickai_image_key:
             quickai_image_key = getpass.getpass("QuickAI image key (optional): ").strip()
         if not quickai_video_key:
             quickai_video_key = getpass.getpass("QuickAI text-to-video key (optional): ").strip()
         if not quickainew_video_key:
-            quickainew_video_key = getpass.getpass("QuickAI New image-to-video key (optional): ").strip()
+            quickainew_video_key = getpass.getpass("QuickAI New video key (optional): ").strip()
         credential_source = "environment-or-interactive"
     if not quickai_image_key and not quickai_video_key and not quickainew_video_key:
         raise SkillError("at least one provider key is required")
@@ -1814,10 +2110,14 @@ def status_summary(root: Path) -> dict[str, Any]:
         shots.append(
             {
                 "id": shot.get("id"),
-                "image": {key: runtime["image"].get(key) for key in ("status", "path", "attempts", "error") if runtime["image"].get(key) not in (None, "")},
+                "image": {
+                    key: runtime["image"].get(key)
+                    for key in ("status", "request_id", "attempt_id", "path", "sha256", "locked", "provider", "model", "prompt_sha256", "reference_sha256", "generated_at", "attempts", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
+                    if runtime["image"].get(key) not in (None, "")
+                },
                 "video": {
                     key: runtime["video"].get(key)
-                    for key in ("status", "task_id", "path", "attempts", "progress", "mode", "provider", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "qa", "history", "error")
+                    for key in ("status", "request_id", "attempt_id", "task_id", "path", "sha256", "media", "attempts", "progress", "mode", "provider", "final_provider", "provider_attempts", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "qa", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
                     if runtime["video"].get(key) not in (None, "")
                 },
             }
@@ -1829,10 +2129,62 @@ def status_summary(root: Path) -> dict[str, Any]:
         "workflow": project.get("workflow", "general-video"),
         "video_mode": video_mode(project),
         "video_provider": str(project.get("video_provider", "")) or None,
+        "video_provider_policy": video_provider_policy(project),
         "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
         "shots": shots,
         "deliverables": state.get("deliverables", {}),
         "budget_usage": state.get("budget_usage", {}),
+    }
+
+
+def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, notes: str) -> dict[str, Any]:
+    project = require_valid_project(root)
+    known = {str(shot.get("id", "")) for shot in project.get("shots", []) if isinstance(shot, dict)}
+    if shot_id not in known:
+        raise SkillError(f"unknown shot id: {shot_id}")
+    state = load_state(root)
+    runtime = shot_state(state, shot_id)[kind]
+    if runtime.get("status") != "completed" or not runtime.get("path"):
+        raise SkillError(f"{kind} for {shot_id} must be completed before review")
+    path = resolve_project_path(root, str(runtime["path"]))
+    digest = file_digest(path)
+    if runtime.get("sha256") and runtime.get("sha256") != digest:
+        raise SkillError(f"{kind} asset changed after generation; review is blocked")
+    archive_runtime_attempt(runtime, f"user review: {decision}")
+    runtime.update(
+        {
+            "review_status": "approved" if decision == "approve" else "rejected",
+            "review_notes": notes.strip(),
+            "reviewed_at": int(time.time()),
+            "reviewed_sha256": digest,
+        }
+    )
+    if decision == "approve":
+        if kind == "image":
+            runtime["locked"] = True
+    else:
+        runtime.update(
+            {
+                "status": "failed",
+                "locked": False,
+                "error": "asset rejected by user review",
+                "error_category": "user_rejected",
+            }
+        )
+    save_state(root, state)
+    write_event(root, {"kind": f"{kind}_reviewed", "shot_id": shot_id, "decision": decision, "sha256": digest})
+    if decision == "approve":
+        next_action = "approved image is hash-locked" if kind == "image" else "approved video review is recorded"
+    else:
+        next_action = "use --retry-failed with --retry-reason to authorize a replacement paid request"
+    return {
+        "shot_id": shot_id,
+        "kind": kind,
+        "decision": decision,
+        "path": str(path),
+        "sha256": digest,
+        "locked": bool(runtime.get("locked", False)),
+        "next": next_action,
     }
 
 
@@ -2014,6 +2366,8 @@ def build_parser() -> argparse.ArgumentParser:
     components_configure.add_argument("--models-root", type=Path)
     components_configure.add_argument("--cosyvoice-url")
     components_configure.add_argument("--musetalk-url")
+    components_configure.add_argument("--voicebox-url")
+    components_configure.add_argument("--voxcpm-url")
     components_install = commands.add_parser("components-install", help="Download pinned optional component sources after explicit approval.")
     components_install.add_argument("--profile", choices=("core", "native-dialogue", "local-voice", "full-dialogue"), required=True)
     components_install.add_argument("--accept-downloads", action="store_true")
@@ -2041,6 +2395,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--video-size", default="1280x720")
     init.add_argument("--mode", choices=("text-to-video", "image-to-video"))
     init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
@@ -2058,6 +2413,7 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--video-size", default="1280x720")
     series_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="image-to-video")
     series_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    series_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     series_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
@@ -2065,7 +2421,7 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--install-profile", help="Inherit audio and subtitle defaults from a saved installation profile.")
     series_init.add_argument("--clip-seconds", type=int)
 
-    for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync"):
+    for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync", "series-voice-sync"):
         command = commands.add_parser(name)
         command.add_argument("series", type=Path)
         if name == "series-preflight":
@@ -2115,6 +2471,7 @@ def build_parser() -> argparse.ArgumentParser:
     news_init.add_argument("--video-size", default="1280x720")
     news_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="text-to-video")
     news_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    news_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     news_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
@@ -2128,6 +2485,13 @@ def build_parser() -> argparse.ArgumentParser:
     for name in ("validate", "preflight", "status", "assemble", "audit"):
         command = commands.add_parser(name)
         command.add_argument("project", type=Path)
+
+    review_shot = commands.add_parser("review-shot", help="Approve or reject one completed shot image/video asset.")
+    review_shot.add_argument("project", type=Path)
+    review_shot.add_argument("shot")
+    review_shot.add_argument("--kind", choices=("image", "video"), required=True)
+    review_shot.add_argument("--decision", choices=("approve", "reject"), required=True)
+    review_shot.add_argument("--notes", default="")
 
     qa = commands.add_parser("qa", help="Run technical media QA and emit the required human review checklist.")
     qa.add_argument("project", type=Path)
@@ -2203,6 +2567,8 @@ def build_parser() -> argparse.ArgumentParser:
     dialogue.add_argument("--source-video", type=Path)
     dialogue.add_argument("--output-video", type=Path)
     dialogue.add_argument("--cosyvoice-url")
+    dialogue.add_argument("--voicebox-url")
+    dialogue.add_argument("--tts-provider", choices=("cosyvoice", "voicebox", "voxcpm"))
     dialogue.add_argument("--musetalk-url")
     dialogue.add_argument("--force", action="store_true")
     dialogue.add_argument("--burn-subtitles", action="store_true")
@@ -2213,6 +2579,51 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="Select subtitle source for the optional SRT/burned delivery.",
     )
+
+    voice_catalog = commands.add_parser("voice-catalog", help="Show character voice contracts and recorded audition candidates.")
+    voice_catalog.add_argument("workspace", type=Path)
+    voice_doctor_parser = commands.add_parser("voice-doctor", help="Check one localhost TTS provider without downloading models.")
+    voice_doctor_parser.add_argument("--provider", choices=("cosyvoice", "voicebox", "voxcpm"), required=True)
+    voice_doctor_parser.add_argument("--service-url")
+    voice_doctor_parser.add_argument("--workspace", type=Path)
+    voice_list = commands.add_parser("voice-list", help="List provider voices without generating audio.")
+    voice_list.add_argument("--provider", choices=("cosyvoice", "voicebox", "voxcpm"), required=True)
+    voice_list.add_argument("--engine", default="")
+    voice_list.add_argument("--service-url")
+    voice_audition = commands.add_parser("voice-audition", help="Generate one review-only character voice audition.")
+    voice_audition.add_argument("workspace", type=Path)
+    voice_audition.add_argument("character")
+    voice_audition.add_argument("--provider", choices=("cosyvoice", "voicebox", "voxcpm"), required=True)
+    voice_audition.add_argument("--text", required=True)
+    voice_audition.add_argument("--service-url")
+    voice_audition.add_argument("--preset-voice-id", default="")
+    voice_audition.add_argument("--engine", default="")
+    voice_audition.add_argument("--voice-id", default="")
+    voice_audition.add_argument("--model-size", choices=("0.6B", "1.7B", "1B", "3B"), default="0.6B")
+    voice_audition.add_argument("--seed", type=int, default=42)
+    voice_audition.add_argument("--instruct", default="")
+    voice_audition.add_argument("--candidate-id", default="")
+    voice_import = commands.add_parser("voice-import", help="Import a rights-cleared reference voice as a review candidate.")
+    voice_import.add_argument("workspace", type=Path)
+    voice_import.add_argument("character")
+    voice_import.add_argument("source", type=Path)
+    voice_import.add_argument("--provider", choices=("cosyvoice", "voxcpm"), required=True)
+    voice_import.add_argument("--reference-text", required=True)
+    voice_import.add_argument("--consent", choices=("synthetic", "owned", "licensed"), required=True)
+    voice_import.add_argument("--license-note", default="")
+    voice_import.add_argument("--candidate-id", default="")
+    voice_approve = commands.add_parser("voice-approve", help="Approve a reviewed audition for its character contract.")
+    voice_approve.add_argument("workspace", type=Path)
+    voice_approve.add_argument("candidate")
+    voice_approve.add_argument("--temporary-test", action="store_true")
+    voice_approve.add_argument("--approved-by", default="user")
+    voice_reject = commands.add_parser("voice-reject", help="Reject a reviewed audition without changing the active voice.")
+    voice_reject.add_argument("workspace", type=Path)
+    voice_reject.add_argument("candidate")
+    voicebox_plan = commands.add_parser("voicebox-setup-plan", help="Inspect a Voicebox/Qwen setup without changing the machine.")
+    voicebox_plan.add_argument("--source", type=Path, required=True)
+    voicebox_plan.add_argument("--models-root", type=Path, required=True)
+    voicebox_plan.add_argument("--data-root", type=Path, required=True)
 
     cover = commands.add_parser("cover", help="Export a representative frame as a JPG or PNG cover.")
     cover.add_argument("input", type=Path)
@@ -2230,11 +2641,26 @@ def main() -> int:
             return 0
         if args.command == "capabilities":
             install_profile = load_install_profile()
+            try:
+                provider_settings = load_settings(require_secrets=False)
+            except SkillError:
+                provider_settings = {
+                    "quickai_image_key": "",
+                    "quickai_video_key": "",
+                    "quickainew_video_key": "",
+                }
             print_json(
                 {
                     "ok": True,
                     "version": SKILL_VERSION,
                     "installation": install_profile,
+                    "video_provider_default": configured_default_video_provider(),
+                    "video_provider_selection": {
+                        "unspecified": "quickai with safe quickainew fallback",
+                        "explicit_quickai": "fixed quickai when --video-provider quickai is supplied",
+                        "explicit_quickainew": "fixed quickainew when --video-provider quickainew is supplied",
+                    },
+                    "providers": provider_capability_report(provider_settings),
                     "product_routes": [
                         {
                             "id": "text-to-video",
@@ -2261,8 +2687,13 @@ def main() -> int:
                     "audio_routes": [
                         {"id": "preserve", "requires": [], "use_for": "keep provider or supplied source audio"},
                         {"id": "native-dialogue", "requires": [], "use_for": "ask the video provider for synchronized spoken dialogue"},
-                        {"id": "local-voice", "requires": ["cosyvoice"], "use_for": "deterministic local TTS, subtitles, and FFmpeg mixing"},
-                        {"id": "local-lipsync", "requires": ["cosyvoice", "musetalk"], "use_for": "local TTS plus character mouth synchronization"},
+                        {"id": "local-voice", "requires": ["approved-tts-provider"], "use_for": "deterministic multi-provider TTS, subtitles, and FFmpeg mixing"},
+                        {"id": "local-lipsync", "requires": ["approved-tts-provider", "musetalk"], "use_for": "local TTS plus character mouth synchronization"},
+                    ],
+                    "tts_providers": [
+                        {"id": "voicebox", "status": "supported", "voices": ["Qwen CustomVoice", "Kokoro"]},
+                        {"id": "cosyvoice", "status": "supported", "voices": ["preset", "rights-cleared reference"]},
+                        {"id": "voxcpm", "status": "experimental", "voices": ["designed master", "rights-cleared reference"]},
                     ],
                     "selection": "Choose one product route, then select an internal workflow preset when needed.",
                 }
@@ -2295,6 +2726,8 @@ def main() -> int:
                 models_root=args.models_root,
                 cosyvoice_url=args.cosyvoice_url,
                 musetalk_url=args.musetalk_url,
+                voicebox_url=args.voicebox_url,
+                voxcpm_url=args.voxcpm_url,
             )
             print_json({"ok": True, "settings": settings, "plan": component_plan(args.profile, settings)})
             return 0
@@ -2323,6 +2756,70 @@ def main() -> int:
         if args.command == "components-stop":
             print_json({"ok": True, **stop_components(args.profile, args.component)})
             return 0
+        if args.command == "voice-catalog":
+            print_json(voice_catalog_summary(args.workspace.resolve()))
+            return 0
+        if args.command == "voicebox-setup-plan":
+            print_json(voicebox_setup_plan(args.source, args.models_root, args.data_root))
+            return 0
+        if args.command in {"voice-doctor", "voice-list", "voice-audition"}:
+            component_settings = load_component_settings()
+            services = component_settings.get("services") if isinstance(component_settings.get("services"), dict) else {}
+            if args.command == "voice-doctor":
+                result = voice_doctor(
+                    args.provider,
+                    services,
+                    service_url=args.service_url,
+                    root=args.workspace.resolve() if args.workspace else None,
+                )
+                print_json(result)
+                return 0 if result["ok"] else 1
+            if args.command == "voice-list":
+                print_json(list_provider_voices(args.provider, services, engine=args.engine, service_url=args.service_url))
+                return 0
+            print_json(
+                audition_voice(
+                    args.workspace.resolve(),
+                    character_id=args.character,
+                    provider=args.provider,
+                    services=services,
+                    text=args.text,
+                    service_url=args.service_url,
+                    preset_voice_id=args.preset_voice_id,
+                    preset_engine=args.engine,
+                    voice_id=args.voice_id,
+                    model_size=args.model_size,
+                    seed=args.seed,
+                    instruct_text=args.instruct,
+                    candidate_id=args.candidate_id,
+                )
+            )
+            return 0
+        if args.command == "voice-import":
+            print_json(
+                import_voice_candidate(
+                    args.workspace.resolve(),
+                    character_id=args.character,
+                    source=args.source.resolve(),
+                    reference_text=args.reference_text,
+                    consent=args.consent,
+                    provider=args.provider,
+                    license_note=args.license_note,
+                    candidate_id=args.candidate_id,
+                )
+            )
+            return 0
+        if args.command in {"voice-approve", "voice-reject"}:
+            print_json(
+                review_voice_candidate(
+                    args.workspace.resolve(),
+                    args.candidate,
+                    approve=args.command == "voice-approve",
+                    temporary_test=bool(getattr(args, "temporary_test", False)),
+                    approved_by=str(getattr(args, "approved_by", "user")),
+                )
+            )
+            return 0
         if args.command == "series-init":
             workflow = get_workflow(args.workflow)
             selected_audio_mode, selected_subtitle_source = resolve_project_audio_options(
@@ -2336,7 +2833,9 @@ def main() -> int:
             )
             if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
                 raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
-            selected_provider = args.video_provider or ("quickai" if args.mode == "text-to-video" else "quickainew")
+            selected_provider, selected_provider_policy = resolve_video_provider_options(
+                args.video_provider, args.video_provider_policy
+            )
             root = args.series.resolve()
             series = create_series_contract(
                 root,
@@ -2347,6 +2846,7 @@ def main() -> int:
                 workflow=args.workflow,
                 video_mode=args.mode,
                 video_provider=selected_provider,
+                video_provider_policy=selected_provider_policy,
                 video_size=args.video_size,
                 video_resolution=args.video_resolution,
                 video_aspect_ratio=args.aspect_ratio,
@@ -2364,6 +2864,7 @@ def main() -> int:
                     args.video_size,
                     args.mode,
                     selected_provider,
+                    selected_provider_policy,
                     args.video_resolution,
                     args.aspect_ratio,
                     selected_audio_mode,
@@ -2378,6 +2879,8 @@ def main() -> int:
                     "episode_count": len(series["episodes"]),
                     "episode_target_seconds": args.episode_seconds,
                     "shot_seconds": durations,
+                    "video_provider": selected_provider,
+                    "video_provider_policy": selected_provider_policy,
                     "synced_episodes": synced,
                     "next": "Fill the season plan and episode project prompts, then run series-preflight and series-approve ep-001.",
                 }
@@ -2414,10 +2917,15 @@ def main() -> int:
                     }
                 )
                 return 0 if not series_errors else 1
-            if args.command == "series-sync":
+            if args.command in {"series-sync", "series-voice-sync"}:
                 if series_errors:
                     raise SkillError("series validation failed: " + "; ".join(series_errors))
-                print_json({"ok": True, "synced_episodes": sync_all_episode_contracts(root, series)})
+                synced = (
+                    sync_approved_episode_voices(root, series)
+                    if args.command == "series-voice-sync"
+                    else sync_all_episode_contracts(root, series)
+                )
+                print_json({"ok": True, "synced_episodes": synced, "approved_voices_only": args.command == "series-voice-sync"})
                 return 0
             if args.command in {"series-validate", "series-preflight"}:
                 requested = [get_episode(series, args.episode)] if args.command == "series-preflight" and args.episode else episode_records(series)
@@ -2605,7 +3113,9 @@ def main() -> int:
             )
             if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
                 raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
-            provider = args.video_provider or ("quickai" if args.mode == "text-to-video" else "quickainew")
+            provider, provider_policy = resolve_video_provider_options(
+                args.video_provider, args.video_provider_policy
+            )
             root = args.project.resolve()
             path = init_project(
                 root,
@@ -2616,6 +3126,7 @@ def main() -> int:
                 args.video_size,
                 args.mode,
                 provider,
+                provider_policy,
                 args.video_resolution,
                 args.aspect_ratio,
                 selected_audio_mode,
@@ -2635,6 +3146,7 @@ def main() -> int:
                     "news_contract": str(root / "news.json"),
                     "video_mode": args.mode,
                     "video_provider": provider,
+                    "video_provider_policy": provider_policy,
                     "shot_seconds": durations,
                     "research_status": package["editorial"]["status"],
                     "next": "Codex must browse current sources, fill sourced claims and script segments, then run news-validate.",
@@ -2673,7 +3185,9 @@ def main() -> int:
             if args.video_size != "auto" and not SIZE_RE.fullmatch(args.video_size):
                 raise SkillError("--video-size must be WIDTHxHEIGHT or auto")
             selected_mode = args.mode or ("text-to-video" if args.workflow == "text-to-video" else "image-to-video")
-            selected_provider = args.video_provider or ("quickai" if selected_mode == "text-to-video" else "quickainew")
+            selected_provider, selected_provider_policy = resolve_video_provider_options(
+                args.video_provider, args.video_provider_policy
+            )
             path = init_project(
                 args.project,
                 args.title,
@@ -2683,12 +3197,23 @@ def main() -> int:
                 args.video_size,
                 selected_mode,
                 selected_provider,
+                selected_provider_policy,
                 args.video_resolution,
                 args.aspect_ratio,
                 selected_audio_mode,
                 selected_subtitle_source,
             )
-            print_json({"ok": True, "project": str(path), "workflow": args.workflow, "shot_seconds": durations, "target_seconds": sum(durations)})
+            print_json(
+                {
+                    "ok": True,
+                    "project": str(path),
+                    "workflow": args.workflow,
+                    "video_provider": selected_provider,
+                    "video_provider_policy": selected_provider_policy,
+                    "shot_seconds": durations,
+                    "target_seconds": sum(durations),
+                }
+            )
             return 0
         if args.command == "assemble-files":
             clips = [path.resolve() for path in args.clips]
@@ -2763,6 +3288,8 @@ def main() -> int:
                 source_video=source,
                 output_video=output,
                 service_url=args.cosyvoice_url,
+                voicebox_url=args.voicebox_url,
+                tts_provider=args.tts_provider,
                 musetalk_url=args.musetalk_url,
                 force=args.force,
             )
@@ -2804,6 +3331,20 @@ def main() -> int:
             return 0 if not errors else 1
         if args.command == "status":
             print_json({"ok": True, **status_summary(root)})
+            return 0
+        if args.command == "review-shot":
+            print_json(
+                {
+                    "ok": True,
+                    "review": review_shot_asset(
+                        root,
+                        args.shot,
+                        kind=args.kind,
+                        decision=args.decision,
+                        notes=args.notes,
+                    ),
+                }
+            )
             return 0
         if args.command == "audit":
             result = audit_project(root, load_project(root))

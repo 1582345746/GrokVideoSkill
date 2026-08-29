@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import math
 import os
@@ -11,6 +12,7 @@ import tempfile
 import threading
 import unittest
 import struct
+import wave
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,8 +25,21 @@ FAKE_PNG = b"\x89PNG\r\n\x1a\n" + b"fake-png-payload"
 FAKE_MP4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"fake-video-payload"
 FAKE_PCM = b"".join(struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * index / 22050))) for index in range(11025))
 
+
+def pcm_wav(payload: bytes, sample_rate: int = 22050) -> bytes:
+    output = io.BytesIO()
+    with wave.open(output, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(sample_rate)
+        handle.writeframes(payload)
+    return output.getvalue()
+
+
+FAKE_WAV = pcm_wav(FAKE_PCM)
+
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-from gvs_common import load_settings  # noqa: E402
+from gvs_common import APIError, load_settings  # noqa: E402
 from component_manager import (  # noqa: E402
     _docker,
     _download_component_models,
@@ -34,7 +49,17 @@ from component_manager import (  # noqa: E402
     load_model_state,
 )
 from grok_video_studio import composed_video_prompt  # noqa: E402
-from provider_contracts import is_completed, result_urls, task_error, task_id, task_progress, task_status  # noqa: E402
+from provider_contracts import (  # noqa: E402
+    PROVIDER_CAPABILITIES,
+    allows_automatic_failover,
+    classify_provider_error,
+    is_completed,
+    result_urls,
+    task_error,
+    task_id,
+    task_progress,
+    task_status,
+)
 
 
 class ProviderContractTests(unittest.TestCase):
@@ -53,6 +78,25 @@ class ProviderContractTests(unittest.TestCase):
                 if fixture["url"]:
                     self.assertTrue(is_completed(payload))
 
+    def test_provider_capabilities_and_failover_classification(self) -> None:
+        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].text_to_image)
+        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].text_to_video)
+        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].image_to_video)
+        self.assertFalse(PROVIDER_CAPABILITIES["quickainew"].text_to_image)
+        self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].text_to_video)
+        self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].image_to_video)
+        self.assertLess(PROVIDER_CAPABILITIES["quickai"].priority, PROVIDER_CAPABILITIES["quickainew"].priority)
+
+        unsupported = APIError(404, "unsupported endpoint")
+        ambiguous = APIError(502, "gateway timed out")
+        invalid = APIError(422, "invalid prompt")
+        self.assertEqual(classify_provider_error(unsupported, phase="create", task_known=False), "capability_unsupported")
+        self.assertTrue(allows_automatic_failover(unsupported, phase="create", task_known=False))
+        self.assertEqual(classify_provider_error(ambiguous, phase="create", task_known=False), "submission_unknown")
+        self.assertFalse(allows_automatic_failover(ambiguous, phase="create", task_known=False))
+        self.assertEqual(classify_provider_error(invalid, phase="create", task_known=False), "invalid_input")
+        self.assertFalse(allows_automatic_failover(invalid, phase="create", task_known=False))
+
 
 class FakeProviderHandler(BaseHTTPRequestHandler):
     image_creates = 0
@@ -68,7 +112,16 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     audio_payload = FAKE_MP4
     fail_video_create = False
     video_status = "completed"
+    json_video_status = ""
+    multipart_video_status = ""
+    json_video_error = "provider capacity is full"
+    multipart_video_error = "provider capacity is full"
+    json_video_create_status = 0
     tts_creates = 0
+    voicebox_generations = 0
+    voicebox_profiles: list[dict[str, object]] = []
+    voicebox_model_downloaded = True
+    voicebox_cache_dir = ""
     model_ids = ["gpt-image-2", "grok-imagine-video-1.5"]
 
     def log_message(self, format: str, *args: object) -> None:
@@ -91,22 +144,63 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         if self.path == "/v1/models":
             self.send_json({"data": [{"id": model_id} for model_id in type(self).model_ids]})
             return
+        if self.path == "/models/status":
+            self.send_json(
+                {
+                    "models": [
+                        {
+                            "model_name": "qwen-custom-voice-0.6B",
+                            "engine": "qwen_custom_voice",
+                            "model_size": "0.6B",
+                            "hf_repo_id": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+                            "downloaded": type(self).voicebox_model_downloaded,
+                            "downloading": False,
+                        }
+                    ]
+                }
+            )
+            return
+        if self.path == "/models/cache-dir":
+            self.send_json({"path": type(self).voicebox_cache_dir})
+            return
+        if self.path == "/profiles":
+            self.send_bytes(json.dumps(type(self).voicebox_profiles).encode("utf-8"), "application/json")
+            return
+        if self.path == "/profiles/presets/qwen_custom_voice":
+            self.send_json(
+                {
+                    "engine": "qwen_custom_voice",
+                    "voices": [
+                        {"voice_id": "Dylan", "name": "Dylan", "gender": "male", "language": "zh"},
+                        {"voice_id": "Vivian", "name": "Vivian", "gender": "female", "language": "zh"},
+                    ],
+                }
+            )
+            return
+        if self.path == "/generate/voicebox-gen-1/status":
+            self.send_bytes(
+                b'data: {"id":"voicebox-gen-1","status":"generating"}\n\n'
+                b'data: {"id":"voicebox-gen-1","status":"completed","duration":0.5}\n\n',
+                "text/event-stream",
+            )
+            return
+        if self.path == "/audio/voicebox-gen-1":
+            self.send_bytes(FAKE_WAV, "audio/wav")
+            return
         if self.path == "/v1/videos/task-1":
-            payload: dict[str, object] = {"id": "task-1", "status": type(self).video_status}
-            if type(self).video_status == "failed":
-                payload["error"] = {"message": "provider capacity is full"}
+            authorization = self.headers.get("Authorization", "")
+            is_json_video = bool(type(self).json_video_authorization) and authorization == type(self).json_video_authorization
+            status = (
+                type(self).json_video_status if is_json_video else type(self).multipart_video_status
+            ) or type(self).video_status
+            payload: dict[str, object] = {"id": "task-1", "status": status}
+            if status == "failed":
+                payload["error"] = {
+                    "message": type(self).json_video_error if is_json_video else type(self).multipart_video_error
+                }
             self.send_json(payload)
             return
         if self.path == "/v1/videos/task-1/content":
-            self.send_bytes(type(self).video_payload, "video/mp4")
-            return
-        if self.path == "/v1/videos/generations/task-1":
-            payload: dict[str, object] = {"id": "task-1", "status": type(self).video_status}
-            if type(self).video_status == "failed":
-                payload["error"] = {"message": "provider capacity is full"}
-            self.send_json(payload)
-            return
-        if self.path == "/v1/videos/generations/task-1/content":
             self.send_bytes(type(self).video_payload, "video/mp4")
             return
         self.send_json({"error": {"message": "not found"}}, 404)
@@ -117,6 +211,33 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
         if self.path in {"/inference_sft", "/inference_zero_shot", "/inference_instruct2"}:
             type(self).tts_creates += 1
             self.send_bytes(FAKE_PCM, "application/octet-stream")
+            return
+        if self.path == "/profiles":
+            try:
+                value = json.loads(body.decode("utf-8"))
+            except json.JSONDecodeError:
+                value = {}
+            profile = {
+                **value,
+                "id": "voicebox-profile-1",
+                "created_at": "2026-08-29T00:00:00Z",
+                "updated_at": "2026-08-29T00:00:00Z",
+            }
+            type(self).voicebox_profiles.append(profile)
+            self.send_json(profile)
+            return
+        if self.path == "/generate":
+            type(self).voicebox_generations += 1
+            self.send_json(
+                {
+                    "id": "voicebox-gen-1",
+                    "profile_id": "voicebox-profile-1",
+                    "text": "audition",
+                    "language": "zh",
+                    "status": "generating",
+                    "created_at": "2026-08-29T00:00:00Z",
+                }
+            )
             return
         if self.path == "/v1/images/generations" or self.path == "/v1/images/edits":
             type(self).image_creates += 1
@@ -140,7 +261,13 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
                 type(self).last_json_video = json.loads(body.decode("utf-8"))
             except json.JSONDecodeError:
                 type(self).last_json_video = {}
-            self.send_json({"data": {"id": "task-1", "status": "queued"}})
+            if type(self).fail_video_create:
+                self.send_json({"error": {"message": "temporary upstream failure"}}, 502)
+                return
+            if type(self).json_video_create_status:
+                self.send_json({"error": {"message": "provider rejected video create"}}, type(self).json_video_create_status)
+                return
+            self.send_json({"request_id": "task-1"})
             return
         self.send_json({"error": {"message": "not found"}}, 404)
 
@@ -234,10 +361,28 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.multipart_video_authorization = ""
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
+        FakeProviderHandler.json_video_status = ""
+        FakeProviderHandler.multipart_video_status = ""
+        FakeProviderHandler.json_video_error = "provider capacity is full"
+        FakeProviderHandler.multipart_video_error = "provider capacity is full"
+        FakeProviderHandler.json_video_create_status = 0
         FakeProviderHandler.tts_creates = 0
+        FakeProviderHandler.voicebox_generations = 0
+        FakeProviderHandler.voicebox_profiles = []
+        FakeProviderHandler.voicebox_model_downloaded = True
         FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5"]
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
+        voicebox_ref = (
+            self.root
+            / "voicebox-cache"
+            / "models--Qwen--Qwen3-TTS-12Hz-0.6B-CustomVoice"
+            / "refs"
+            / "main"
+        )
+        voicebox_ref.parent.mkdir(parents=True)
+        voicebox_ref.write_text("85e237c12c027371202489a0ec509ded67b5e4b5", encoding="utf-8")
+        FakeProviderHandler.voicebox_cache_dir = str(self.root / "voicebox-cache")
         self.config_dir = self.root / "config"
         self.config_dir.mkdir()
         (self.config_dir / "config.json").write_text(
@@ -303,14 +448,17 @@ class SkillIntegrationTests(unittest.TestCase):
         final = project / "deliverables" / "final.mp4"
         self.assertGreater(final.stat().st_size, 1000)
         self.assertEqual(FakeProviderHandler.image_creates, 1)
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
-        self.assertIn(b'720x1280', FakeProviderHandler.last_video_body)
-        self.assertEqual(FakeProviderHandler.last_video_body.count(b'name="input_reference"'), 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.last_json_video["duration"], 6)
+        self.assertNotIn("seconds", FakeProviderHandler.last_json_video)
+        self.assertNotIn("size", FakeProviderHandler.last_json_video)
+        self.assertNotIn("generate_audio", FakeProviderHandler.last_json_video)
+        self.assertTrue(str(FakeProviderHandler.last_json_video["image"]["url"]).startswith("data:image/png;base64,"))
 
         second = self.run_cli("run", str(project), "--poll-timeout", "5")
         self.assertTrue(second["ok"])
         self.assertEqual(FakeProviderHandler.image_creates, 1)
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
 
         state_path = project / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -320,7 +468,7 @@ class SkillIntegrationTests(unittest.TestCase):
         (project / "clips" / "shot-001.mp4").unlink()
         resumed = self.run_cli("resume", str(project), "--poll-timeout", "5")
         self.assertTrue(resumed["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertTrue((project / "clips" / "shot-001.mp4").is_file())
 
     def test_doctor_accepts_known_billing_suffix_without_fuzzy_model_matching(self) -> None:
@@ -333,7 +481,7 @@ class SkillIntegrationTests(unittest.TestCase):
         blocked = self.run_cli("doctor", expected=1)
         self.assertFalse(blocked["providers"]["quickainew_video"]["model_present"])
 
-    def test_multiple_video_references_use_repeated_field(self) -> None:
+    def test_multiple_video_references_use_quickai_reference_array(self) -> None:
         project = self.root / "multi"
         refs = []
         for index in (1, 2):
@@ -345,7 +493,9 @@ class SkillIntegrationTests(unittest.TestCase):
         project = self.create_project("multi", generate_image=False, references=refs)
         result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
         self.assertTrue(result["ok"])
-        self.assertEqual(FakeProviderHandler.last_video_body.count(b'name="input_reference"'), 2)
+        references = FakeProviderHandler.last_json_video["reference_images"]
+        self.assertEqual(len(references), 2)
+        self.assertTrue(all(str(item["url"]).startswith("data:image/png;base64,") for item in references))
 
     def test_selected_shot_generation_leaves_other_shots_pending(self) -> None:
         project = self.root / "selected"
@@ -684,8 +834,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.image_requests[0][0], "/v1/images/generations")
         self.assertEqual(FakeProviderHandler.image_requests[1][0], "/v1/images/edits")
         self.assertEqual(FakeProviderHandler.image_requests[1][1].count(b'name="image"'), 1)
-        self.assertEqual(FakeProviderHandler.last_video_body.count(b'name="input_reference"'), 1)
-        self.assertNotIn(b"character-master", FakeProviderHandler.last_video_body)
+        self.assertIn("image", FakeProviderHandler.last_json_video)
+        self.assertNotIn("reference_images", FakeProviderHandler.last_json_video)
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_assemble_files_accepts_arbitrary_clip_count(self) -> None:
@@ -712,13 +862,13 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.fail_video_create = True
         first = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
         self.assertFalse(first["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "submission_unknown")
 
         second = self.run_cli("resume", str(project), "--poll-timeout", "5", expected=1)
         self.assertFalse(second["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
 
         FakeProviderHandler.fail_video_create = False
         missing_reason = self.run_cli("resume", str(project), "--poll-timeout", "5", "--retry-failed", expected=1)
@@ -733,18 +883,19 @@ class SkillIntegrationTests(unittest.TestCase):
             "provider dashboard confirmed no usable task",
         )
         self.assertTrue(retried["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 2)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 2)
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         history = state["shots"]["shot-001"]["video"]["history"]
         self.assertEqual(history[-1]["reason"], "provider dashboard confirmed no usable task")
 
     def test_terminal_failed_task_requires_explicit_retry_authorization(self) -> None:
+        self.env.update({"GVS_QUICKAINEW_KEY": "", "GVS_QUICKAINEW_VIDEO_KEY": ""})
         project = self.create_project("terminal-failure", generate_image=False)
         FakeProviderHandler.video_status = "failed"
 
         first = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
         self.assertFalse(first["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         video = state["shots"]["shot-001"]["video"]
         self.assertEqual(video["status"], "failed")
@@ -753,7 +904,7 @@ class SkillIntegrationTests(unittest.TestCase):
         blocked = self.run_cli("resume", str(project), "--poll-timeout", "5", expected=1)
         self.assertFalse(blocked["ok"])
         self.assertIn("--retry-failed", blocked["error"])
-        self.assertEqual(FakeProviderHandler.video_creates, 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
 
         FakeProviderHandler.video_status = "completed"
         retried = self.run_cli(
@@ -766,12 +917,83 @@ class SkillIntegrationTests(unittest.TestCase):
             "terminal provider failure confirmed",
         )
         self.assertTrue(retried["ok"])
-        self.assertEqual(FakeProviderHandler.video_creates, 2)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 2)
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         video = state["shots"]["shot-001"]["video"]
         self.assertEqual(video["status"], "completed")
         self.assertEqual(video["previous_task_id"], "task-1")
         self.assertEqual(video["history"][-1]["reason"], "terminal provider failure confirmed")
+
+    def test_quickai_terminal_failure_fails_over_to_quickainew(self) -> None:
+        project = self.create_project("provider-failover", generate_image=False)
+        FakeProviderHandler.json_video_status = "failed"
+        FakeProviderHandler.multipart_video_status = "completed"
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        attempts = video["provider_attempts"]
+        self.assertEqual([item["provider"] for item in attempts], ["quickai", "quickainew"])
+        self.assertEqual(attempts[0]["error_category"], "provider_task_failed")
+        self.assertEqual(attempts[1]["status"], "completed")
+        self.assertEqual(len({item["request_id"] for item in attempts}), 1)
+        self.assertEqual(len({item["attempt_id"] for item in attempts}), 2)
+        self.assertEqual(video["final_provider"], "quickainew")
+        self.assertEqual(state["budget_usage"]["video_attempts"], 2)
+
+    def test_content_rejection_does_not_fail_over(self) -> None:
+        project = self.create_project("content-rejection", generate_image=False)
+        FakeProviderHandler.json_video_status = "failed"
+        FakeProviderHandler.json_video_error = "content policy moderation rejected this prompt"
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["video"]["error_category"], "content_rejected")
+
+    def test_create_rate_limit_can_fail_over_but_ambiguous_5xx_cannot(self) -> None:
+        project = self.create_project("rate-limit-failover", generate_image=False)
+        FakeProviderHandler.json_video_create_status = 429
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+    def test_shot_asset_review_locks_images_and_requires_reason_for_rejected_video_retry(self) -> None:
+        project = self.create_project("asset-review")
+        self.run_cli("generate-images", str(project))
+        approved = self.run_cli(
+            "review-shot", str(project), "shot-001", "--kind", "image", "--decision", "approve",
+            "--notes", "identity and composition accepted",
+        )
+        self.assertTrue(approved["review"]["locked"])
+
+        self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        rejected = self.run_cli(
+            "review-shot", str(project), "shot-001", "--kind", "video", "--decision", "reject",
+            "--notes", "motion drift",
+        )
+        self.assertEqual(rejected["review"]["decision"], "reject")
+        blocked = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertIn("--retry-failed", blocked["error"])
+        retried = self.run_cli(
+            "generate-videos", str(project), "--poll-timeout", "5", "--retry-failed",
+            "--retry-reason", "user rejected motion drift",
+        )
+        self.assertTrue(retried["ok"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["image"]["review_status"], "approved")
+        self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "completed")
+        approved_video = self.run_cli(
+            "review-shot", str(project), "shot-001", "--kind", "video", "--decision", "approve",
+            "--notes", "replacement motion accepted",
+        )
+        self.assertFalse(approved_video["review"]["locked"])
+        self.assertEqual(approved_video["review"]["next"], "approved video review is recorded")
 
     def test_budget_gate_blocks_before_billable_request(self) -> None:
         project = self.create_project("budget", generate_image=False)
@@ -978,12 +1200,13 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertNotIn("CosyVoice service is unavailable", failed_lipsync["error"])
         self.assertEqual(FakeProviderHandler.tts_creates, 1)
 
-    def test_cached_dialogue_can_resume_without_cosyvoice(self) -> None:
+    def test_cached_dialogue_can_resume_without_tts_provider(self) -> None:
         source = (SKILL_ROOT / "scripts" / "dialogue_workflow.py").read_text(encoding="utf-8")
-        self.assertIn("cosy_available = health.get(\"ok\") is not False", source)
+        self.assertIn('runtime.get("signature") == current_signature and output.is_file()', source)
+        self.assertIn('health_by_provider[selected_provider] = tts.health()', source)
         self.assertIn("is unavailable and dialogue line", source)
 
-    def test_native_dialogue_adds_exact_prompt_and_generate_audio_flag(self) -> None:
+    def test_native_dialogue_adds_exact_prompt_without_nonstandard_quickai_flag(self) -> None:
         project = self.create_project("native-dialogue", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         value["video_mode"] = "text-to-video"
@@ -996,7 +1219,7 @@ class SkillIntegrationTests(unittest.TestCase):
         value["audio"] = {"mode": "native-dialogue", "generate_audio": True}
         (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
         self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
-        self.assertIs(FakeProviderHandler.last_json_video["generate_audio"], True)
+        self.assertNotIn("generate_audio", FakeProviderHandler.last_json_video)
         self.assertIn("这句话必须准确说出。", str(FakeProviderHandler.last_json_video["prompt"]))
         self.assertIn("Do not render the words as on-screen text", str(FakeProviderHandler.last_json_video["prompt"]))
 
@@ -1083,8 +1306,10 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.last_json_video["resolution"], "480p")
         self.assertEqual(FakeProviderHandler.last_json_video["aspect_ratio"], "9:16")
-        self.assertIs(FakeProviderHandler.last_json_video["generate_audio"], False)
-        self.assertNotIn("input_reference", FakeProviderHandler.last_json_video)
+        self.assertEqual(FakeProviderHandler.last_json_video["duration"], 1)
+        self.assertNotIn("seconds", FakeProviderHandler.last_json_video)
+        self.assertNotIn("generate_audio", FakeProviderHandler.last_json_video)
+        self.assertNotIn("image", FakeProviderHandler.last_json_video)
         self.assertNotIn("reference_images", FakeProviderHandler.last_json_video)
         self.assertIn("No app UI", FakeProviderHandler.last_json_video["prompt"])
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
@@ -1171,6 +1396,55 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(value["audio"]["mode"], "native-dialogue")
         self.assertTrue(value["audio"]["generate_audio"])
         self.assertEqual(value["audio"]["subtitle_source"], "upstream")
+
+    def test_video_provider_default_and_explicit_selection_are_persisted(self) -> None:
+        default_project = self.root / "default-provider"
+        self.run_cli(
+            "init", str(default_project), "--title", "Default", "--topic", "Provider",
+            "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
+        )
+        default_value = json.loads((default_project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(default_value["video_provider"], "quickai")
+        self.assertEqual(default_value["video_provider_policy"], "automatic")
+
+        explicit_new = self.root / "explicit-new"
+        self.run_cli(
+            "init", str(explicit_new), "--title", "New", "--topic", "Provider",
+            "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
+            "--video-provider", "quickainew",
+        )
+        new_value = json.loads((explicit_new / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(new_value["video_provider"], "quickainew")
+        self.assertEqual(new_value["video_provider_policy"], "fixed")
+        new_value["story"] = "The user explicitly selected QuickAI New."
+        new_value["shots"][0]["video_prompt"] = "A white paper plane crosses a clear blue sky."
+        (explicit_new / "project.json").write_text(json.dumps(new_value), encoding="utf-8")
+        generated = self.run_cli("generate-videos", str(explicit_new), "--poll-timeout", "5")
+        self.assertEqual(generated["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(FakeProviderHandler.json_video_creates, 0)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+        config = json.loads((self.config_dir / "config.json").read_text(encoding="utf-8"))
+        config["default_video_provider"] = "quickainew"
+        (self.config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        saved_default = self.root / "saved-new-default"
+        self.run_cli(
+            "init", str(saved_default), "--title", "Saved", "--topic", "Provider",
+            "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
+        )
+        saved_value = json.loads((saved_default / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved_value["video_provider"], "quickainew")
+        self.assertEqual(saved_value["video_provider_policy"], "fixed")
+
+        explicit_quickai = self.root / "explicit-quickai"
+        self.run_cli(
+            "init", str(explicit_quickai), "--title", "QuickAI", "--topic", "Provider",
+            "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
+            "--video-provider", "quickai",
+        )
+        quickai_value = json.loads((explicit_quickai / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(quickai_value["video_provider"], "quickai")
+        self.assertEqual(quickai_value["video_provider_policy"], "fixed")
 
     def test_init_can_inherit_user_facing_install_profile(self) -> None:
         project = self.root / "profile-contract"
@@ -1508,6 +1782,217 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(any("consent" in error for error in result["errors"]))
         self.assertTrue(any("reference_text" in error for error in result["errors"]))
 
+    def test_voice_approval_gate_and_duplicate_identity_detection(self) -> None:
+        project = self.create_project("voice-contract-gates", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["audio"] = {"mode": "local-voice", "generate_audio": False}
+        value["characters"] = [
+            {
+                "id": character_id,
+                "name": character_id,
+                "identity": "Original synthetic character.",
+                "references": [],
+                "voice": {
+                    "provider": "cosyvoice",
+                    "voice_id": "same-speaker",
+                    "voice_status": "temporary-test",
+                },
+            }
+            for character_id in ("lead", "friend")
+        ]
+        value["shots"][0]["character_ids"] = ["lead", "friend"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "First.", "start": 0.1, "end": 1.0},
+            {"id": "line-002", "speaker": "friend", "text": "Second.", "start": 1.1, "end": 2.0},
+        ]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        blocked = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("voice_status must be approved" in item for item in blocked["errors"]))
+        self.assertTrue(any("share the same voice identity" in item for item in blocked["errors"]))
+        value["audio"].update({"allow_temporary_voices": True, "allow_shared_voices": True})
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        self.assertTrue(self.run_cli("validate", str(project))["ok"])
+
+    def test_series_voice_sync_excludes_unapproved_candidates(self) -> None:
+        series_root = self.root / "voice-sync-series"
+        self.run_cli(
+            "series-init",
+            str(series_root),
+            "--title",
+            "Voice Sync",
+            "--premise",
+            "Two characters need reviewed voices.",
+            "--episodes",
+            "1",
+            "--episode-seconds",
+            "6",
+            "--clip-seconds",
+            "6",
+            "--mode",
+            "text-to-video",
+        )
+        series = json.loads((series_root / "series.json").read_text(encoding="utf-8"))
+        series["characters"] = [
+            {
+                "id": "approved",
+                "name": "Approved",
+                "identity": "Original character one.",
+                "voice": {"provider": "cosyvoice", "voice_id": "voice-a", "voice_status": "approved"},
+            },
+            {
+                "id": "draft",
+                "name": "Draft",
+                "identity": "Original character two.",
+                "voice": {"provider": "voicebox", "voice_status": "auditioned", "preset_voice_id": "Dylan"},
+            },
+        ]
+        (series_root / "series.json").write_text(json.dumps(series), encoding="utf-8")
+        synced = self.run_cli("series-voice-sync", str(series_root))
+        self.assertTrue(synced["approved_voices_only"])
+        project = json.loads((series_root / "episodes" / "ep-001" / "project.json").read_text(encoding="utf-8"))
+        characters = {item["id"]: item for item in project["characters"]}
+        self.assertEqual(characters["approved"]["voice"]["voice_id"], "voice-a")
+        self.assertNotIn("voice", characters["draft"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_voicebox_audition_approval_and_dialogue_render(self) -> None:
+        project = self.create_project("voicebox-dialogue", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["seconds"] = 1
+        value["characters"] = [
+            {
+                "id": "lead",
+                "name": "Lead",
+                "identity": "An original synthetic presenter.",
+                "references": [],
+                "voice": {"provider": "voicebox", "voice_status": "draft"},
+            }
+        ]
+        value["shots"][0]["character_ids"] = ["lead"]
+        value["shots"][0]["dialogue"] = [
+            {"id": "line-001", "speaker": "lead", "text": "今天先把声音定下来。", "start": 0.05, "end": 0.9}
+        ]
+        value["audio"] = {
+            "mode": "local-voice",
+            "language": "zh-CN",
+            "tts_provider": "voicebox",
+            "generate_audio": False,
+        }
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+
+        blocked = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("voice_status must be approved" in item for item in blocked["errors"]))
+        voices = self.run_cli(
+            "voice-list",
+            "--provider",
+            "voicebox",
+            "--engine",
+            "qwen_custom_voice",
+            "--service-url",
+            self.base_url,
+        )
+        self.assertEqual([item["voice_id"] for item in voices["voices"]], ["Dylan", "Vivian"])
+        audition = self.run_cli(
+            "voice-audition",
+            str(project),
+            "lead",
+            "--provider",
+            "voicebox",
+            "--preset-voice-id",
+            "Dylan",
+            "--engine",
+            "qwen_custom_voice",
+            "--text",
+            "这是周小满的声音试听。",
+            "--candidate-id",
+            "lead-dylan-a",
+            "--service-url",
+            self.base_url,
+        )
+        self.assertEqual(audition["candidate"]["status"], "auditioned")
+        self.assertTrue((project / audition["candidate"]["audio_path"]).is_file())
+        self.assertEqual(FakeProviderHandler.voicebox_generations, 1)
+        self.run_cli("voice-approve", str(project), "lead-dylan-a")
+        already_reviewed = self.run_cli("voice-approve", str(project), "lead-dylan-a", expected=1)
+        self.assertIn("already reviewed", already_reviewed["error"])
+        self.assertTrue(self.run_cli("validate", str(project))["ok"])
+        approved = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(approved["characters"][0]["voice"]["voice_status"], "approved")
+        self.assertEqual(approved["characters"][0]["voice"]["provider_profile_id"], "voicebox-profile-1")
+
+        source = project / "deliverables" / "final.mp4"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(FakeProviderHandler.video_payload)
+        FakeProviderHandler.voicebox_profiles = []
+        rendered = self.run_cli(
+            "dialogue-render",
+            str(project),
+            "--source-video",
+            str(source),
+            "--voicebox-url",
+            self.base_url,
+        )
+        self.assertEqual(rendered["dialogue"]["providers"], ["voicebox"])
+        self.assertEqual(FakeProviderHandler.voicebox_generations, 2)
+        resumed = self.run_cli(
+            "dialogue-render",
+            str(project),
+            "--source-video",
+            str(source),
+            "--voicebox-url",
+            "http://127.0.0.1:1",
+        )
+        self.assertTrue(resumed["dialogue"]["rendered"][0]["skipped"])
+        self.assertEqual(FakeProviderHandler.voicebox_generations, 2)
+
+    def test_voicebox_setup_plan_is_side_effect_free_and_pinned(self) -> None:
+        source = self.root / "missing-voicebox"
+        models = self.root / "planned-models"
+        data = self.root / "planned-data"
+        plan = self.run_cli(
+            "voicebox-setup-plan",
+            "--source",
+            str(source),
+            "--models-root",
+            str(models),
+            "--data-root",
+            str(data),
+        )
+        self.assertEqual(plan["side_effects"], "none")
+        self.assertEqual(plan["models"][0]["revision"], "85e237c12c027371202489a0ec509ded67b5e4b5")
+        self.assertEqual(plan["models"][0]["license"], "Apache-2.0")
+        self.assertFalse(source.exists())
+        self.assertFalse(models.exists())
+        self.assertFalse(data.exists())
+
+    def test_voicebox_audition_never_implicitly_downloads_a_model(self) -> None:
+        project = self.create_project("voicebox-download-guard", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["characters"] = [
+            {"id": "lead", "name": "Lead", "identity": "Original character.", "references": []}
+        ]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        FakeProviderHandler.voicebox_model_downloaded = False
+        blocked = self.run_cli(
+            "voice-audition",
+            str(project),
+            "lead",
+            "--provider",
+            "voicebox",
+            "--preset-voice-id",
+            "Dylan",
+            "--engine",
+            "qwen_custom_voice",
+            "--text",
+            "This must not trigger a download.",
+            "--service-url",
+            self.base_url,
+            expected=1,
+        )
+        self.assertIn("not downloaded", blocked["error"])
+        self.assertEqual(FakeProviderHandler.voicebox_generations, 0)
+        self.assertEqual(FakeProviderHandler.voicebox_profiles, [])
+
     def test_role_specific_credentials_do_not_cross_generation_routes(self) -> None:
         self.env.update(
             {
@@ -1543,6 +2028,14 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_authorization, "Bearer text-video-role-key")
 
         self.run_cli("generate-videos", str(image_project), "--poll-timeout", "5")
+        self.assertEqual(FakeProviderHandler.json_video_authorization, "Bearer text-video-role-key")
+        self.assertEqual(FakeProviderHandler.multipart_video_authorization, "")
+
+        new_project = self.create_project("role-explicit-new", generate_image=False)
+        new_value = json.loads((new_project / "project.json").read_text(encoding="utf-8"))
+        new_value["video_provider"] = "quickainew"
+        (new_project / "project.json").write_text(json.dumps(new_value), encoding="utf-8")
+        self.run_cli("generate-videos", str(new_project), "--poll-timeout", "5")
         self.assertEqual(FakeProviderHandler.multipart_video_authorization, "Bearer image-video-role-key")
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")

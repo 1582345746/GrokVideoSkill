@@ -18,6 +18,90 @@ PROGRESS_KEYS = ("progress", "percent", "percentage")
 URL_KEYS = ("url", "result_url", "resultUrl", "video_url", "videoUrl", "download_url", "downloadUrl")
 
 
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    provider: str
+    title: str
+    text_to_image: bool
+    text_to_video: bool
+    image_to_video: bool
+    priority: int
+    credential_role: str
+
+
+PROVIDER_CAPABILITIES = {
+    "quickai": ProviderCapabilities(
+        provider="quickai",
+        title="QuickAI",
+        text_to_image=True,
+        text_to_video=True,
+        image_to_video=True,
+        priority=1,
+        credential_role="quickai_video_key",
+    ),
+    "quickainew": ProviderCapabilities(
+        provider="quickainew",
+        title="QuickAI New",
+        text_to_image=False,
+        text_to_video=True,
+        image_to_video=True,
+        priority=2,
+        credential_role="quickainew_video_key",
+    ),
+}
+
+
+class ProviderTaskFailedError(SkillError):
+    """A task ID reached a confirmed provider terminal failure state."""
+
+    def __init__(self, message: str, *, status: str = "failed") -> None:
+        self.status = status
+        super().__init__(message)
+
+
+def classify_provider_error(error: Exception, *, phase: str, task_known: bool) -> str:
+    """Return a stable internal category without persisting raw provider payloads."""
+    message = str(error).lower()
+    if isinstance(error, TimeoutError):
+        return "task_timeout" if task_known else "submission_unknown"
+    if isinstance(error, APIError):
+        if error.status in {401, 403}:
+            return "authentication_or_account"
+        if error.status in {400, 409, 422}:
+            return "invalid_input"
+        if error.status in {404, 405, 501}:
+            return "capability_unsupported"
+        if error.status == 429:
+            return "rate_limited"
+        if phase == "create" and error.status in {408, 425, 500, 502, 503, 504}:
+            return "submission_unknown"
+        if error.status >= 500:
+            return "provider_unavailable"
+    if any(value in message for value in ("moderation", "content policy", "safety policy", "prohibited", "nsfw")):
+        return "content_rejected"
+    if any(value in message for value in ("balance", "billing", "credit", "quota", "permission", "unauthorized", "forbidden")):
+        return "authentication_or_account"
+    if any(value in message for value in ("not supported", "unsupported capability", "unsupported endpoint", "unknown provider for model")):
+        return "capability_unsupported"
+    if any(value in message for value in ("invalid prompt", "invalid image", "invalid resolution", "validation error")):
+        return "invalid_input"
+    if "cannot connect to provider" in message or "provider circuit is open" in message:
+        return "submission_unknown" if phase == "create" else "provider_unavailable"
+    if isinstance(error, ProviderTaskFailedError):
+        return "provider_task_failed"
+    return "unknown_provider_error"
+
+
+def allows_automatic_failover(error: Exception, *, phase: str, task_known: bool) -> bool:
+    category = classify_provider_error(error, phase=phase, task_known=task_known)
+    if phase == "create":
+        # These responses prove that the provider rejected the write before creating a task.
+        return category in {"capability_unsupported", "rate_limited"}
+    if phase == "task":
+        return category in {"capability_unsupported", "provider_unavailable", "provider_task_failed"}
+    return False
+
+
 def _objects(value: Any, *, depth: int = 0) -> Iterable[dict[str, Any]]:
     if depth > 5:
         return

@@ -17,7 +17,7 @@ from typing import Any, Iterable
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/1.8.0"
+USER_AGENT = "GrokVideoStudioSkill/1.9.0"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
@@ -240,16 +240,19 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip() or str(stored.get("quickainew_key", "")).strip()
     result["quickai_image_key"] = (
         os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip()
+        or os.environ.get("QUICKAI_IMAGE_API_KEY", "").strip()
         or str(stored.get("quickai_image_key", "")).strip()
         or legacy_quickai
     )
     result["quickai_video_key"] = (
         os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip()
+        or os.environ.get("QUICKAI_VIDEO_API_KEY", "").strip()
         or str(stored.get("quickai_video_key", "")).strip()
         or legacy_quickai
     )
     result["quickainew_video_key"] = (
         os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip()
+        or os.environ.get("QUICKAI_NEW_VIDEO_API_KEY", "").strip()
         or str(stored.get("quickainew_video_key", "")).strip()
         or legacy_quickainew
     )

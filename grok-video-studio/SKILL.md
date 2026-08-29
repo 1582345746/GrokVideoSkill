@@ -1,11 +1,11 @@
 ---
 name: grok-video-studio
-description: Plan and build resumable standalone, episodic, or sourced-news AI video projects with QuickAI and QuickAI New image/video generation, native or deterministic local character dialogue, optional CosyVoice TTS and MuseTalk lip sync, series bibles, per-episode approval and continuity state, reusable character masters, current-news evidence contracts, deterministic subtitles, clean-frame review, audio QA, validated MP4 downloads, and lightweight post-production. Use for text-to-video, image-to-video, supplied-image animation, character consistency, speaking AI characters, voice-over, lip sync, product ads, multi-shot narratives, short drama, multi-episode series, current hot-news videos, subtitles, batch generation, or requests such as 写剧本、生图、生视频、图生视频、人物讲话、角色配音、口型同步、短剧、连续剧、多集视频、生成下一集、热点新闻视频、字幕、批量生成视频 or 合并视频.
+description: Plan and build resumable standalone, episodic, or sourced-news AI video projects with QuickAI and QuickAI New image/video generation, native or deterministic local character dialogue, approved multi-character Voicebox/Qwen or CosyVoice TTS, optional MuseTalk lip sync, series bibles, per-episode approval and continuity state, reusable character masters, current-news evidence contracts, deterministic subtitles, clean-frame review, audio QA, validated MP4 downloads, and lightweight post-production. Use for text-to-video, image-to-video, supplied-image animation, character consistency, speaking AI characters, voice-over, voice auditions, lip sync, product ads, multi-shot narratives, short drama, multi-episode series, current hot-news videos, subtitles, batch generation, or requests such as 写剧本、生图、生视频、图生视频、人物讲话、角色配音、音色试听、口型同步、短剧、连续剧、多集视频、生成下一集、热点新闻视频、字幕、批量生成视频 or 合并视频.
 ---
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.8.0`.
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `1.9.0`.
 
 ## Setup
 
@@ -13,11 +13,12 @@ Create the creative plan with Codex. Use the bundled scripts for credentials, pa
 2. Never place keys in command-line arguments, temporary files, `SKILL.md`, project files, source control, or terminal output. On Windows, configuration stores them with DPAPI under the current user's local application-data directory. The installed Skill directory remains secret-free and updateable.
 3. If the user has not supplied keys in the conversation, use the original hidden interactive `configure` flow instead of inventing credentials.
 4. Run `python scripts/grok_video_studio.py doctor` and resolve the configured credential roles and FFmpeg checks before paid generation. A missing unused role is allowed. Skip `doctor` when the user asks to avoid all real upstream tests.
-5. Confirm the requested video mode before creating a project. Defaults are text-to-video -> QuickAI JSON and image-to-video -> QuickAI New multipart. A project-level `video_provider` may explicitly override this route when the corresponding key is configured. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
+5. Confirm the requested video mode and any provider preference before creating a project. Text-to-video and image-to-video both default to QuickAI with safe QuickAI New fallback. If the user says “生视频选择 QuickAI New”, “use QuickAI New for video”, or equivalent, pass `--video-provider quickainew`; write `video_provider=quickainew` and `video_provider_policy=fixed`, and send both T2V and I2V directly to QuickAI New without first calling QuickAI. An explicit `--video-provider quickai` similarly fixes QuickAI. Use `--video-provider-policy automatic` only when the user wants the fallback chain. Ambiguous create failures and polling timeouts keep the original task and never trigger a second paid create. Do not route through the Canvas browser proxy unless the user explicitly requests a future bridge adapter.
 6. Run `version` after installation. The repository root includes `install.ps1`; Codex can use `-ConfigureFromStdin -SkipProviderTest` to install and configure in one managed terminal session.
 7. Before choosing optional services, run `python scripts/grok_video_studio.py install-plan --profile basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync`. This check has no machine side effects and reports missing FFmpeg, Docker, or NVIDIA prerequisites, key roles, model disk estimate (about 10 GB for precise voice and 17 GB for lip sync including safety margin), and consent requirements. The old names `core`, `native-dialogue`, `local-voice`, and `full-dialogue` are accepted as aliases.
 8. Ask whether the user needs character speech and lip sync. Keep the default `basic` profile for silent/source-audio work. `upstream-dialogue` adds no local dependency. `precise-subtitles` uses only local FFmpeg. `precise-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `lip-sync` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
 9. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
+10. For multi-character preset voices, prefer Voicebox with Qwen CustomVoice. Run `voicebox-setup-plan --source <voicebox-repo> --models-root <E-drive-cache> --data-root <E-drive-data>` first; it is read-only. Do not create the Python environment, install dependencies, download the pinned model, start Voicebox, or generate auditions until the user approves those boundaries. Codex should perform the approved setup rather than asking the user to run each command.
 
 `components-setup --include-models` is resumable. It performs a disk-space preflight, reuses a complete model directory without starting Docker, records a per-model state file under the configured models root, and verifies required files with SHA-256 before reuse. A partial or corrupted model is downloaded again; `components-start` refuses to launch when required model files are missing or empty.
 
@@ -57,20 +58,30 @@ Then choose one audio mode and subtitle source:
 - `preserve`: keep provider/source audio. This does not ask the model to create spoken dialogue.
 - `mute`: intentional silent delivery.
 - `native-dialogue`: send exact dialogue and `generate_audio=true` to the video provider. This is fastest and requires no local model, but speech wording, voice, baked captions, and lip sync remain generative and require human review.
-- `local-voice`: generate each approved line with CosyVoice, fit it to the declared timeline, preserve/duck source audio, normalize loudness, export deterministic SRT, and keep a resumable `dialogue-state.json`.
+- `local-voice`: generate each approved line with the character's `voice.provider` (Voicebox or CosyVoice), fit it to the declared timeline, preserve/duck source audio, normalize loudness, export deterministic SRT, and keep a resumable `dialogue-state.json`.
 - `local-lipsync`: perform `local-voice`, then send the mixed video and dialogue track to the localhost MuseTalk wrapper. Use this only when mouth synchronization is required.
 
 `audio.subtitle_source` is independent from the audio mode. `upstream` preserves any captions rendered by the provider or supplied source and creates no local SRT; `project` derives deterministic subtitles from dialogue, timed cues, narration, or news segments; `none` intentionally delivers no subtitle sidecar or burn. The CLI accepts `--source auto|upstream|project|none` on `subtitles` and the same choice on `dialogue-render`.
 
 For exact wording or a clean subtitle-free master, recommend `local-voice` or `local-lipsync`; native generation may ignore clean-frame instructions and burn dialogue text into pixels. Read [references/dialogue-and-components.md](references/dialogue-and-components.md) before editing voices or installing local services.
 
+Before rendering local dialogue, keep voice selection as its own approval stage:
+
+1. Run `voice-list --provider voicebox --engine qwen_custom_voice --service-url http://127.0.0.1:17493`.
+2. Generate only review candidates with `voice-audition <workspace> <character-id> ...`; do not generate a season's dialogue during casting.
+3. Present the WAV and its technical QA to the user. Use `voice-approve` or `voice-reject` only from the user's decision.
+4. For a series, run `series-voice-sync`; it copies only approved voices. `temporary-test` requires `audio.allow_temporary_voices=true` and must not be described as final casting.
+5. Run project/episode preflight again. A draft, auditioned, rejected, missing, unauthorized, or accidentally duplicated voice blocks local dialogue and episode approval.
+
+`voice-catalog.json` is the durable casting record. Cache signatures include provider, model revision, voice identity or reference hash, text, seed, and performance controls. Changing one character's voice invalidates only that character's dialogue and downstream lip-sync output; it does not regenerate images, clean clips, or subtitle text.
+
 ## Create A Project
 
 1. Initialize a local project:
 
-   `python scripts/grok_video_studio.py init <project-folder> --title "..." --topic "..." --workflow <id> --target-seconds <seconds> --mode text-to-video --video-provider quickai --video-resolution 480p`
+   `python scripts/grok_video_studio.py init <project-folder> --title "..." --topic "..." --workflow <id> --target-seconds <seconds> --mode text-to-video --video-resolution 480p`
 
-   Add `--install-profile precise-subtitles|precise-voice|lip-sync` when the project should inherit the selected audio and subtitle defaults from an installation capability profile. Explicit `--audio-mode` and `--subtitle-source` values take precedence.
+   Add `--video-provider quickai|quickainew` when the user explicitly chooses a video upstream; explicit selection is fixed by default. Add `--video-provider-policy automatic` only for a requested fallback chain. Add `--install-profile precise-subtitles|precise-voice|lip-sync` when the project should inherit the selected audio and subtitle defaults from an installation capability profile. Explicit `--audio-mode` and `--subtitle-source` values take precedence.
 
 2. Let the CLI plan a variable number of shots from the target duration, or override with `--shots`. Every shot must be 1-15 seconds; no project is fixed to eight clips.
 3. Fill `project.json`: story, concise identity and style bibles, and every shot's image/video prompts. For speech, add stable character voice data and timed `dialogue` lines; the dialogue text is also the authoritative subtitle text. Keep stable shot and line IDs.
@@ -85,7 +96,7 @@ Read [references/project-schema.md](references/project-schema.md) before editing
 
 1. Initialize the series and all episode skeletons without spending:
 
-   `python scripts/grok_video_studio.py series-init <series-folder> --title "..." --premise "..." --episodes 20 --episode-seconds 90 --mode image-to-video --video-provider quickainew`
+   `python scripts/grok_video_studio.py series-init <series-folder> --title "..." --premise "..." --episodes 20 --episode-seconds 90 --mode image-to-video`
 
 2. Fill `series.json` with the premise, season arc, stable style, characters, locations, props, and every episode title, synopsis, starting state, and intended ending. Then fill every `episodes/ep-NNN/project.json` story and shot prompt. Let the user review these creative files before any paid request.
 3. For identity-critical I2V, run `series-generate-characters`. It generates one persistent single-sheet master for every enabled character and synchronizes the same reference into each episode. T2V series do not require image masters unless explicitly enabled.
@@ -127,6 +138,7 @@ For episodic I2V, define multiple characters under `series.json.characters` and 
 - Submit and poll only video shots with `generate-videos`.
 - Resume existing task IDs with `resume`. A resumed task must not create a second paid task.
 - Add repeatable `--shot <shot-id>` to process selected shots. Partial `run` operations do not auto-assemble.
+- Review one completed asset with `review-shot <project> <shot-id> --kind image|video --decision approve|reject --notes "..."`. Approved images are hash-locked in state. Rejected assets are preserved, and replacement generation requires `--retry-failed --retry-reason "..."` so the additional paid request is explicit.
 - Add `--progress` to generation or resume commands to receive JSONL progress events on stderr while the final JSON result remains on stdout.
 - Inspect durable state with `status`.
 - Assemble completed clips with `assemble`.
@@ -138,9 +150,9 @@ Keep every final composed image and video prompt at or below 4096 characters. Th
 
 Projects default to a clean frame (`allow_ui_elements=false`): generated footage must not contain accidental app controls, counters, comments, captions, logos, watermarks, or stickers. Set the project or shot override to `true` only when the script intentionally depicts an interface, then review that shot visually.
 
-Do not treat a present audio stream as proof of audible speech. QA measures mean/peak volume and silence ratio. For native dialogue, inspect the video and listen to the line; use optional ASR only as a review signal, never as the source of approved text. For local dialogue, run `dialogue-render <project> [--burn-subtitles]` after clean video assembly. Never store unlicensed voice samples; `reference_audio` requires `consent=synthetic`, `owned`, or `licensed` plus the exact `reference_text`.
+Do not treat a present audio stream as proof of audible speech. QA measures sample rate, channels, duration, mean/peak volume, and silence ratio. For native dialogue, inspect the video and listen to the line; use optional ASR only as a review signal, never as the source of approved text. For local dialogue, run `dialogue-render <project> [--burn-subtitles]` after clean video assembly. Never store unlicensed voice samples; `reference_audio` requires `consent=synthetic`, `owned`, or `licensed` plus the exact `reference_text`. Never clone public figures or third parties without specific rights.
 
-Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` or `image-to-video`; `video_provider` is `quickai` or `quickainew`; resolution is `480p`, `720p`, or `1080p`; aspect ratio is provider-supported. T2V never sends reference images, even when an old keyframe exists in state. I2V sends only explicit references or the current shot keyframe.
+Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` or `image-to-video`; `video_provider` is the preferred provider (`quickai` by default, or explicitly fixed `quickainew`); resolution is `480p`, `720p`, or `1080p`; aspect ratio is provider-supported. T2V never sends reference images, even when an old keyframe exists in state. I2V sends only explicit references or the current shot keyframe. `state.json` records a stable request ID, separate attempt IDs, provider task IDs, sanitized failure categories, the complete provider attempt history, and the final provider.
 
 ## Delivery Gate
 

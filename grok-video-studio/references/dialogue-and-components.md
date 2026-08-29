@@ -9,10 +9,10 @@ Dialogue is part of the project contract, not prose hidden in a prompt. The same
 | `preserve` | None | Preserve existing audio | Source may be silent |
 | `mute` | None | Deterministic silence | No speech |
 | `native-dialogue` | None | Fast, provider-generated | Wording, voice, baked captions, and lip sync are not deterministic |
-| `local-voice` | CosyVoice | Exact approved text, timing, subtitles, loudness | Mouth motion is not corrected |
-| `local-lipsync` | CosyVoice + MuseTalk | Exact text/audio plus mouth correction | Larger install and slower GPU render |
+| `local-voice` | Approved Voicebox or CosyVoice provider | Exact approved text, timing, subtitles, loudness | Mouth motion is not corrected |
+| `local-lipsync` | Approved TTS provider + MuseTalk | Exact text/audio plus mouth correction | Larger install and slower GPU render |
 
-`native-dialogue` sends `generate_audio=true` and injects timed lines into the video prompt. A real QuickAI acceptance test confirmed an audible AAC track, but the provider also burned Chinese dialogue into the image despite the clean-frame instruction. Always inspect and listen.
+`native-dialogue` injects timed lines into the video prompt. QuickAI uses its current JSON video contract without a non-standard `generate_audio` field; QuickAI New sends `generate_audio=true` in its multipart contract. A real QuickAI acceptance test confirmed an audible AAC track, but the provider also burned Chinese dialogue into the image despite the clean-frame instruction. Always inspect and listen.
 
 `local-voice` and `local-lipsync` require an already assembled clean source video. Run:
 
@@ -36,7 +36,10 @@ Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SR
     "generate_audio": false,
     "preserve_source_audio": true,
     "duck_source_audio": true,
-    "subtitle_source": "project"
+    "subtitle_source": "project",
+    "tts_provider": "voicebox",
+    "allow_temporary_voices": false,
+    "allow_shared_voices": false
   },
   "characters": [{
     "id": "lead",
@@ -44,11 +47,17 @@ Subtitle delivery is always a reversible derivative. Keep `final.mp4`, export SR
     "identity": "Stable visual identity",
     "references": [],
     "voice": {
-      "provider": "cosyvoice",
-      "voice_id": "optional-model-speaker-id",
-      "reference_audio": "assets/voices/lead.wav",
-      "reference_text": "The exact words spoken in the reference recording.",
-      "consent": "synthetic"
+      "provider": "voicebox",
+      "voice_type": "preset",
+      "voice_status": "approved",
+      "preset_engine": "qwen_custom_voice",
+      "preset_voice_id": "Dylan",
+      "provider_profile_id": "voicebox-profile-id",
+      "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      "model_revision": "85e237c12c027371202489a0ec509ded67b5e4b5",
+      "seed": 42,
+      "source_license": "Apache-2.0",
+      "approved_by": "user"
     }
   }],
   "shots": [{
@@ -72,6 +81,16 @@ Line IDs must be unique across a project. Lines cannot overlap and must fit insi
 
 A zero-shot voice reference is allowed only when `consent` is `synthetic`, `owned`, or `licensed`, and `reference_text` is present. Do not clone public figures or third parties without rights.
 
+## Voice casting and providers
+
+`audio.mode` chooses the production behavior; `audio.tts_provider` chooses the default synthesis provider. A character's `voice.provider` can override the default. Existing projects with a valid legacy `voice_id` or rights-cleared reference and no explicit status remain compatible and are treated as already approved.
+
+Run `voice-list`, then `voice-audition`. The audition is stored under `assets/voice-auditions/<character>/`, technically analyzed, and recorded in `voice-catalog.json`; it does not change the active character voice. Only `voice-approve` changes the contract. `series-voice-sync` copies only approved voices into episodes. `temporary-test` is blocked unless the series explicitly sets `audio.allow_temporary_voices=true`.
+
+Voicebox is accessed only through its loopback REST API. The supported production slice is Qwen CustomVoice preset speech (0.6B and 1.7B) and Voicebox's Kokoro presets. Voicebox output is downloaded into the video project, so dialogue recovery never depends on Voicebox database paths. CosyVoice remains supported through the same provider registry. VoxCPM is experimental: a design prompt is not a stable production identity and must first produce a reviewed master audio.
+
+The cache signature contains text, speaker, provider, model revision, preset/profile identity or reference hash, seed, and performance controls. Recasting one character rebuilds only that character's dialogue and subsequent lip-sync derivative. It does not recreate clean video clips, keyframes, or subtitle text.
+
 ## Component profiles
 
 Run `install-plan --profile <basic|upstream-dialogue|precise-subtitles|precise-voice|lip-sync>` before changing the machine. It is side-effect free and is the user-facing capability plan. Run `components-plan --profile <profile>` for lower-level source checkout and model details.
@@ -88,7 +107,7 @@ The user-facing profiles map to component profiles as follows:
 
 - `core`: no local AI service.
 - `native-dialogue`: no local AI service; uses the configured video provider.
-- `local-voice`: pinned CosyVoice source, isolated Docker runtime, and CosyVoice model weights.
+- `local-voice`: pinned CosyVoice source/runtime when reference cloning is selected; Voicebox/Qwen preset casting uses its own isolated Python 3.12 service plan.
 - `full-dialogue`: local-voice plus pinned MuseTalk source/runtime/weights.
 
 After the user approves the profile, storage locations, model downloads, and Docker GPU use:
@@ -100,6 +119,14 @@ python scripts/grok_video_studio.py components-setup --profile local-voice --acc
 python scripts/grok_video_studio.py components-start --profile local-voice
 python scripts/grok_video_studio.py components-doctor --profile local-voice
 ```
+
+For Voicebox, run the read-only plan first:
+
+```text
+python scripts/grok_video_studio.py voicebox-setup-plan --source <voicebox-repo> --models-root <models-root> --data-root <data-root>
+```
+
+The plan pins the Voicebox source commit and Qwen model revision, checks `uv`, isolated Python 3.12, GPU memory, E-drive storage, model cache, and loopback health. The managed service uses `HF_HUB_OFFLINE=1` after the pinned snapshot is present, and the adapter compares Voicebox's actual cache `refs/main` with the approved revision before generation. Codex may execute the approved setup stages for the user, but no environment creation, dependency install, model download, service start, or audition is implicit.
 
 Managed host ports bind only to `127.0.0.1`. CosyVoice uses port `9880`; MuseTalk uses `9881`. On an 8 GB card, start one full-dialogue stage at a time with `components-start --profile full-dialogue --component cosyvoice`, then switch with `--component musetalk`; the switch stops the sibling managed container before starting the selected service. `--component all` is an explicit opt-in for machines with enough VRAM. `components-stop` stops and removes only the selected `gvs-*-service` containers; sources, model weights, and generated media remain.
 

@@ -30,4 +30,4 @@ Describe one continuous subject motion, one camera motion, environmental motion,
 
 ## Multi-reference use
 
-Order references from most authoritative to least authoritative. Selected `characters[].references` are added automatically before explicit `shot.image_references`. Multiple files may be accepted by the image endpoint, but an upstream model may ignore later references. QuickAI New workflows should prefer the current shot keyframe as one video reference.
+Order references from most authoritative to least authoritative. Selected `characters[].references` are added automatically before explicit `shot.image_references`. Multiple files may be accepted by the image endpoint, but an upstream model may ignore later references. Both video providers should receive only the current shot keyframe for image-to-video, never the multi-view master sheet.

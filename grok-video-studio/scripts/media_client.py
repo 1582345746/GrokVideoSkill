@@ -26,6 +26,7 @@ from provider_contracts import (
     COMPLETED_STATES,
     FAILED_STATES,
     CircuitBreaker,
+    ProviderTaskFailedError,
     is_completed,
     result_urls,
     safe_operation,
@@ -272,7 +273,7 @@ class QuickAINewVideoClient:
             if status in COMPLETED_STATES or is_completed(payload):
                 return payload
             if status in FAILED_STATES:
-                raise SkillError(task_error(payload))
+                raise ProviderTaskFailedError(task_error(payload), status=status)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"video task polling timed out: {task_id}")
@@ -350,15 +351,12 @@ class QuickAIVideoClient:
         payload: dict[str, Any] = {
             "model": self.model,
             "prompt": prompt,
-            "seconds": seconds,
+            "duration": seconds,
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
-            "generate_audio": generate_audio,
         }
-        if size and size != "auto":
-            payload["size"] = size
         if len(reference_paths) == 1:
-            payload["input_reference"] = self._data_url(reference_paths[0])
+            payload["image"] = {"url": self._data_url(reference_paths[0])}
         elif reference_paths:
             payload["reference_images"] = [{"url": self._data_url(path)} for path in reference_paths]
         response = request_json(
@@ -376,7 +374,7 @@ class QuickAIVideoClient:
     def query(self, task_id: str) -> tuple[str, dict[str, Any]]:
         encoded = urllib.parse.quote(task_id, safe="")
         payload = safe_operation(
-            lambda: request_json("GET", api_url(self.base_url, f"/v1/videos/generations/{encoded}"), key=self.key, timeout=60),
+            lambda: request_json("GET", api_url(self.base_url, f"/v1/videos/{encoded}"), key=self.key, timeout=60),
             breaker=self.breaker,
         )
         status = task_status(payload)
@@ -406,7 +404,7 @@ class QuickAIVideoClient:
             if status in COMPLETED_STATES or is_completed(payload):
                 return payload
             if status in FAILED_STATES:
-                raise SkillError(task_error(payload))
+                raise ProviderTaskFailedError(task_error(payload), status=status)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError(f"video task polling timed out: {task_id}")
@@ -415,7 +413,7 @@ class QuickAIVideoClient:
 
     def download(self, task_id: str, status_payload: dict[str, Any], destination: Path) -> None:
         encoded = urllib.parse.quote(task_id, safe="")
-        content_url = api_url(self.base_url, f"/v1/videos/generations/{encoded}/content")
+        content_url = api_url(self.base_url, f"/v1/videos/{encoded}/content")
         content_error: Exception | None = None
         try:
             safe_operation(lambda: download_file(content_url, destination, key=self.key, timeout=300), breaker=self.breaker)

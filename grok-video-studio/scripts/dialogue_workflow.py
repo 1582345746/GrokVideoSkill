@@ -7,15 +7,16 @@ import re
 from pathlib import Path
 from typing import Any
 
-from audio_client import CosyVoiceClient, MuseTalkClient
+from audio_client import MuseTalkClient
 from component_manager import load_component_settings
 from gvs_common import SkillError, atomic_write_json
 from media_tools import mix_dialogue_track, probe_media, render_dialogue_track, replace_audio_track
+from tts_providers import create_tts_provider
+from voice_contracts import canonical_voice_contract, duplicate_voice_errors, file_digest, validate_voice_contract
 
 
 DIALOGUE_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
-VOICE_CONSENTS = {"synthetic", "owned", "licensed"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -30,6 +31,9 @@ def audio_config(project: dict[str, Any]) -> dict[str, Any]:
         "generate_audio": bool(value.get("generate_audio", mode == "native-dialogue")),
         "preserve_source_audio": bool(value.get("preserve_source_audio", True)),
         "duck_source_audio": bool(value.get("duck_source_audio", True)),
+        "tts_provider": str(value.get("tts_provider", "cosyvoice")).strip().lower() or "cosyvoice",
+        "allow_temporary_voices": bool(value.get("allow_temporary_voices", False)),
+        "allow_shared_voices": bool(value.get("allow_shared_voices", False)),
     }
 
 
@@ -64,6 +68,8 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("audio.mode must be preserve, mute, native-dialogue, local-voice, or local-lipsync")
     if config["subtitle_source"] not in SUBTITLE_SOURCES:
         errors.append("audio.subtitle_source must be upstream, project, or none")
+    if config["tts_provider"] not in {"cosyvoice", "voicebox", "voxcpm"}:
+        errors.append("audio.tts_provider must be cosyvoice, voicebox, or voxcpm")
     if config["mode"] == "native-dialogue" and not config["generate_audio"]:
         errors.append("audio.generate_audio must be true for native-dialogue")
     if config["mode"] in {"mute", "local-voice", "local-lipsync"} and config["generate_audio"]:
@@ -125,27 +131,34 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
                 if line.get(field) is not None and not isinstance(line.get(field), bool):
                     errors.append(f"{line_prefix}.{field} must be a boolean")
     if config["mode"] in {"local-voice", "local-lipsync"}:
+        used_characters: list[dict[str, Any]] = []
         for speaker in sorted(used_speakers):
             character = characters[speaker]
+            used_characters.append(character)
             voice = character.get("voice")
             prefix = f"character {speaker}.voice"
             if not isinstance(voice, dict):
                 errors.append(f"{prefix} is required for local dialogue")
                 continue
-            reference = str(voice.get("reference_audio", "")).strip()
-            voice_id = str(voice.get("voice_id", "")).strip()
-            if not reference and not voice_id:
-                errors.append(f"{prefix} requires voice_id or reference_audio")
-            if reference:
-                consent = str(voice.get("consent", "")).strip().lower()
-                if consent not in VOICE_CONSENTS:
-                    errors.append(f"{prefix}.consent must be synthetic, owned, or licensed when reference_audio is used")
-                try:
-                    project_path(root, reference)
-                except SkillError as error:
-                    errors.append(str(error))
-                if not str(voice.get("reference_text", "")).strip():
-                    errors.append(f"{prefix}.reference_text is required for zero-shot TTS")
+            errors.extend(
+                validate_voice_contract(
+                    voice,
+                    prefix=prefix,
+                    default_provider=config["tts_provider"],
+                    resolve_path=lambda value: project_path(root, value),
+                    require_identity=True,
+                    require_approved=True,
+                    allow_temporary=config["allow_temporary_voices"],
+                )
+            )
+        errors.extend(
+            duplicate_voice_errors(
+                used_characters,
+                default_provider=config["tts_provider"],
+                resolve_path=lambda value: project_path(root, value),
+                allow_shared=config["allow_shared_voices"],
+            )
+        )
     return errors
 
 
@@ -239,14 +252,6 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
     return {"mode": audio_config(project)["mode"], "line_count": len(lines), "lines": items, "warnings": warnings}
 
 
-def _file_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def _load_state(root: Path) -> dict[str, Any]:
     path = root / "dialogue-state.json"
     if not path.is_file():
@@ -267,6 +272,8 @@ def render_local_dialogue(
     source_video: Path,
     output_video: Path,
     service_url: str | None = None,
+    voicebox_url: str | None = None,
+    tts_provider: str | None = None,
     musetalk_url: str | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
@@ -280,11 +287,9 @@ def render_local_dialogue(
         raise SkillError(f"dialogue source video does not exist: {source_video}")
     settings = load_component_settings()
     services = settings.get("services") if isinstance(settings.get("services"), dict) else {}
-    cosy_url = service_url or str(services.get("cosyvoice", "http://127.0.0.1:9880"))
-    tts = CosyVoiceClient(cosy_url)
-    health = tts.health()
-    cosy_available = health.get("ok") is not False
-    unavailable_detail = health.get("error", health)
+    service_overrides = {"cosyvoice": service_url, "voicebox": voicebox_url}
+    providers: dict[str, Any] = {}
+    health_by_provider: dict[str, dict[str, Any]] = {}
     state = _load_state(root)
     state_path = root / "dialogue-state.json"
     characters = {str(item.get("id", "")): item for item in project.get("characters", []) if isinstance(item, dict)}
@@ -292,26 +297,21 @@ def render_local_dialogue(
     for line in dialogue_lines(project):
         line_id = str(line["id"])
         character = characters[str(line["speaker"])]
-        voice = character["voice"]
+        selected_provider = (str(character["voice"].get("provider", "")) or tts_provider or config["tts_provider"]).strip().lower()
+        voice = canonical_voice_contract(character["voice"], selected_provider)
         reference_value = str(voice.get("reference_audio", "")).strip()
         reference = project_path(root, reference_value) if reference_value else None
-        available_speakers = health.get("speakers") if cosy_available else None
         voice_id = str(voice.get("voice_id", "")).strip()
-        if reference is None and isinstance(available_speakers, list) and voice_id not in available_speakers:
-            raise SkillError(
-                f"CosyVoice model does not provide voice_id {voice_id!r}; add a consented reference_audio or choose an available speaker"
-            )
         signature_value = {
             "text": str(line["text"]),
             "speaker": str(line["speaker"]),
-            "voice_id": str(voice.get("voice_id", "")),
-            "reference_text": str(voice.get("reference_text", "")),
-            "instruct_text": str(voice.get("instruct_text", "")),
+            "provider": selected_provider,
+            "voice": voice,
             "emotion": str(line.get("emotion", "")),
         }
         digest = hashlib.sha256(json.dumps(signature_value, ensure_ascii=False, sort_keys=True).encode("utf-8"))
         if reference:
-            digest.update(_file_digest(reference).encode("ascii"))
+            digest.update(file_digest(reference).encode("ascii"))
         current_signature = digest.hexdigest()
         output = root / "assets" / "dialogue" / str(line["shot_id"]) / f"{line_id}.wav"
         runtime = state["lines"].get(line_id, {})
@@ -319,19 +319,43 @@ def render_local_dialogue(
             result = dict(runtime)
             result["skipped"] = True
         else:
-            if not cosy_available:
+            if selected_provider not in providers:
+                providers[selected_provider] = create_tts_provider(
+                    selected_provider,
+                    services,
+                    service_url=service_overrides.get(selected_provider),
+                )
+            tts = providers[selected_provider]
+            if selected_provider not in health_by_provider:
+                health_by_provider[selected_provider] = tts.health()
+            health = health_by_provider[selected_provider]
+            available = health.get("ok") is not False
+            if not available:
                 raise SkillError(
-                    f"CosyVoice service is unavailable and dialogue line {line_id} is not cached: {unavailable_detail}"
+                    f"{selected_provider} service is unavailable and dialogue line {line_id} is not cached: {health.get('error', health)}"
+                )
+            available_speakers = health.get("speakers")
+            if selected_provider == "cosyvoice" and reference is None and isinstance(available_speakers, list) and voice_id not in available_speakers:
+                raise SkillError(
+                    f"CosyVoice model does not provide voice_id {voice_id!r}; add a consented reference_audio or choose an available speaker"
                 )
             result = tts.synthesize(
                 str(line["text"]),
                 output,
-                voice_id=voice_id,
+                voice=voice,
                 reference_audio=reference,
-                reference_text=str(voice.get("reference_text", "")),
-                instruct_text=str(voice.get("instruct_text", "")) or str(line.get("emotion", "")),
+                language=config["language"],
+                emotion=str(line.get("emotion", "")),
+                profile_name=f"GVS {character.get('id', line['speaker'])}",
             )
-            result.update({"signature": current_signature, "speaker": line["speaker"], "shot_id": line["shot_id"]})
+            result.update(
+                {
+                    "signature": current_signature,
+                    "speaker": line["speaker"],
+                    "shot_id": line["shot_id"],
+                    "provider": selected_provider,
+                }
+            )
             state["lines"][line_id] = result
             atomic_write_json(state_path, state)
         rendered.append({**result, "id": line_id, "start": line["global_start"], "end": line["global_end"], "path": str(output.resolve())})
@@ -358,6 +382,7 @@ def render_local_dialogue(
         lipsync_result = replace_audio_track(lipsync_raw, output_video, lipsync_output)
     return {
         "mode": config["mode"],
+        "providers": sorted({str(item.get("provider", config["tts_provider"])) for item in rendered}),
         "line_count": len(rendered),
         "rendered": rendered,
         "track": track_result,
