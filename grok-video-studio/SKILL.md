@@ -5,9 +5,9 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.0.1` (`upstream-first`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.0.2` (`upstream-first`).
 
-For v1 projects, read `docs/v2.0-upstream-first-migration.zh-CN.md` before changing audio, subtitle, prompt, retry, or series fields.
+For v1 projects, read `references/v2.0-upstream-first-migration.zh-CN.md` before changing audio, subtitle, prompt, retry, or series fields.
 
 ## Setup
 

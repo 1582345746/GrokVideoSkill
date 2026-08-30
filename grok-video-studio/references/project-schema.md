@@ -154,7 +154,7 @@ New projects can inherit this pair from an installation profile with `init`, `se
 
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. `request_id` stays stable across safe provider fallback, while every billable write has a distinct `attempt_id` under `provider_attempts`. Paths must be project-relative and stay inside the project.
 
-`review-shot` records the reviewed file SHA-256, decision, notes, and timestamp. An approved image is marked `locked=true`; a rejected image or video keeps its original asset and task metadata but moves to a failed review state. Regeneration then requires the normal explicit retry reason.
+`review-shot` records the reviewed file SHA-256, decision, notes, and timestamp. An approved image is marked `locked=true`; a rejected image or video is moved to `assets/rejected/` or `clips/rejected/` with its SHA-256 in the filename while task metadata moves to a failed review state. Regeneration then requires the normal explicit retry reason and writes a new canonical asset without overwriting the rejected media.
 
 ## Narration and subtitles
 

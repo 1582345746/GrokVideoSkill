@@ -1,4 +1,4 @@
-# Grok Video Studio v2.0.1 upstream-first 测试与使用指南
+# Grok Video Studio v2.0.2 upstream-first 测试与使用指南
 
 本文面向技能使用者和验收人员。所有示例都是可以直接发给 Codex 的标准话术，不包含真实 Key。
 
@@ -55,7 +55,7 @@
 
 通过标准：
 
-- 安装版本为 `2.0.1`。
+- 安装版本为 `2.0.2`。
 - 安装目录可读取，默认 `install-plan --profile upstream-dialogue` 成功；需要静音或保留源音频时另验 `basic`。
 - 既有凭据角色仍可用，输出中没有 Key 或 Key 片段。
 - FFmpeg 和 ffprobe 可用。

@@ -1268,6 +1268,10 @@ class SkillIntegrationTests(unittest.TestCase):
             "--notes", "motion drift",
         )
         self.assertEqual(rejected["review"]["decision"], "reject")
+        rejected_path = Path(rejected["review"]["path"])
+        self.assertTrue(rejected_path.is_file())
+        self.assertEqual(rejected_path.parent, project / "clips" / "rejected")
+        self.assertFalse((project / "clips" / "shot-001.mp4").exists())
         blocked = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
         self.assertIn("--retry-failed", blocked["error"])
         retried = self.run_cli(
@@ -1275,6 +1279,8 @@ class SkillIntegrationTests(unittest.TestCase):
             "--retry-reason", "user rejected motion drift",
         )
         self.assertTrue(retried["ok"])
+        self.assertTrue(rejected_path.is_file())
+        self.assertTrue((project / "clips" / "shot-001.mp4").is_file())
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["shots"]["shot-001"]["image"]["review_status"], "approved")
         self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "completed")

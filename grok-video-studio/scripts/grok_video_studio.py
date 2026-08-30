@@ -109,7 +109,7 @@ from voice_workflow import (
 from voice_setup import voicebox_setup_plan
 
 
-SKILL_VERSION = "2.0.1"
+SKILL_VERSION = "2.0.2"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -2678,6 +2678,19 @@ def status_summary(root: Path) -> dict[str, Any]:
     }
 
 
+def preserve_rejected_asset(root: Path, path: Path, shot_id: str, *, kind: str, digest: str) -> Path:
+    archive_root = root / ("assets/rejected" if kind == "image" else "clips/rejected")
+    archive_root.mkdir(parents=True, exist_ok=True)
+    destination = archive_root / f"{shot_id}-{digest}{path.suffix.lower()}"
+    if destination.exists():
+        if file_digest(destination) != digest:
+            raise SkillError(f"rejected asset archive collision: {destination}")
+        path.unlink()
+    else:
+        os.replace(path, destination)
+    return destination
+
+
 @locked_project_state
 def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, notes: str) -> dict[str, Any]:
     project = require_valid_project(root)
@@ -2692,6 +2705,9 @@ def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, not
     digest = file_digest(path)
     if runtime.get("sha256") and runtime.get("sha256") != digest:
         raise SkillError(f"{kind} asset changed after generation; review is blocked")
+    if decision == "reject":
+        path = preserve_rejected_asset(root, path, shot_id, kind=kind, digest=digest)
+        runtime["path"] = path.relative_to(root).as_posix()
     archive_runtime_attempt(runtime, f"user review: {decision}")
     runtime.update(
         {
@@ -2714,7 +2730,7 @@ def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, not
             }
         )
     save_state(root, state)
-    write_event(root, {"kind": f"{kind}_reviewed", "shot_id": shot_id, "decision": decision, "sha256": digest})
+    write_event(root, {"kind": f"{kind}_reviewed", "shot_id": shot_id, "decision": decision, "sha256": digest, "path": path.relative_to(root).as_posix()})
     if decision == "approve":
         next_action = "approved image is hash-locked" if kind == "image" else "approved video review is recorded"
     else:
