@@ -107,8 +107,12 @@ def project_state_lock(root: Path, *, timeout_seconds: float = 30.0) -> Iterator
 def locked_project_state(function: Callable[..., _T]) -> Callable[..., _T]:
     @wraps(function)
     def wrapped(root: Path, *args: Any, **kwargs: Any) -> _T:
-        with project_state_lock(root):
-            return function(root, *args, **kwargs)
+        # Windows runners can expose the same temporary directory through both
+        # its long name and an 8.3 alias. Keep locking, path containment, and
+        # relative-path serialization on one canonical root for the operation.
+        canonical_root = root.expanduser().resolve()
+        with project_state_lock(canonical_root):
+            return function(canonical_root, *args, **kwargs)
 
     return wrapped
 

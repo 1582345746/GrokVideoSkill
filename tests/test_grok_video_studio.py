@@ -40,7 +40,7 @@ def pcm_wav(payload: bytes, sample_rate: int = 22050) -> bytes:
 FAKE_WAV = pcm_wav(FAKE_PCM)
 
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
-from gvs_common import APIError, load_settings  # noqa: E402
+from gvs_common import APIError, load_settings, locked_project_state  # noqa: E402
 from component_manager import (  # noqa: E402
     _docker,
     _download_component_models,
@@ -683,6 +683,19 @@ class SkillIntegrationTests(unittest.TestCase):
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         self.assertEqual(state["shots"]["shot-001"]["image"]["review_status"], "approved")
         self.assertEqual(state["shots"]["shot-002"]["image"]["review_status"], "approved")
+
+    def test_locked_project_state_passes_one_canonical_root_to_mutations(self) -> None:
+        unresolved = self.root / "unused-parent" / ".." / "canonical-project"
+        received: list[Path] = []
+
+        @locked_project_state
+        def mutate(root: Path) -> Path:
+            received.append(root)
+            return root
+
+        result = mutate(unresolved)
+        self.assertEqual(result, unresolved.resolve())
+        self.assertEqual(received, [unresolved.resolve()])
 
     def test_validation_rejects_credentials_and_missing_prompts(self) -> None:
         project = self.create_project("invalid")
@@ -1558,7 +1571,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(rejected["review"]["decision"], "reject")
         rejected_path = Path(rejected["review"]["path"])
         self.assertTrue(rejected_path.is_file())
-        self.assertEqual(rejected_path.parent, project / "clips" / "rejected")
+        self.assertTrue(rejected_path.parent.samefile(project / "clips" / "rejected"))
         self.assertFalse((project / "clips" / "shot-001.mp4").exists())
         blocked = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
         self.assertIn("--retry-failed", blocked["error"])
