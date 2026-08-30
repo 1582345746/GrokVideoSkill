@@ -5,7 +5,7 @@
   "project_type": "single-clip",
   "director_mode": "performance",
   "genre_packs": [],
-  "routes": ["text-to-video", "image-to-video"],
+  "routes": ["image-to-video"],
   "default_shots": 1,
   "preferred_clip_seconds": 8,
   "character_master": false,
