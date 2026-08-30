@@ -2,9 +2,16 @@
   "id": "character-consistent-story",
   "title": "角色一致性故事",
   "summary": "先生成一张人物三视图母版，再派生各镜头关键帧和视频。",
+  "project_type": "cinematic-short",
+  "director_mode": "cinematic-short",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
   "default_shots": 3,
   "preferred_clip_seconds": 8,
   "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "continue-action",
+  "shot_roles": ["establishing", "reaction", "ending_hook"],
   "shot_defaults": {
     "generate_image": true,
     "use_character_master": true
@@ -14,6 +21,6 @@
     "story": "人物三视图必须生成在同一张角色设定图中。每个分镜从这张母版派生一张场景关键帧。",
     "character_master": "生成一张干净的角色设定总图，在同一画布中展示同一人物的正面、侧面和背面或全身视角；保持同一张脸、发型、服装和身体比例，不添加其他人物。",
     "image_prompt": "引用角色母版，描述当前分镜唯一的场景、姿态、表情、构图和光线。",
-    "video_prompt": "只让当前关键帧中的人物完成一个连续动作；锁定脸、发型、服装、身体比例和场景连续性。"
+    "video_prompt": "只让当前关键帧中的人物完成一个连续动作；锁定脸、发型、服装、身体比例和场景连续性；保留上游原生声音。"
   }
 }

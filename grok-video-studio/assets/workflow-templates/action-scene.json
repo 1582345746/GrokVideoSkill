@@ -1,0 +1,26 @@
+{
+  "id": "action-scene",
+  "title": "动作与打斗场景",
+  "summary": "把威胁、攻击、闪避、撞击、反应和环境破坏拆成可剪辑动作节点。",
+  "project_type": "cinematic-short",
+  "director_mode": "action-scene",
+  "genre_packs": ["wuxia"],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 6,
+  "preferred_clip_seconds": 5,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "cut-on-action",
+  "shot_roles": ["wide", "closeup", "medium", "insert", "reaction", "ending_hook"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": true,
+    "audio_intent": "effects-ambience"
+  },
+  "guidance": {
+    "ask": ["对手与空间", "动作类型", "关键撞击点", "特效尺度", "目标时长"],
+    "story": "一段只承担一个动作节点，并明确动作的起点、接触点、结果和下一镜头承接。",
+    "image_prompt": "锁定人物左右关系、攻击方向、道具和可破坏环境。",
+    "video_prompt": "用上游原生撞击声、脚步、衣料和环境破坏声增强力度；在动作中切出，不做胜利摆姿。"
+  }
+}

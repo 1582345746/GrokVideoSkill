@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import time
 import urllib.parse
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -243,9 +244,46 @@ def validate_news_contract(root: Path, project: dict[str, Any], *, allow_missing
 
 
 def news_context(root: Path) -> dict[str, Any]:
+    news = load_news_contract(root)
+    project = apply_news_script(read_json(root / "project.json"), news)
     return {
-        "project": read_json(root / "project.json"),
-        "news": load_news_contract(root),
+        "project": project,
+        "news": news,
         "project_path": str((root / "project.json").resolve()),
         "news_path": str(news_file(root).resolve()),
     }
+
+
+def apply_news_script(project: dict[str, Any], news: dict[str, Any]) -> dict[str, Any]:
+    """Overlay narration and visible beats without mutating project.json."""
+    value = deepcopy(project)
+    segments = {
+        str(item.get("shot_id", "")): item
+        for item in news.get("script_segments", [])
+        if isinstance(item, dict) and str(item.get("shot_id", "")).strip()
+    }
+    generated_beats: list[dict[str, Any]] = []
+    for shot in value.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        shot_id = str(shot.get("id", ""))
+        segment = segments.get(shot_id)
+        if not segment:
+            continue
+        narration = str(segment.get("narration", "")).strip()
+        if narration and not str(shot.get("narration", "")).strip():
+            shot["narration"] = narration
+        if not str(shot.get("beat_id", "")).strip():
+            shot["beat_id"] = f"beat-{shot_id}"
+        visible = str(shot.get("summary", "")).strip() or str(shot.get("video_prompt", "")).strip()
+        generated_beats.append(
+            {
+                "id": str(shot["beat_id"]),
+                "role": "verified-claim",
+                "visible_event": visible,
+                "claim_ids": list(segment.get("claim_ids", [])) if isinstance(segment.get("claim_ids"), list) else [],
+            }
+        )
+    if not value.get("story_beats") and generated_beats:
+        value["story_beats"] = generated_beats
+    return value

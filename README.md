@@ -2,9 +2,11 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.0.2 upstream-first`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.1.0 native-director`，发布分支为 `main`。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
+
+v2.1 的导演规划、原生上游音频、有效片段剪辑和表演 QA 是所有视频路线共用的核心层，不只服务连续剧。连续剧在此基础上额外增加季级世界观、逐集审批和跨集连续性。
 
 ## 产品路线
 
@@ -19,6 +21,13 @@
 
 文生视频和图生视频在未指定上游时默认优先 QuickAI，并使用 `automatic` 策略只对安全分类失败尝试 QuickAI New。用户明确说“生视频选择 QuickAI New”时，必须固定直连 QuickAI New，不先调用 QuickAI；明确选择 QuickAI 时同理。默认总尝试次数为 3 次，备用也计入次数，提交结果不明时不自动重建。
 
+### 画面布局规则
+
+- 新项目和新镜头默认为 `single-full-frame`：一个连续的物理场景、一个空间视角、画面铺满全帧。
+- `split-screen`、`triptych`、`comic-panel` 只在用户明确要求该镜头使用，并同时设置 `allow_multi_panel=true` 时启用；它们不是通用的“电影感”开关。
+- 竖屏、两人以上、文生视频、单画面的组合属于高风险布局。新项目默认在付费预检阶段阻断，建议先生成并审核一张单画面关键帧，再走 I2V；只有明确接受风险并设置 `layout_risk_policy=allow` 才能继续 T2V。
+- QA 会检查未请求的重复横向画面、三联画、漫画格和短视频 UI。出现时镜头不通过，不能因为 MP4 和音轨存在就判定成功。
+
 ## 核心能力
 
 - 先展示剧本、分镜、提示词、请求数量和预算，用户批准后才付费生成。
@@ -32,9 +41,20 @@
 
 ## 当前模块与预设
 
+模块分为四条产品路线和一层共用导演核心：
+
+| 产品路线 | 预设示例 | 说明 |
+| --- | --- | --- |
+| 文生视频（T2V） | `text-to-video`、`general-video` | 无参考素材；适合单镜头和多镜头短片，人物一致性为尽力而为 |
+| 图生视频（I2V） | `single-image-animation`、`scene-animation`、`product-ad`、`performance` | 用户图片或当前镜头关键帧作为唯一视频参考；严格一致性优先走此路线 |
+| 连续剧 | `short-drama`、`character-consistent-story` | 多集共享系列圣经、角色母版、逐集审批和实际结尾连续性 |
+| 新闻视频 | `news-video` | 先联网建立来源/事实合同，再生成带明确示意标识的画面 |
+
+导演核心会在以上路线中统一执行：剧情节拍、shot_role、景别与机位、表演节拍、环境声音、可剪辑出口、有效片段入出点、原生音频 QA 和人工画面审核。它不是第五条产品路线，也不会把所有视频强制做成连续剧。
+
 | 模块 | 当前效果 | 边界 |
 | --- | --- | --- |
-| T2V / I2V | QuickAI 与 QuickAI New 均可生成和恢复任务；QuickAI 还负责 T2I | 单镜头 1-15 秒，长片通过多镜头拼接 |
+| T2V / I2V | QuickAI 与 QuickAI New 均可生成和恢复任务；QuickAI 还负责 T2I | 单镜头 1-15 秒，长片通过多镜头拼接；竖屏多人 T2V 默认需要 I2V 回退 |
 | 角色与关键帧 | 角色母版、用户参考图、逐镜头关键帧和哈希锁定 | 严格一致性仍需要人工审核 |
 | 原生对白 | 上游尝试生成对白、声音和口型 | 逐字、音色、口型和内嵌字幕不确定 |
 | 精确字幕/配音/口型 | FFmpeg 字幕，Voicebox/CosyVoice 配音，MuseTalk 口型 | 本地 AI 组件可选，不随基础安装下载 |
@@ -43,6 +63,8 @@
 | 后期与 QA | 拼接、混音、字幕副本、封面、媒体和审阅帧检查 | 技术 QA 不能替代人工观片/听审 |
 
 内置可编辑预设包括 `general-video`、`text-to-video`、`single-image-animation`、`character-consistent-story`、`short-drama`、`product-ad`、`dance-performance`、`comedy-action`、`scene-animation` 和 `news-video`。运行 `capabilities` 查看清单，运行 `describe <id>` 查看该预设的提问和提示词指导。预设只改变规划方式，不会虚构新的上游能力。
+
+导演化预设还包括 `cinematic-short`、`dialogue-scene`、`silent-cinema`、`action-scene`、`comedy-scene`。题材包包括 `historical`、`wuxia`、`sci-fi`、`family`、`romance`、`comedy`、`disaster`、`rural`、`suspense`，可以组合使用。题材包只提供视觉、表演、镜头和声音约束，不改变上游接口能力。
 
 ## 推荐安装方式
 
@@ -177,6 +199,8 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 ## 测试与使用文档
 
 逐模块标准话术、费用边界、操作顺序和验收标准见：
+
+- [v2.1 native-director 发布与验收说明](docs/v2.1-native-director-release.zh-CN.md)
 
 - [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
 - [用户安装与使用话术](docs/user-installation-and-usage-prompts.zh-CN.md)

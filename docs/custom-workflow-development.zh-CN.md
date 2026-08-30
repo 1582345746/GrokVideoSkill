@@ -1,6 +1,8 @@
-# 二次开发与自定义工作流
+# 二次开发与自定义工作流（v2.1.0 native-director）
 
 Grok Video Studio 把“产品路线”和“内部工作流预设”分开。T2V、I2V、连续剧和新闻视频是稳定产品路线；`assets/workflow-templates/*.json` 是可编辑的问答和提示词指导。新增一个创意模板通常不需要修改 Python；新增上游、媒体类型或状态语义才需要代码和合同变更。
+
+推荐的二开分层是：产品路线（T2V/I2V/series/news）→ 导演模式（single-shot、cinematic-short、dialogue-scene、silent-cinema、action-scene、comedy-scene 等）→ 题材包（historical、wuxia、sci-fi、family、romance、comedy、disaster、rural、suspense）。用户可以组合导演模式和题材包，形成自己的“武打片、科幻片、家庭片、搞笑片、新闻解说”等工作流，而不必复制一套 CLI。
 
 ## 先判断属于哪一类
 
@@ -31,6 +33,8 @@ Grok Video Studio 把“产品路线”和“内部工作流预设”分开。T2
 4. 在 `guidance.video_prompt` 写清楚构图、景别、镜头运动、环境运动、收尾姿态和禁止元素。
 5. 不在模板里写模型名称、Key、价格或未经验证的上游字段。
 
+6. 保持 `frame_layout` 默认为 `single-full-frame`。只有明确需要电话两端、监控墙、比较图或图形蒙太奇时，才在项目/镜头中设置 `split-screen`、`triptych` 或 `comic-panel`，并配合 `allow_multi_panel=true`。不要用“三段画面”补偿缺少分镜设计；竖屏多人 T2V 应优先改成单关键帧 I2V。
+
 加入模板后运行：
 
 ```powershell
@@ -39,6 +43,32 @@ python grok-video-studio/scripts/grok_video_studio.py describe <new-workflow-id>
 ```
 
 模板只改变规划指导，不会自动改变产品路线、上游选择、重试次数或预算门禁。
+
+### 自定义模板最小示例
+
+```json
+{
+  "id": "my-wuxia-short",
+  "extends": "cinematic-short",
+  "title": "我的武侠短片",
+  "summary": "以动作因果和反应镜头为主的短片",
+  "genre_packs": ["wuxia"],
+  "director_mode": "action-scene",
+  "project_type": "cinematic-short",
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 6,
+  "preferred_clip_seconds": 4,
+  "guidance": {
+    "ask": ["动作目标", "角色身份锁", "空间轴线"],
+    "story": "先发现威胁，再出招、闪避、撞击、反应和结果",
+    "image_prompt": "单一当前镜头关键帧，保持全画面物理空间",
+    "video_prompt": "一个连续动作，结束在动作仍继续的时刻"
+  },
+  "shot_defaults": {"frame_layout": "single-full-frame", "allow_multi_panel": false}
+}
+```
+
+将文件放入用户工作流目录（`capabilities` 会报告该目录），再运行 `describe my-wuxia-short` 和 `validate`。自定义 ID 不能覆盖内置 ID；如需继承，用 `extends` 并保留稳定 ID。模板通过后再写自己的模块级标准话术和离线测试样例。
 
 ## 新增字段或路线的顺序
 
@@ -89,4 +119,3 @@ git diff --check
 - 失败重试不会重复创建已知任务；
 - 安装、修复、升级不覆盖 DPAPI 凭据、项目、源码和模型；
 - README、SKILL、schema、错误矩阵和用户话术使用同一版本号。
-

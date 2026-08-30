@@ -1,0 +1,26 @@
+{
+  "id": "comedy-scene",
+  "title": "喜剧与搞笑短片",
+  "summary": "用铺垫、误解、反应、升级和包袱组织表演，不依赖连续正面对白。",
+  "project_type": "cinematic-short",
+  "director_mode": "comedy-scene",
+  "genre_packs": ["comedy"],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 6,
+  "preferred_clip_seconds": 6,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "continue-action",
+  "shot_roles": ["establishing", "wide", "insert", "reaction", "closeup", "ending_hook"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": true,
+    "audio_intent": "score-ambience"
+  },
+  "guidance": {
+    "ask": ["角色关系", "铺垫与包袱", "对白或肢体喜剧", "目标时长", "画面风格"],
+    "story": "先建立正常状态，再制造偏差、升级误解，用反应镜头兑现笑点。",
+    "image_prompt": "保持角色辨识度和道具位置，为反应与包袱分别设计构图。",
+    "video_prompt": "动作和对白保持自然节奏，不让每段都以夸张叹气、挥手或定格结束。"
+  }
+}

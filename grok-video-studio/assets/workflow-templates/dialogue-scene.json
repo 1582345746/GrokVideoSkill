@@ -1,0 +1,26 @@
+{
+  "id": "dialogue-scene",
+  "title": "电影化人物对白",
+  "summary": "使用建立镜头、过肩、说话者特写和听者反应组织自然原生对白。",
+  "project_type": "cinematic-short",
+  "director_mode": "dialogue-scene",
+  "genre_packs": ["family"],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 5,
+  "preferred_clip_seconds": 6,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "continue-action",
+  "shot_roles": ["establishing", "over_shoulder", "closeup", "reaction", "ending_hook"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": true,
+    "audio_intent": "score-ambience"
+  },
+  "guidance": {
+    "ask": ["人物关系", "冲突触发点", "关键台词", "目标时长", "是否需要上游字幕"],
+    "story": "对白只是冲突的一部分；必须保留环境建立、沉默反应、打断或关系变化。",
+    "image_prompt": "按空间轴线分别生成过肩、说话者特写和听者反应关键帧。",
+    "video_prompt": "一个片段尽量只让一人说一句短台词；用基线、触发、微反应、压抑和决定描述表演，不强迫固定秒点说完。"
+  }
+}

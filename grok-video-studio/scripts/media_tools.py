@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -185,6 +186,97 @@ def analyze_audio(path: Path) -> dict[str, Any]:
     }
 
 
+def _correlation(left: list[int], right: list[int]) -> float:
+    if len(left) != len(right) or not left:
+        return 0.0
+    left_mean = sum(left) / len(left)
+    right_mean = sum(right) / len(right)
+    numerator = sum((a - left_mean) * (b - right_mean) for a, b in zip(left, right))
+    left_energy = sum((value - left_mean) ** 2 for value in left)
+    right_energy = sum((value - right_mean) ** 2 for value in right)
+    denominator = math.sqrt(left_energy * right_energy)
+    return numerator / denominator if denominator > 1e-9 else 0.0
+
+
+def _repeated_horizontal_panel_count(frame: bytes, width: int, height: int) -> tuple[int, float, float]:
+    values = list(frame)
+    best = (0, 0.0, 0.0)
+    for count in (2, 3, 4):
+        band_height = height // count
+        bands = [
+            values[index * band_height * width : (index + 1) * band_height * width]
+            for index in range(count)
+        ]
+        correlations = [_correlation(bands[index], bands[index + 1]) for index in range(count - 1)]
+        correlation = sum(correlations) / len(correlations)
+        seam_differences = []
+        for boundary in range(1, count):
+            upper = values[(boundary * band_height - 1) * width : boundary * band_height * width]
+            lower = values[boundary * band_height * width : (boundary * band_height + 1) * width]
+            seam_differences.append(sum(abs(a - b) for a, b in zip(upper, lower)) / (width * 255))
+        seam = sum(seam_differences) / len(seam_differences)
+        repeated = (correlation >= 0.98 and seam >= 0.002) or (correlation >= 0.82 and seam >= 0.045)
+        if repeated and correlation > best[1]:
+            best = (count, correlation, seam)
+    return best
+
+
+def detect_repeated_panel_layout(
+    path: Path,
+    *,
+    scan_start: float = 0.0,
+    scan_end: float | None = None,
+) -> dict[str, Any]:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return {"detected": False, "panel_count": 0, "samples": []}
+    media = probe_media(path)
+    start = max(0.0, float(scan_start))
+    end = min(media["duration"], float(scan_end) if scan_end is not None else media["duration"])
+    if end <= start:
+        raise SkillError("layout scan must satisfy scan_end > scan_start")
+    positions = [start + (end - start) * fraction for fraction in (0.2, 0.5, 0.8)]
+    width, height = 96, 192
+    samples: list[dict[str, Any]] = []
+    for at in positions:
+        result = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-ss",
+                f"{at:.3f}",
+                "-i",
+                str(path),
+                "-frames:v",
+                "1",
+                "-vf",
+                f"scale={width}:{height}:flags=area,format=gray",
+                "-f",
+                "rawvideo",
+                "pipe:1",
+            ],
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0 or len(result.stdout) != width * height:
+            continue
+        count, correlation, seam = _repeated_horizontal_panel_count(result.stdout, width, height)
+        samples.append(
+            {
+                "at_seconds": round(at, 3),
+                "panel_count": count,
+                "correlation": round(correlation, 4),
+                "seam": round(seam, 4),
+            }
+        )
+    candidates = [int(item["panel_count"]) for item in samples if int(item["panel_count"]) > 1]
+    panel_count = max(set(candidates), key=candidates.count) if candidates else 0
+    detected = panel_count > 1 and candidates.count(panel_count) >= 2
+    return {"detected": detected, "panel_count": panel_count if detected else 0, "samples": samples}
+
+
 def _atempo_chain(speed: float) -> str:
     if speed <= 0:
         raise SkillError("audio speed must be positive")
@@ -278,6 +370,10 @@ def mix_dialogue_track(
             "aac",
             "-b:a",
             "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-t",
             f"{media['duration']:.6f}",
             "-movflags",
@@ -317,6 +413,10 @@ def replace_audio_track(video_source: Path, audio_source: Path, output: Path) ->
             "aac",
             "-b:a",
             "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-t",
             f"{video['duration']:.6f}",
             "-movflags",
@@ -329,7 +429,17 @@ def replace_audio_track(video_source: Path, audio_source: Path, output: Path) ->
     return {"path": str(output.resolve()), "bytes": output.stat().st_size, **result, "audio": analyze_audio(output)}
 
 
-def quality_report(path: Path, *, expected_size: str = "auto", expected_duration: float | None = None) -> dict[str, Any]:
+def quality_report(
+    path: Path,
+    *,
+    expected_size: str = "auto",
+    expected_duration: float | None = None,
+    black_is_error: bool = False,
+    expected_frame_layout: str = "",
+    layout_is_error: bool = False,
+    scan_start: float = 0.0,
+    scan_end: float | None = None,
+) -> dict[str, Any]:
     media = probe_media(path)
     errors: list[str] = []
     warnings: list[str] = []
@@ -353,21 +463,30 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
     black_events: list[str] = []
     freeze_events: list[str] = []
     audio_signals: dict[str, Any] = {}
+    repeated_panel_layout: dict[str, Any] = {"detected": False, "panel_count": 0, "samples": []}
     if ffmpeg:
-        result = subprocess.run(
+        scan_start = max(0.0, float(scan_start))
+        scan_command = [ffmpeg, "-hide_banner", "-nostats"]
+        if scan_start > 0:
+            scan_command.extend(["-ss", f"{scan_start:.3f}"])
+        scan_command.extend(["-i", str(path)])
+        if scan_end is not None:
+            scan_duration = float(scan_end) - scan_start
+            if scan_duration <= 0:
+                raise SkillError("quality scan must satisfy scan_end > scan_start")
+            scan_command.extend(["-t", f"{scan_duration:.3f}"])
+        scan_command.extend(
             [
-                ffmpeg,
-                "-hide_banner",
-                "-nostats",
-                "-i",
-                str(path),
                 "-vf",
                 "blackdetect=d=0.6:pix_th=0.10,freezedetect=n=-50dB:d=1.5",
                 "-an",
                 "-f",
                 "null",
                 "-",
-            ],
+            ]
+        )
+        result = subprocess.run(
+            scan_command,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -378,9 +497,21 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
         black_events = re.findall(r"black_start:[^\r\n]+", log)
         freeze_events = re.findall(r"freeze_(?:start|end|duration):[^\r\n]+", log)
         if black_events:
-            warnings.append(f"detected {len(black_events)} black segment event(s)")
+            message = f"detected {len(black_events)} black segment event(s) of at least 0.6s"
+            (errors if black_is_error else warnings).append(message)
         if freeze_events:
             warnings.append(f"detected {len(freeze_events)} freeze event(s)")
+        if expected_frame_layout == "single-full-frame":
+            try:
+                repeated_panel_layout = detect_repeated_panel_layout(path, scan_start=scan_start, scan_end=scan_end)
+                if repeated_panel_layout["detected"]:
+                    message = (
+                        f"detected an unrequested repeated {repeated_panel_layout['panel_count']}-panel horizontal layout "
+                        "while single-full-frame was required"
+                    )
+                    (errors if layout_is_error else warnings).append(message)
+            except SkillError as error:
+                warnings.append(f"frame layout analysis failed: {error}")
         if media["has_audio"]:
             try:
                 audio_signals = analyze_audio(path)
@@ -403,17 +534,30 @@ def quality_report(path: Path, *, expected_size: str = "auto", expected_duration
         "media": media,
         "errors": errors,
         "warnings": warnings,
-        "signals": {"black_events": black_events[:20], "freeze_events": freeze_events[:20], "audio": audio_signals},
+        "signals": {
+            "black_events": black_events[:20],
+            "freeze_events": freeze_events[:20],
+            "repeated_panel_layout": repeated_panel_layout,
+            "audio": audio_signals,
+        },
         "manual_review_required": [
             "character identity and wardrobe continuity",
             "hands, fingers, limbs, and facial anatomy",
             "motion naturalness and camera continuity",
             "clean frame: reject unintended app UI, buttons, counters, comments, captions, logos, and watermarks",
+            "frame layout matches the contract; reject unrequested split-screen, triptych, repeated panels, or comic cells",
         ],
     }
 
 
-def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count: int = 3) -> list[dict[str, Any]]:
+def export_review_frames(
+    input_path: Path,
+    output_dir: Path,
+    *,
+    stem: str,
+    count: int = 3,
+    at_seconds: list[float] | None = None,
+) -> list[dict[str, Any]]:
     if count < 1 or count > 9:
         raise SkillError("review frame count must be from 1 to 9")
     ffmpeg = shutil.which("ffmpeg")
@@ -421,12 +565,21 @@ def export_review_frames(input_path: Path, output_dir: Path, *, stem: str, count
         raise SkillError("ffmpeg is required to export review frames")
     media = probe_media(input_path)
     safe_stem = re.sub(r"[^a-zA-Z0-9_-]+", "-", stem).strip("-") or "video"
-    fractions = [0.5] if count == 1 else [0.05 + index * 0.95 / (count - 1) for index in range(count)]
-    labels = (["key"] if count == 1 else (["first", "key", "end"] if count == 3 else [f"frame-{index:02d}" for index in range(1, count + 1)]))
+    if at_seconds is not None:
+        if not at_seconds or len(at_seconds) > 9:
+            raise SkillError("explicit review frame times must contain 1 to 9 entries")
+        positions = [max(0.0, min(float(value), max(0.0, media["duration"] - 0.05))) for value in at_seconds]
+        labels = ["edit-in", "edit-key", "edit-out"] if len(positions) == 3 else [f"edit-{index:02d}" for index in range(1, len(positions) + 1)]
+    else:
+        fractions = [0.5] if count == 1 else [0.05 + index * 0.95 / (count - 1) for index in range(count)]
+        positions = [
+            max(0.0, min(media["duration"] * fraction, max(0.0, media["duration"] - 0.05)))
+            for fraction in fractions
+        ]
+        labels = (["key"] if count == 1 else (["first", "key", "end"] if count == 3 else [f"frame-{index:02d}" for index in range(1, count + 1)]))
     output_dir.mkdir(parents=True, exist_ok=True)
     frames: list[dict[str, Any]] = []
-    for index, fraction in enumerate(fractions, 1):
-        at = max(0.0, min(media["duration"] * fraction, max(0.0, media["duration"] - 0.05)))
+    for index, at in enumerate(positions, 1):
         output = output_dir / f"{safe_stem}-review-{index:02d}.jpg"
         _run(
             [ffmpeg, "-y", "-ss", f"{at:.3f}", "-i", str(input_path), "-frames:v", "1", "-update", "1", "-q:v", "2", str(output)],
@@ -531,6 +684,10 @@ def postprocess_video(
             "aac",
             "-b:a",
             "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
             "-movflags",
             "+faststart",
             str(output_path),

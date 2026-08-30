@@ -1,10 +1,10 @@
-# Workflow Catalog
+# Workflow Catalog (v2.1.0 native-director)
 
 Workflow definitions live in `assets/workflow-templates/*.json`. Edit those JSON files to improve titles, questions, and prompt guidance without changing the Python client.
 
 The catalog is intentionally general. Short drama is supported but is not the default or highest-priority workflow.
 
-Product route is separate from workflow. The four routes are text-to-video, image-to-video, episodic series, and sourced news video. A supplied-image animation is an I2V variant, not a fifth route. Use `series-init` only when ordered episodes share canon and continuity; every series episode still selects one internal workflow from this catalog.
+Product route is separate from workflow. The four routes are text-to-video, image-to-video, episodic series, and sourced news video. A supplied-image animation is an I2V variant, not a fifth route. Use `series-init` only when ordered episodes share canon and continuity; every series episode still selects one internal workflow from this catalog. The director layer is shared by all four routes, so camera coverage, story beats, performance, edit windows, native audio QA, and clean-frame review are not series-only features.
 
 | ID | Title | Primary input |
 | --- | --- | --- |
@@ -26,3 +26,7 @@ For character workflows, create one master sheet image containing the same chara
 `news-video` is initialized with `news-init`, not plain `init`. Codex must browse current sources and complete `news.json`; generation is blocked until `news-validate` passes. See `news-schema.md`.
 
 The selected `video_mode` and `video_provider` are part of the project contract. Do not infer the mode from whether an image happens to exist in state.
+
+## Layout and shot selection
+
+Every new project starts with `single-full-frame`. A split-screen, triptych, or comic-panel layout must be named on the specific project/shot and paired with `allow_multi_panel=true`; use it for a real comparison, phone-call, surveillance, or graphic montage requirement only. A vertical multi-character T2V shot with a single-frame contract is blocked by default and should be converted to an approved-keyframe I2V shot. Do not put a multi-view character sheet into a video request.

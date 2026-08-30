@@ -2,9 +2,16 @@
   "id": "news-video",
   "title": "热点新闻视频",
   "summary": "联网检索当前热点，保存来源与事实主张，再生成可审计的新闻脚本、分镜和视频。",
+  "project_type": "sourced-news",
+  "director_mode": "news-report",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
   "default_shots": 6,
   "preferred_clip_seconds": 6,
   "character_master": false,
+  "strict_director": true,
+  "default_exit_behavior": "continue-action",
+  "shot_roles": ["establishing", "wide", "insert", "reaction", "medium", "ending_hook"],
   "shot_defaults": {
     "generate_image": false,
     "use_character_master": false

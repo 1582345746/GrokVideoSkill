@@ -5,7 +5,9 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.0.2` (`upstream-first`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.1.0` (`native-director`).
+
+The director layer applies to every video project: standalone T2V, I2V, supplied-image animation, short drama, ads, performance, sourced news, and episodic series. It compiles story beats into shot roles, camera coverage, performance progression, sound intent, cuttable exits, and edit windows. Episodic series add season canon and approval state; they do not own the director layer.
 
 For v1 projects, read `references/v2.0-upstream-first-migration.zh-CN.md` before changing audio, subtitle, prompt, retry, or series fields.
 
@@ -21,6 +23,8 @@ For v1 projects, read `references/v2.0-upstream-first-migration.zh-CN.md` before
 8. Ask whether the user needs character speech and lip sync. New projects default to the `upstream-dialogue` profile (`audio.mode=native-dialogue`, `generate_audio=true`, `subtitle_source=none`); use `basic` explicitly for silent/source-audio work. `upstream-dialogue` adds no local dependency. `precise-subtitles` uses only local FFmpeg. `precise-voice` needs Docker, NVIDIA GPU support, CosyVoice, and model weights. `lip-sync` additionally needs MuseTalk. Never download models or build runtimes without explicit approval.
 9. For an approved local profile, run `components-plan`, choose component source/model locations with the user, then run `components-configure`, `components-install --accept-downloads`, `components-setup --accept-downloads --include-models`, `components-start`, and `components-doctor`. Services bind to host loopback only. For `full-dialogue`, use `--component cosyvoice` and `--component musetalk` as sequential stages on 8 GB GPUs; use `--component all` only after confirming sufficient VRAM. Stop them with `components-stop` when not needed.
 10. For multi-character preset voices, prefer Voicebox with Qwen CustomVoice. Run `voicebox-setup-plan --source <voicebox-repo> --models-root <E-drive-cache> --data-root <E-drive-data>` first; it is read-only. Do not create the Python environment, install dependencies, download the pinned model, start Voicebox, or generate auditions until the user approves those boundaries. Codex should perform the approved setup rather than asking the user to run each command.
+
+11. Keep the frame layout contract explicit. New projects default to `frame_layout=single-full-frame`, `allow_multi_panel=false`, and `layout_risk_policy=block`. A single-full-frame shot is one continuous physical camera view covering the whole canvas. `split-screen`, `triptych`, and `comic-panel` require both an explicit project/shot override and `allow_multi_panel=true`; use them only for a deliberate montage, comparison, phone-call, surveillance, or graphic-design shot. They are never a generic style keyword. A new vertical multi-character T2V single-frame shot is blocked before paid generation because the tested gateways frequently return repeated horizontal panels; route it through an approved single-frame keyframe and I2V, or explicitly accept the risk with `layout_risk_policy=allow`.
 
 `components-setup --include-models` is resumable. It performs a disk-space preflight, reuses a complete model directory without starting Docker, records a per-model state file under the configured models root, and verifies required files with SHA-256 before reuse. A partial or corrupted model is downloaded again; `components-start` refuses to launch when required model files are missing or empty.
 
@@ -41,6 +45,14 @@ The selected profile is saved as non-secret metadata in the per-user config dire
 Use `install.ps1 -Check` to verify an existing installation without changing it, `install.ps1 -Repair -Force` to replace a damaged copy, and `install.ps1 -Uninstall` to remove only the Skill directory. Upgrades move the previous Skill directory to a timestamped sibling backup before copying; a failed copy restores the previous directory. When no `-InstallProfile` is supplied, an upgrade or repair preserves the saved profile. Credentials, projects, component checkouts, and model weights are never removed by uninstall.
 
 Read [references/api-contracts.md](references/api-contracts.md) when diagnosing endpoints or provider responses. Read [references/error-matrix.md](references/error-matrix.md) when a request fails. Read [references/workflow-catalog.md](references/workflow-catalog.md) before adding or changing a preset.
+
+## Director And Layout Gate
+
+Use a director mode whenever the request contains a story, character performance, dialogue exchange, action, or a requested visual rhythm. `single-shot` remains appropriate for one simple clip. `cinematic-short`, `dialogue-scene`, `silent-cinema`, `action-scene`, `comedy-scene`, `product-ad`, `performance`, `montage`, and `news-report` provide structured coverage rules. Add genre packs such as `historical`, `wuxia`, `sci-fi`, `family`, `romance`, `comedy`, `disaster`, `rural`, or `suspense` for domain-specific guidance.
+
+Each narrative shot should state one visible event, one `shot_role`, one main continuous action, its camera and motivated movement, the environment motion and sound, the performance progression, and how it exits into the next cut. Avoid writing every shot as a complete mini-scene or requiring a final pose. `edit_in`, `edit_out`, and `timeline_duration` let the generator create a little extra material while the editor keeps only the natural middle and cuts before a sigh, freeze, or generic ending. QA treats pending visual review as incomplete and reports layout, UI, caption, identity, anatomy, motion, and audio checks separately.
+
+For two-person dialogue, prefer establishing/wide coverage, over-shoulder or single-speaker closeups, the listener's reaction, and a cuttable two-shot. For action, split discovery, strike, dodge, impact, reaction, and escape into separate shots. For a silent scene, use environment and object inserts instead of filling every shot with dialogue. Three-panel imagery is a special shot design, not the default solution for any of these patterns.
 
 ## Select A Workflow
 
@@ -94,7 +106,7 @@ Before rendering local dialogue, keep voice selection as its own approval stage:
 
 Read [references/project-schema.md](references/project-schema.md) before editing `project.json`. Read [references/prompt-contract.md](references/prompt-contract.md) before writing prompts.
 
-The editable preset catalog currently contains `general-video`, `text-to-video`, `single-image-animation`, `character-consistent-story`, `short-drama`, `product-ad`, `dance-performance`, `comedy-action`, `scene-animation`, and `news-video`. These IDs are stable internal templates; they do not add new provider capabilities or product routes.
+The editable preset catalog currently contains `general-video`, `text-to-video`, `single-image-animation`, `character-consistent-story`, `short-drama`, `cinematic-short`, `dialogue-scene`, `silent-cinema`, `action-scene`, `product-ad`, `dance-performance`, `performance`, `comedy-action`, `comedy-scene`, `scene-animation`, and `news-video`. These IDs are stable internal templates; they do not add new provider capabilities or product routes. Custom workflows may extend a built-in template from the per-user workflow directory; see `docs/custom-workflow-development.zh-CN.md`.
 
 ## Create An Episodic Series
 

@@ -2,6 +2,10 @@
   "id": "dance-performance",
   "title": "人物跳舞与表演",
   "summary": "基于一张人物图制作舞蹈、唱跳或轻表演视频。",
+  "project_type": "single-clip",
+  "director_mode": "performance",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
   "default_shots": 1,
   "preferred_clip_seconds": 8,
   "character_master": false,
@@ -13,6 +17,6 @@
     "ask": ["舞蹈或表演类型", "动作强度", "镜头范围", "需要保持的身份与服装"],
     "story": "复杂动作拆成多个短镜头，不要求固定镜头数量。",
     "image_prompt": "默认直接使用用户人物图；需要换场景时再生成关键帧。",
-    "video_prompt": "描述可在十五秒内完成的连续动作，避免多段 choreography、肢体瞬移和突然换装。"
+    "video_prompt": "描述可在十五秒内完成的连续动作，避免多段 choreography、肢体瞬移和突然换装；由上游生成匹配的音乐和现场声音。"
   }
 }

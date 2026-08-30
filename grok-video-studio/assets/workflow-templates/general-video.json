@@ -2,6 +2,10 @@
   "id": "general-video",
   "title": "通用视频项目",
   "summary": "从目标说明开始，自由选择文生视频、关键帧生图或图生视频。",
+  "project_type": "single-clip",
+  "director_mode": "single-shot",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
   "default_shots": 1,
   "preferred_clip_seconds": 6,
   "character_master": false,
@@ -13,6 +17,6 @@
     "ask": ["目标受众与用途", "画面比例与目标总时长", "是否已有参考图", "是否需要多个镜头"],
     "story": "先明确成片目标，再按动作或场景变化拆分镜头；镜头数量由内容决定。",
     "image_prompt": "描述单一静止瞬间、主体、环境、构图、光线和视觉风格。",
-    "video_prompt": "描述一个连续动作、镜头运动、环境运动、节奏和结束状态。"
+    "video_prompt": "描述一个连续动作、镜头运动、环境运动、表演和原生声音，并预留自然剪辑出口。"
   }
 }

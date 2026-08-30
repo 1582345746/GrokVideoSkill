@@ -1,0 +1,26 @@
+{
+  "id": "silent-cinema",
+  "title": "无对白电影镜头",
+  "summary": "以环境、细节、动作因果和原生氛围声或配乐完成无对白叙事。",
+  "project_type": "cinematic-short",
+  "director_mode": "silent-cinema",
+  "genre_packs": ["rural"],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 5,
+  "preferred_clip_seconds": 6,
+  "character_master": false,
+  "strict_director": true,
+  "default_exit_behavior": "cut-on-action",
+  "shot_roles": ["establishing", "wide", "insert", "closeup", "transition"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": false,
+    "audio_intent": "score-ambience"
+  },
+  "guidance": {
+    "ask": ["地点与季节", "时间与天气", "视觉主题", "目标时长", "环境声与音乐气质"],
+    "story": "用环境变化、物件细节和动作联系讲述主题，不使用旁白替代画面。",
+    "image_prompt": "建立空间、光线和可运动的环境细节。",
+    "video_prompt": "生成原生环境声和克制配乐，不生成人声；每个片段在风、水、光影或人物动作仍继续时切出。"
+  }
+}

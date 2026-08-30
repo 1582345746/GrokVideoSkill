@@ -1,6 +1,6 @@
 # Grok Video Studio v1.8.0 开发交接文档
 
-> 历史文档：当前实现已升级到 v2.0.0 `upstream-first`。新项目默认使用原生上游对白（`native-dialogue`、`generate_audio=true`、`subtitle_source=none`），提示词按 UTF-8 字节计数，并按 [v2.0 技能说明](grok-video-studio/SKILL.md) 和 [迁移说明](docs/v2.0-upstream-first-migration.zh-CN.md) 操作。本文件保留 v1.8 的背景与兼容边界，不覆盖 v2 合同。
+> 历史文档：当前实现已升级到 v2.1.0 `native-director`。新项目默认使用原生上游对白（`native-dialogue`、`generate_audio=true`、`subtitle_source=none`）和 `single-full-frame`；提示词按 UTF-8 字节计数，并按 [当前技能说明](grok-video-studio/SKILL.md) 和 [迁移说明](docs/v2.0-upstream-first-migration.zh-CN.md) 操作。本文件保留 v1.8 的背景与兼容边界，不覆盖 v2.1 合同。
 
 > 交接日期：2026-08-28  
 > 交接基线：`main` 分支，提交 `4f9b0a1` 及其后仅包含本文档的提交  

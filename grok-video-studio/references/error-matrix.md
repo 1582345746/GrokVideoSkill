@@ -1,4 +1,4 @@
-# Error Matrix
+# Error Matrix (v2.1.0 native-director)
 
 | Symptom | Layer | Action |
 | --- | --- | --- |
@@ -25,6 +25,9 @@
 | `provider circuit is open` | Repeated idempotent reads failed | Wait for the reported cooldown, verify provider health, then resume. No create request was retried. |
 | Budget gate blocked | Project cost control | Raise the ceiling, lower request counts/rates, or stop. The blocked request was not sent. |
 | Completed status but no playable file | Result retrieval | Retry `/content`, then an advertised HTTPS result URL; verify MP4 bytes. |
+| New vertical portrait shot has two or more characters and single-frame T2V | Director/layout gate | Paid generation is blocked by default because both tested gateways frequently return repeated horizontal panels. Generate one approved single-frame keyframe and use I2V, or explicitly set `layout_risk_policy=allow` after accepting the risk. |
+| Unrequested split-screen, triptych, or comic panels in a result | Visual QA | Mark the shot rejected, preserve the file under rejected assets, and regenerate the affected shot through a single-frame I2V route. Do not fix by silently cropping away story content. |
+| User asks for a three-panel or split-screen shot | Project contract | Set `frame_layout` on the project or shot and `allow_multi_panel=true` only for that deliberate shot. Other shots remain `single-full-frame`; a multi-panel request is never a global default. |
 | QA orientation or dimensions mismatch | Provider output contract | Regenerate the affected shot or deliberately normalize it during assembly; review cropping before delivery. |
 | Resolution downgraded by upstream | Provider output contract | Record requested and observed resolution in state/QA; do not report it as an exact match. |
 | Final assembly has no audio | Local assembly policy | Keep `defaults.audio_policy=preserve`; assembly retains source audio and adds silent AAC to clips without audio. Use `mute` only intentionally. |

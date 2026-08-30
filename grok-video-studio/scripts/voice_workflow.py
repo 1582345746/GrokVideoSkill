@@ -7,7 +7,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from gvs_common import SkillError, atomic_write_json, read_json
+from gvs_common import SkillError, atomic_write_json, locked_project_state, read_json
 from media_tools import analyze_audio
 from tts_providers import create_tts_provider
 from voice_contracts import (
@@ -162,6 +162,7 @@ def list_provider_voices(
     return {"ok": True, **client.list_voices(engine=engine)}
 
 
+@locked_project_state
 def audition_voice(
     root: Path,
     *,
@@ -255,6 +256,7 @@ def audition_voice(
     return {"ok": True, "workspace": workspace_type, "candidate": candidate, "next": "Review the WAV, then run voice-approve or voice-reject."}
 
 
+@locked_project_state
 def import_voice_candidate(
     root: Path,
     *,
@@ -318,6 +320,7 @@ def import_voice_candidate(
     return {"ok": True, "workspace": workspace_type, "candidate": candidate}
 
 
+@locked_project_state
 def review_voice_candidate(
     root: Path,
     candidate_id: str,

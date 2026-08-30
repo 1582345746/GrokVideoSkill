@@ -1,0 +1,9 @@
+{
+  "id": "sci-fi",
+  "title": "科幻",
+  "visual": "coherent technology rules, readable scale, practical surfaces, motivated interface light only when story-relevant",
+  "performance": "characters react to specific system changes and physical consequences rather than staring at screens",
+  "camera": "use scale reveals, inserts for evidence, and motivated movement through space",
+  "audio": "native machinery, alarms, pressure, radio texture, environmental resonance, and sparse score",
+  "avoid": "decorative floating UI, illegible text, random neon, unexplained effects, static exposition"
+}

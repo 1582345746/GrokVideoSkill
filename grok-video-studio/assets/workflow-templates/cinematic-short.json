@@ -1,0 +1,26 @@
+{
+  "id": "cinematic-short",
+  "title": "电影化叙事短片",
+  "summary": "按剧情节拍、镜头覆盖、原生音频和有效剪辑区间制作 10 至 60 秒叙事短片。",
+  "project_type": "cinematic-short",
+  "director_mode": "cinematic-short",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 6,
+  "preferred_clip_seconds": 8,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "continue-action",
+  "shot_roles": ["establishing", "wide", "closeup", "reaction", "insert", "ending_hook"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": true,
+    "audio_intent": "score-ambience"
+  },
+  "guidance": {
+    "ask": ["主题与冲突", "角色和地点", "目标时长", "是否有对白", "风格类型"],
+    "story": "先规划钩子、建立、触发、升级、转折和结果；每个节拍必须写观众看见的事件。",
+    "image_prompt": "当前镜头只使用当前关键帧，保持人物、服装、场景和空间轴线。",
+    "video_prompt": "一个镜头只承担一个可见动作或表演变化；上游生成对白、环境声、音效或配乐；片段在自然动作中退出以便剪辑。"
+  }
+}

@@ -9,6 +9,7 @@ from typing import Any
 
 from audio_client import MuseTalkClient
 from component_manager import load_component_settings
+from director_contracts import edit_window, shot_audio_intent
 from gvs_common import SkillError, atomic_write_json
 from media_tools import mix_dialogue_track, probe_media, render_dialogue_track, replace_audio_track
 from tts_providers import create_tts_provider
@@ -180,7 +181,10 @@ def dialogue_lines(project: dict[str, Any]) -> list[dict[str, Any]]:
                     "global_end": offset + float(line["end"]),
                 }
             )
-        offset += _seconds(project, shot)
+        try:
+            offset += edit_window(shot)[2]
+        except (TypeError, ValueError):
+            offset += _seconds(project, shot)
     return lines
 
 
@@ -201,24 +205,27 @@ def dialogue_subtitle_cues(project: dict[str, Any]) -> list[dict[str, Any]]:
 
 def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     lines = shot.get("dialogue", []) if isinstance(shot.get("dialogue"), list) else []
-    if not lines:
-        return ""
     characters = {
         str(item.get("id", "")): str(item.get("name", item.get("id", "")))
         for item in project.get("characters", [])
         if isinstance(item, dict)
     }
     config = audio_config(project)
+    intent = shot_audio_intent(shot)
     rendered = []
     for line in lines:
         if not isinstance(line, dict):
             continue
         speaker_id = str(line.get("speaker", ""))
-        window = f"{float(line.get('start', 0)):.2f}-{float(line.get('end', 0)):.2f}s"
         speaker = characters.get(speaker_id, speaker_id)
         if config["mode"] == "native-dialogue":
-            rendered.append(f"{window}, {speaker} says exactly: {str(line.get('text', '')).strip()}")
+            emotion = str(line.get("emotion", "natural")).strip() or "natural"
+            rendered.append(
+                f"{speaker} speaks this short intended line once in natural {emotion} delivery: "
+                f"{str(line.get('text', '')).strip()}"
+            )
         else:
+            window = f"{float(line.get('start', 0)):.2f}-{float(line.get('end', 0)):.2f}s"
             emotion = str(line.get("emotion", "natural")).strip() or "natural"
             rendered.append(f"{window}, {speaker} performs natural {emotion} speaking motion; do not show any legible words")
     sound_parts = []
@@ -230,10 +237,35 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
             sound_parts.append(f"{label}: {str(value).strip()}")
     sound_context = (" " + "; ".join(sound_parts) + ".") if sound_parts else ""
     if config["mode"] == "native-dialogue":
-        policy = "Generate synchronized spoken audio for the exact dialogue, with natural ambience and sound effects where specified. Do not render the words as on-screen text." + sound_context
+        if intent == "dialogue":
+            policy = (
+                "Generate native synchronized character speech, room tone, and specified sound effects. "
+                "Prioritize believable acting, pauses, turn-taking, and intelligibility; do not rush the line into a rigid timestamp."
+            )
+        elif intent == "narration":
+            narration = str(shot.get("narration", "")).strip()
+            policy = (
+                "Generate a clear native off-screen Mandarin voice with natural pacing over scene ambience. "
+                f"Audio-channel-only voice script: {narration}. "
+                "Keep every written word exclusively in the soundtrack; each video frame remains only the physical camera scene."
+            )
+        elif intent == "effects-ambience":
+            policy = "Generate native environmental sound and physical sound effects with no spoken words."
+        elif intent == "intentional-silence":
+            policy = "Keep this deliberately near-silent with only extremely subtle natural room tone and no speech or music."
+        else:
+            policy = "Generate native environmental ambience and restrained scene-appropriate background music with no spoken words."
+        has_spoken_content = bool(lines) or bool(str(shot.get("narration", "")).strip())
+        if config["subtitle_source"] == "upstream" and has_spoken_content:
+            policy += " Render synchronized, readable upstream captions for spoken content only."
+        else:
+            policy += " Keep the picture as uninterrupted feature-film photography while all speech remains audible only."
+        policy += sound_context
     else:
+        if not lines:
+            return ""
         policy = "Show the active speaker naturally talking. Keep the frame text-free; local post-production supplies the final voice and subtitles."
-    return policy + "\n" + "\n".join(rendered)
+    return policy + (("\n" + "\n".join(rendered)) if rendered else "")
 
 
 def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:

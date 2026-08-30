@@ -1,4 +1,4 @@
-# Project Contract
+# Project Contract (v2.1.0 native-director)
 
 `project.json` is the creative input. `state.json` is script-owned runtime state. Never put credentials in either file.
 
@@ -13,6 +13,19 @@
   "video_mode": "image-to-video",
   "video_provider": "quickai",
   "video_provider_policy": "automatic",
+  "frame_layout": "single-full-frame",
+  "allow_multi_panel": false,
+  "layout_risk_policy": "block",
+  "director": {
+    "mode": "cinematic-short",
+    "project_type": "single-clip",
+    "genre_packs": ["historical"],
+    "strict": true,
+    "default_exit_behavior": "continue-action"
+  },
+  "story_beats": [
+    {"id": "beat-01", "name": "hook", "visible_event": "A courier sees the gate close", "audience_effect": "immediate urgency"}
+  ],
   "target_duration_seconds": 18,
   "story": "Short screenplay",
   "character_bible": "Concise stable identity, clothing, and props",
@@ -90,6 +103,12 @@
     "camera": "medium shot",
     "camera_motion": "slow push-in",
     "environment_motion": "curtains move gently",
+    "frame_layout": "single-full-frame",
+    "allow_multi_panel": false,
+    "prompt_version": "auto",
+    "edit_in": 0.2,
+    "edit_out": 5.6,
+    "timeline_duration": 5.4,
     "ending_pose": "hands resting at the desk",
     "environment_sound": "quiet room tone",
     "sound_effects": [],
@@ -133,6 +152,8 @@
 Every character selected by `shot.character_ids` also contributes its `characters[].references` to keyframe image generation automatically. This supports multiple reusable character masters. Explicit `shot.image_references` are added after the selected character references, and the combined unique reference count must stay within `max_reference_images`.
 
 ## Limits and state
+
+`frame_layout` is `single-full-frame` unless a deliberate special shot opts into `split-screen`, `triptych`, or `comic-panel` and sets `allow_multi_panel=true`. `layout_risk_policy=block` is the new-project default. For vertical shots with multiple characters, T2V plus a single-frame contract is blocked as a known repeated-panel failure mode; use an approved current-shot keyframe with I2V or explicitly set `allow` after review. `prompt_version` may be `auto`, `full`, `compact`, or `minimal`.
 
 Every clip is 1-15 seconds. Final composed image, video, and character-master prompts cannot exceed 4096 UTF-8 bytes; 3800 is the recommended working ceiling. Preflight exposes full/compact/minimal versions and remaining byte space. Limits are hard preflight gates and request counts include a generated character master.
 

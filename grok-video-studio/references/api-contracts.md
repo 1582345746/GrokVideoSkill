@@ -1,4 +1,4 @@
-# Direct API Contracts
+# Direct API Contracts (v2.1.0 native-director)
 
 ## Endpoint ownership
 
@@ -46,6 +46,12 @@ QuickAI New uses this multipart contract for either video mode when selected as 
 `POST /v1/videos` as multipart with `model`, `prompt`, `seconds`, optional `size`, `resolution`, `aspect_ratio`, `generate_audio`, and zero or more repeated `input_reference` file parts. `generate_audio=true` is the v2 default for native dialogue. This Skill enforces 1-15 seconds and a final composed prompt of at most 4096 UTF-8 bytes. For image-to-video, send only the current shot keyframe.
 
 Both adapters send `resolution` (`480p`, `720p`, or `1080p`) and `aspect_ratio`. Both video modes default to QuickAI. QuickAI New is considered only when its key is configured and the QuickAI failure is safe to fail over, or when the project explicitly fixes `video_provider=quickainew`; providers are never selected implicitly from image presence.
+
+## Native audio and frame layout
+
+The v2.1 project contract requests native upstream audio by default (`audio.mode=native-dialogue`, `generate_audio=true`, `subtitle_source=none`). QuickAI has no explicit audio field in this gateway contract, so its capability is reported as `model_default`; QuickAI New receives `generate_audio=true`. The provider may still return an inaudible or captioned result, so audio and pixels require human QA.
+
+`frame_layout=single-full-frame` is the default and means one uninterrupted physical camera view. `split-screen`, `triptych`, and `comic-panel` are opt-in layouts and require `allow_multi_panel=true`. A vertical multi-character T2V single-frame request is a known repeated-panel risk and is blocked for new projects unless the operator explicitly sets `layout_risk_policy=allow`; the recommended route is one approved keyframe followed by I2V. Layout selection is a creative contract and does not change the upstream endpoint.
 
 The current QuickAI gateway rejects PNG data-URI I2V references even though the upstream xAI contract documents PNG/JPEG/WebP data URIs. The adapter therefore validates each still during preflight and, for valid references, center-crops a temporary JPEG canvas matching the requested aspect ratio before placing it in `image.url` or `reference_images[].url`. The source image is never modified. QuickAI New keeps the original image file in multipart `input_reference` form.
 

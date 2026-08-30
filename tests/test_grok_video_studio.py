@@ -50,6 +50,8 @@ from component_manager import (  # noqa: E402
     load_model_state,
 )
 import grok_video_studio as gvs  # noqa: E402
+import media_tools  # noqa: E402
+import voice_workflow  # noqa: E402
 from grok_video_studio import composed_video_prompt, prompt_bytes, prompt_variants, review_shot_asset  # noqa: E402
 from media_client import image_reference_report  # noqa: E402
 from media_tools import probe_media as probe_media_tool  # noqa: E402
@@ -67,6 +69,51 @@ from provider_contracts import (  # noqa: E402
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_dialogue_and_subtitle_outputs_force_standard_audio_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            video = root / "source.mp4"
+            dialogue = root / "dialogue.wav"
+            subtitles = root / "dialogue.srt"
+            video.write_bytes(FAKE_MP4)
+            dialogue.write_bytes(FAKE_WAV)
+            subtitles.write_text("1\n00:00:00,000 --> 00:00:00,500\nTest\n", encoding="utf-8")
+            commands: list[list[str]] = []
+
+            def fake_run(command: list[str], _: str) -> None:
+                commands.append(command)
+                Path(command[-1]).write_bytes(FAKE_MP4)
+
+            video_probe = {
+                "path": str(video),
+                "duration": 1.0,
+                "has_audio": True,
+                "width": 1280,
+                "height": 720,
+                "codec": "h264",
+                "pixel_format": "yuv420p",
+                "frame_rate": 30.0,
+                "has_subtitles": False,
+                "subtitle_streams": [],
+            }
+            with (
+                mock.patch("media_tools.shutil.which", return_value="ffmpeg"),
+                mock.patch("media_tools._run", side_effect=fake_run),
+                mock.patch("media_tools.probe_media", return_value=video_probe),
+                mock.patch("media_tools.probe_audio", return_value={"duration": 1.0}),
+                mock.patch("media_tools.analyze_audio", return_value={}),
+            ):
+                media_tools.mix_dialogue_track(video, dialogue, root / "mixed.mp4")
+                media_tools.replace_audio_track(video, video, root / "replaced.mp4")
+                media_tools.postprocess_video(video, root / "subtitled.mp4", subtitles=subtitles)
+
+        self.assertEqual(len(commands), 3)
+        for command in commands:
+            self.assertIn("-ar", command)
+            self.assertEqual(command[command.index("-ar") + 1], "48000")
+            self.assertIn("-ac", command)
+            self.assertEqual(command[command.index("-ac") + 1], "2")
+
     def test_media_probe_decodes_ffprobe_output_as_utf8(self) -> None:
         payload = {
             "streams": [
@@ -264,7 +311,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
                 type(self).task_content_404_remaining -= 1
                 self.send_json({"error": {"message": "Video request not found"}}, 404)
                 return
-            self.send_bytes(type(self).video_payload, "video/mp4")
+            self.send_bytes(type(self).audio_payload, "video/mp4")
             return
         self.send_json({"error": {"message": "not found"}}, 404)
 
@@ -349,7 +396,7 @@ class SkillIntegrationTests(unittest.TestCase):
                     "-f",
                     "lavfi",
                     "-i",
-                    "color=c=black:s=320x240:r=30",
+                    "color=c=blue:s=320x240:r=30",
                     "-t",
                     "1",
                     "-c:v",
@@ -373,7 +420,7 @@ class SkillIntegrationTests(unittest.TestCase):
                     "-f",
                     "lavfi",
                     "-i",
-                    "color=c=black:s=320x240:r=30",
+                    "color=c=blue:s=320x240:r=30",
                     "-f",
                     "lavfi",
                     "-i",
@@ -651,13 +698,78 @@ class SkillIntegrationTests(unittest.TestCase):
         project = self.create_project("clean-frame", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         shot = value["shots"][0]
-        self.assertIn("No app UI", composed_video_prompt(value, shot))
+        self.assertIn("[CLEAN FRAME POLICY]", composed_video_prompt(value, shot))
+        self.assertIn("One camera view fills the entire frame", composed_video_prompt(value, shot))
 
         value["allow_ui_elements"] = True
-        self.assertNotIn("No app UI", composed_video_prompt(value, shot))
+        self.assertNotIn("[CLEAN FRAME POLICY]", composed_video_prompt(value, shot))
+        self.assertIn("One camera view fills the entire frame", composed_video_prompt(value, shot))
 
         shot["allow_ui_elements"] = False
-        self.assertIn("No app UI", composed_video_prompt(value, shot))
+        self.assertIn("[CLEAN FRAME POLICY]", composed_video_prompt(value, shot))
+
+    def test_multi_panel_layout_requires_explicit_shot_authorization(self) -> None:
+        project = self.create_project("frame-layout", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        shot = value["shots"][0]
+        self.assertEqual(value["frame_layout"], "single-full-frame")
+        self.assertFalse(value["allow_multi_panel"])
+
+        shot["frame_layout"] = "triptych"
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        blocked = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("allow_multi_panel" in error for error in blocked["errors"]))
+
+        shot["allow_multi_panel"] = True
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        self.assertTrue(self.run_cli("validate", str(project))["ok"])
+        prompt = composed_video_prompt(value, shot)
+        self.assertIn("explicitly requested three-panel triptych", prompt)
+        self.assertNotIn("One camera view fills the entire frame", prompt)
+
+    def test_genre_coverage_planning_is_not_sent_to_one_video_request(self) -> None:
+        project = self.create_project("single-shot-genre", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["director"]["genre_packs"] = ["comedy"]
+        prompt = composed_video_prompt(value, value["shots"][0])
+        self.assertNotIn("cut to inserts and reactions", prompt)
+        self.assertIn("One camera view fills the entire frame", prompt)
+
+    def test_vertical_multi_character_single_frame_uses_compact_prompt(self) -> None:
+        project = self.create_project("vertical-two-people", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["characters"] = [
+            {"id": "left", "name": "Left", "identity": "Original adult in a navy coat."},
+            {"id": "right", "name": "Right", "identity": "Original adult in a gray coat."},
+        ]
+        value["video_mode"] = "text-to-video"
+        value["shots"][0]["character_ids"] = ["left", "right"]
+        value["shots"][0]["video_aspect_ratio"] = "9:16"
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        blocked = self.run_cli("preflight", str(project), expected=1)
+        self.assertTrue(any("high-risk vertical multi-character T2V" in error for error in blocked["errors"]))
+        self.assertEqual(value["layout_risk_policy"], "block")
+        self.assertEqual(blocked["preflight"]["layout_risks"][0]["policy"], "block")
+
+        value["shots"][0]["layout_risk_policy"] = "allow"
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        preflight = self.run_cli("preflight", str(project))["preflight"]
+        video = next(item for item in preflight["prompts"] if item["kind"] == "video")
+        self.assertEqual(video["selected_version"], "compact")
+        self.assertEqual(preflight["layout_risks"][0]["recommended_route"], "image-to-video with one approved single-full-frame keyframe")
+        self.assertEqual(preflight["layout_risks"][0]["policy"], "allow")
+
+        value["shots"][0]["prompt_version"] = "minimal"
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        preflight = self.run_cli("preflight", str(project))["preflight"]
+        video = next(item for item in preflight["prompts"] if item["kind"] == "video")
+        self.assertEqual(video["selected_version"], "minimal")
+
+    def test_prompt_hard_limit_is_enforced_before_safe_limit(self) -> None:
+        variants = {"full": "x" * 1200, "compact": "x" * 900, "minimal": "x" * 500}
+        version, prompt = gvs.select_prompt_variant(variants, hard_limit=1000)
+        self.assertEqual(version, "compact")
+        self.assertEqual(len(prompt), 900)
 
     def test_multishot_text_to_video_identity_lock_is_audited(self) -> None:
         project = self.root / "t2v-identity"
@@ -706,7 +818,19 @@ class SkillIntegrationTests(unittest.TestCase):
         capabilities = self.run_cli("capabilities")
         ids = {item["id"] for item in capabilities["workflows"]}
         routes = {item["id"] for item in capabilities["product_routes"]}
-        self.assertEqual(routes, {"text-to-video", "image-to-video", "episodic-series", "news-video"})
+        self.assertEqual(
+            routes,
+            {
+                "text-to-video",
+                "image-to-video",
+                "cinematic-short",
+                "dialogue-scene",
+                "silent-cinema",
+                "action-scene",
+                "episodic-series",
+                "news-video",
+            },
+        )
         self.assertIn("short-drama", ids)
         self.assertIn("single-image-animation", ids)
         project = self.root / "dynamic"
@@ -724,6 +848,111 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(sum(created["shot_seconds"]), 37)
         self.assertNotEqual(len(created["shot_seconds"]), 8)
+
+    def test_custom_workflow_can_extend_a_builtin_without_overriding_it(self) -> None:
+        candidate = self.root / "my-history-workflow.json"
+        candidate.write_text(
+            json.dumps(
+                {
+                    "id": "my-history-short",
+                    "extends": "cinematic-short",
+                    "title": "My historical short",
+                    "genre_packs": ["historical"],
+                    "guidance": {"story": "A custom visible-event planning rule."},
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = self.run_cli("workflow-validate", str(candidate))
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["resolved"]["director_mode"], "cinematic-short")
+        self.assertEqual(result["resolved"]["genre_packs"], ["historical"])
+
+    def test_native_audio_prompt_covers_ambience_and_explicit_upstream_captions(self) -> None:
+        project = self.create_project("native-audio-contract", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        shot = value["shots"][0]
+        prompt = composed_video_prompt(value, shot)
+        self.assertIn("background music", prompt)
+        self.assertIn("no spoken words", prompt)
+        self.assertIn("speech remains audible only", prompt)
+
+        shot["audio_intent"] = "narration"
+        shot["narration"] = "这是只在声音里出现的旁白。"
+        prompt = composed_video_prompt(value, shot)
+        self.assertIn("Audio-channel-only voice script", prompt)
+        self.assertIn("every written word exclusively in the soundtrack", prompt)
+        self.assertIn("这是只在声音里出现的旁白", prompt)
+
+        value["characters"] = [{"id": "lead", "name": "Lead", "identity": "Original character."}]
+        shot["character_ids"] = ["lead"]
+        shot["dialogue"] = [{"id": "line-001", "speaker": "lead", "text": "为什么要这样？", "start": 0.2, "end": 2.0}]
+        shot["audio_intent"] = "dialogue"
+        value["audio"]["subtitle_source"] = "upstream"
+        prompt = composed_video_prompt(value, shot)
+        self.assertIn("Render synchronized, readable upstream captions", prompt)
+        self.assertNotIn("No app UI, controls, overlays, text", prompt)
+        self.assertNotIn("says exactly", prompt)
+
+    def test_workflow_route_contract_is_enforced_by_init_and_validate(self) -> None:
+        failed = self.run_cli(
+            "init",
+            str(self.root / "bad-performance-route"),
+            "--title",
+            "Bad route",
+            "--topic",
+            "Wrong route",
+            "--workflow",
+            "dance-performance",
+            "--mode",
+            "text-to-video",
+            expected=1,
+        )
+        self.assertFalse(failed["ok"])
+        self.assertIn("does not support text-to-video", str(failed["error"]))
+
+        project = self.create_project("edited-bad-route", generate_image=False)
+        path = project / "project.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["workflow"] = "dance-performance"
+        value["video_mode"] = "text-to-video"
+        path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        report = self.run_cli("validate", str(project), expected=1)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any("does not support text-to-video" in item for item in report["errors"]))
+
+    def test_strict_director_gate_blocks_unplanned_dialogue_only_generation(self) -> None:
+        project = self.root / "director-gate"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Director gate",
+            "--topic",
+            "A rigid conversation",
+            "--workflow",
+            "dialogue-scene",
+            "--mode",
+            "text-to-video",
+            "--shots",
+            "3",
+            "--seconds",
+            "2",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "Two people argue without visual coverage."
+        value["characters"] = [{"id": "lead", "name": "Lead", "identity": "Original character."}]
+        for index, shot in enumerate(value["shots"], 1):
+            shot["video_prompt"] = "The speaker faces camera and talks."
+            shot["character_ids"] = ["lead"]
+            shot["audio_intent"] = "dialogue"
+            shot["dialogue"] = [
+                {"id": f"line-{index:03d}", "speaker": "lead", "text": "A short line.", "start": 0.1, "end": 1.5}
+            ]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("story_beats" in error for error in result["errors"]))
+        self.assertTrue(any("100% dialogue" in error for error in result["errors"]))
 
     def test_i2v_init_aligns_keyframe_orientation_and_warns_for_legacy_square_size(self) -> None:
         landscape = self.root / "landscape-i2v"
@@ -959,13 +1188,26 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertFalse(muted["media"]["has_audio"])
         self.assertEqual(muted["media"]["audio_policy"], "mute")
 
+        trimmed_path = self.root / "trimmed.mp4"
+        trimmed = gvs.assemble_clips(
+            [with_audio],
+            trimmed_path,
+            target_size="320x240",
+            audio_policy="preserve",
+            edit_windows=[{"edit_in": 0.2, "edit_out": 0.7, "timeline_duration": 0.5}],
+            require_audio=True,
+        )
+        self.assertTrue(trimmed["has_audio"])
+        self.assertLess(trimmed["duration"], 0.9)
+        self.assertAlmostEqual(trimmed["edit_windows"][0]["timeline_duration"], 0.5)
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_qa_rejects_legacy_final_without_audio(self) -> None:
         project = self.create_project("legacy-final", generate_image=False)
         self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
         final = project / "deliverables" / "final.mp4"
         final.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(project / "clips" / "shot-001.mp4", final)
+        final.write_bytes(FakeProviderHandler.video_payload)
         state_path = project / "state.json"
         state = json.loads(state_path.read_text(encoding="utf-8"))
         state["deliverables"] = {"final": {"path": "deliverables/final.mp4"}}
@@ -975,6 +1217,52 @@ class SkillIntegrationTests(unittest.TestCase):
         final_report = next(report for report in qa["reports"] if report["kind"] == "deliverable")
         self.assertFalse(final_report["ok"])
         self.assertTrue(any("no audio track" in error for error in final_report["errors"]))
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_strict_quality_report_blocks_detected_black_segments(self) -> None:
+        path = self.root / "black-segment.mp4"
+        subprocess.run(
+            [
+                shutil.which("ffmpeg"), "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:r=30",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "1.8",
+                "-vf", "drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill:enable='lt(t,0.8)'",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        warning_report = media_tools.quality_report(path)
+        self.assertTrue(warning_report["ok"])
+        strict_report = media_tools.quality_report(path, black_is_error=True)
+        self.assertFalse(strict_report["ok"])
+        self.assertTrue(any("black segment" in error for error in strict_report["errors"]))
+        selected_report = media_tools.quality_report(path, black_is_error=True, scan_start=0.85, scan_end=1.8)
+        self.assertTrue(selected_report["ok"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_single_full_frame_qa_blocks_repeated_horizontal_panels(self) -> None:
+        path = self.root / "repeated-panels.mp4"
+        subprocess.run(
+            [
+                shutil.which("ffmpeg"), "-y", "-f", "lavfi", "-i", "testsrc2=s=320x80:r=24",
+                "-filter_complex", "[0:v]split=3[a][b][c];[a][b][c]vstack=inputs=3[v]",
+                "-map", "[v]", "-t", "2", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        report = media_tools.quality_report(
+            path,
+            expected_frame_layout="single-full-frame",
+            layout_is_error=True,
+        )
+        self.assertFalse(report["ok"])
+        layout = report["signals"]["repeated_panel_layout"]
+        self.assertTrue(layout["detected"])
+        self.assertEqual(layout["panel_count"], 3)
+        self.assertTrue(any("repeated 3-panel" in error for error in report["errors"]))
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_single_sheet_character_master_feeds_keyframe_not_video(self) -> None:
@@ -1290,6 +1578,34 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertFalse(approved_video["review"]["locked"])
         self.assertEqual(approved_video["review"]["next"], "approved video review is recorded")
+        qa = self.run_cli("qa", str(project))
+        self.assertTrue(qa["visual_ok"])
+        self.assertTrue(qa["manual_review_complete"])
+        self.assertEqual(qa["review_summary"], {"approved": 1, "rejected": 0, "pending": 0})
+
+    def test_rejected_video_is_separate_from_technical_qa(self) -> None:
+        project = self.create_project("visual-rejection", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["defaults"]["video_size"] = "320x240"
+        value["defaults"]["video_seconds"] = 1
+        value["target_duration_seconds"] = 1
+        value["shots"][0]["seconds"] = 1
+        value["shots"][0]["edit_out"] = 1.0
+        value["shots"][0]["timeline_duration"] = 1.0
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+        self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
+        self.run_cli(
+            "review-shot", str(project), "shot-001", "--kind", "video", "--decision", "reject",
+            "--notes", "baked captions",
+        )
+        qa = self.run_cli("qa", str(project))
+        self.assertTrue(qa["technical_ok"])
+        self.assertFalse(qa["visual_ok"])
+        self.assertFalse(qa["ok"])
+        self.assertTrue(qa["manual_review_complete"])
+        clip = next(report for report in qa["reports"] if report["kind"] == "clip")
+        self.assertEqual(clip["asset_review"]["status"], "rejected")
+        self.assertEqual(clip["performance_review"]["status"], "rejected")
 
     def test_budget_gate_blocks_before_billable_request(self) -> None:
         project = self.create_project("budget", generate_image=False)
@@ -1518,7 +1834,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
         self.assertNotIn("generate_audio", FakeProviderHandler.last_json_video)
         self.assertIn("这句话必须准确说出。", str(FakeProviderHandler.last_json_video["prompt"]))
-        self.assertIn("Do not render the words as on-screen text", str(FakeProviderHandler.last_json_video["prompt"]))
+        self.assertIn("speech remains audible only", str(FakeProviderHandler.last_json_video["prompt"]))
+        self.assertNotIn("says exactly", str(FakeProviderHandler.last_json_video["prompt"]))
 
     @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
     def test_dpapi_storage_keeps_plaintext_out_of_config(self) -> None:
@@ -1769,8 +2086,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertFalse(value["audio"]["generate_audio"])
         self.assertEqual(value["audio"]["subtitle_source"], "project")
 
-    def test_saved_install_profile_is_the_default_for_new_projects(self) -> None:
-        self.run_cli("install-configure", "--profile", "upstream-dialogue")
+    def test_saved_local_install_profile_does_not_change_new_project_defaults(self) -> None:
+        self.run_cli("install-configure", "--profile", "lip-sync")
         project = self.root / "saved-profile-contract"
         self.run_cli(
             "init",
@@ -2110,6 +2427,86 @@ class SkillIntegrationTests(unittest.TestCase):
         value["audio"].update({"allow_temporary_voices": True, "allow_shared_voices": True})
         (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
         self.assertTrue(self.run_cli("validate", str(project))["ok"])
+
+    def test_parallel_voice_approvals_preserve_both_character_updates(self) -> None:
+        project = self.create_project("parallel-voice-approval", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["audio"] = {"mode": "local-voice", "generate_audio": False, "tts_provider": "cosyvoice"}
+        value["characters"] = [
+            {"id": "lead", "name": "Lead", "identity": "Original lead.", "references": []},
+            {"id": "friend", "name": "Friend", "identity": "Original friend.", "references": []},
+        ]
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+
+        candidates = []
+        for character_id in ("lead", "friend"):
+            relative = f"assets/voice-auditions/{character_id}/{character_id}.wav"
+            audio_path = project / relative
+            audio_path.parent.mkdir(parents=True, exist_ok=True)
+            audio_path.write_bytes(FAKE_WAV)
+            voice = {
+                "provider": "cosyvoice",
+                "voice_type": "reference",
+                "voice_status": "auditioned",
+                "reference_audio": relative,
+                "reference_text": f"{character_id} reference",
+                "consent": "synthetic",
+                "source_license": "test fixture",
+            }
+            candidates.append(
+                {
+                    "id": f"{character_id}-candidate",
+                    "character_id": character_id,
+                    "status": "auditioned",
+                    "provider": "cosyvoice",
+                    "voice": voice,
+                    "audio_path": relative,
+                    "audio_sha256": voice_workflow.file_digest(audio_path),
+                }
+            )
+        (project / "voice-catalog.json").write_text(
+            json.dumps({"version": 1, "updated_at": 0, "candidates": candidates}),
+            encoding="utf-8",
+        )
+
+        first_write_started = threading.Event()
+        original_write = voice_workflow.atomic_write_json
+        delayed = False
+
+        def delayed_project_write(path: Path, payload: object) -> None:
+            nonlocal delayed
+            if path.name == "project.json" and not delayed:
+                delayed = True
+                first_write_started.set()
+                time.sleep(0.2)
+            original_write(path, payload)
+
+        errors: list[BaseException] = []
+
+        def approve(candidate_id: str) -> None:
+            try:
+                voice_workflow.review_voice_candidate(project, candidate_id, approve=True)
+            except BaseException as error:  # pragma: no cover - surfaced by the assertion below
+                errors.append(error)
+
+        with mock.patch("voice_workflow.atomic_write_json", side_effect=delayed_project_write):
+            first = threading.Thread(target=approve, args=("lead-candidate",))
+            second = threading.Thread(target=approve, args=("friend-candidate",))
+            first.start()
+            self.assertTrue(first_write_started.wait(timeout=2))
+            second.start()
+            first.join(timeout=5)
+            second.join(timeout=5)
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertEqual(errors, [])
+        approved = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        voices = {item["id"]: item.get("voice", {}) for item in approved["characters"]}
+        self.assertEqual(voices["lead"]["voice_status"], "approved")
+        self.assertEqual(voices["friend"]["voice_status"], "approved")
+        catalog = json.loads((project / "voice-catalog.json").read_text(encoding="utf-8"))
+        self.assertEqual({item["status"] for item in catalog["candidates"]}, {"approved"})
 
     def test_series_voice_sync_excludes_unapproved_candidates(self) -> None:
         series_root = self.root / "voice-sync-series"

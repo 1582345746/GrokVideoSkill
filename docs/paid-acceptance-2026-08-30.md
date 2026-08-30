@@ -1,4 +1,6 @@
-# v2.0.1 付费生成验收记录
+# v2.0.1 付费生成验收记录（历史）
+
+> 本记录保留 v2.0.1 的问题和修复。当前验收以 [`v2.1 native-director`](v2.1-native-director-release.zh-CN.md) 为准。
 
 日期：2026-08-30
 
