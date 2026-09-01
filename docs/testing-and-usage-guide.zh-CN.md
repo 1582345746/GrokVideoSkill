@@ -1,4 +1,4 @@
-# Grok Video Studio v2.3.0 evidence-editor 测试与使用指南
+# Grok Video Studio v2.4.0 chatcut-adapter 测试与使用指南
 
 本文面向技能使用者和验收人员。所有示例都是可以直接发给 Codex 的标准话术，不包含真实 Key。导演规划、原生上游音频、有效片段剪辑和表演 QA 适用于所有视频路线；连续剧只是额外增加系列连续性和逐集审批。
 
@@ -27,9 +27,10 @@
 11. 连续剧
 12. 新闻视频
 13. 拼接、后期和封面
-14. 断点恢复与失败重试
-15. 最终 QA 与测试记录模板
-16. 内部创意预设快速话术
+14. ChatCut 可编辑时间线与回执
+15. 断点恢复与失败重试
+16. 最终 QA 与测试记录模板
+17. 内部创意预设快速话术
 
 ## 1. 测试原则
 
@@ -60,12 +61,12 @@
 
 先检查现有仓库和安装目录。工作区干净时使用 fast-forward 拉取 main；如果有未提交修改，先报告，不要覆盖。然后运行 install.ps1 -Repair -Force。
 
-保留已有 DPAPI 凭据、安装档位、项目、组件源码和模型，不要重新要求输入 Key，不要重新下载已有模型。完成后运行 version、install.ps1 -Check、doctor 和 capabilities。允许读取上游模型列表，但不要创建任何付费图片或视频任务。
+保留已有 DPAPI 凭据、安装档位、项目、组件源码和模型，不要重新要求输入 Key，不要重新下载已有模型。完成后运行 version、install.ps1 -Check、doctor、capabilities 和 chatcut-capabilities。允许读取上游模型列表，但不要创建任何付费图片或视频任务。
 ```
 
 通过标准：
 
-- 安装版本为 `2.3.0`。
+- 安装版本为 `2.4.0`。
 - 安装目录可读取，默认 `install-plan --profile upstream-dialogue` 成功；需要静音或保留源音频时另验 `basic`。
 - 既有凭据角色仍可用，输出中没有 Key 或 Key 片段。
 - FFmpeg 和 ffprobe 可用。
@@ -294,7 +295,31 @@
 
 通过标准：原文件保留；输出可播放；拼接顺序、时长和音频策略符合要求；没有因为某一段无音轨而丢掉其他段的音频。
 
-## 14. 断点恢复与失败重试
+## 14. ChatCut 可编辑时间线与回执
+
+费用等级：A/B；导入私有素材会把文件发送到 ChatCut 托管服务，必须在实际导入前确认这一点。导出属于用户明确要求时的最后一步。
+
+先检查插件和当前任务工具：
+
+```text
+使用 $grok-video-studio 运行 chatcut-capabilities。确认 ChatCut 插件已安装、MCP 已配置，并明确报告当前任务是否真正暴露 list_projects、target_project、browse_assets、import_media、manage_timelines、edit_item、preview_timeline 等工具。仅插件文件存在或 OAuth 登录成功都不能当成当前任务可编辑。
+```
+
+真实 ChatCut 编辑：
+
+```text
+使用 $grok-video-studio 为 <项目目录> 生成 edit-plan v2，并执行 edit-validate 和 edit-handoff --backend chatcut。若当前任务工具完整可用：先创建或定位 ChatCut 项目，检查资产库，按 asset-import 规则导入每个原始 MP4，在可编辑时间线上应用镜头窗口、速度、滤镜和转场；重新读取时间线并用 preview_timeline/render_cloud_screenshot 检查结构和画面。先不要导出，保留 ChatCut 可编辑项目供我查看。
+```
+
+用户要求导出后：
+
+```text
+使用 ChatCut 的 submit_export 和 track_export 导出当前已验证时间线。把完成的 MP4 下载到 <项目目录> 内，按 v2.4 回执格式填写 remote_project_id、remote_timeline_id、rendered_asset、output_sha256、source_plan_sha256、verification 和 unmapped_features，然后运行 chatcut-receipt-validate <项目目录> <回执路径> --confirm。回执不完整、哈希不符、存在未映射功能或视觉复核未完成时拒绝接受并保留原始项目。
+```
+
+通过标准：插件安装和任务工具状态分开报告；没有本地 flatten 主文件替代可编辑时间线；原始资产、镜头实例、效果和转场在 ChatCut 中可见；结构与组成帧都复核；回执和 MP4/QA 门禁通过。若工具缺失、认证失效或导入被主机策略拒绝，明确说明并回退到 FFmpeg，不假装 ChatCut 已完成。运行 `codex mcp login chatcut` 后需开启新的 Codex 会话以刷新工具清单。
+
+## 15. 断点恢复与失败重试
 
 费用等级：A/B；只有明确重新创建失败任务时为 C。
 
@@ -311,7 +336,7 @@
 - 部分镜头运行不会错误地自动拼接不完整成片。
 - `state.json` 中不含密钥。
 
-## 15. 最终 QA 与测试记录模板
+## 16. 最终 QA 与测试记录模板
 
 ### 标准 QA 话术
 
@@ -356,7 +381,7 @@
 
 只有自动检查与相应人工检查都通过，才能把模块标记为“满足用户使用”。
 
-## 16. 内部创意预设快速话术
+## 17. 内部创意预设快速话术
 
 下面这些是标准文生视频或图生视频项目的内部预设，不是新的产品路线。它们同样遵循“先剧本与预检、后批准、再付费生成”的门禁。
 

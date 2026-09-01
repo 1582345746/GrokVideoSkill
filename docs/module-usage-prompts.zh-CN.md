@@ -1,4 +1,4 @@
-# 模块使用话术（v2.3.0 evidence-editor）
+# 模块使用话术（v2.4.0 chatcut-adapter）
 
 本文是可以直接复制给 Codex 的模块级标准话术。所有示例都使用占位符，不包含任何真实 Key。默认原则是“先规划和预检，用户批准后才创建可能收费的上游任务”。
 
@@ -72,7 +72,7 @@
 仓库：https://github.com/1582345746/GrokVideoSkill.git
 
 请使用 upstream-dialogue 档位。通过受管进程标准输入配置 QuickAI 生图 Key、QuickAI 视频 Key（T2V/I2V）、QuickAI New 视频 Key；Windows 使用 DPAPI 保存。Key 不得出现在命令行、项目文件、日志、源码或终端输出中。
-安装后运行 version、install.ps1 -Check、doctor、capabilities 和 install-plan --profile upstream-dialogue。不要发起付费生成，不要下载或启动 Voicebox、CosyVoice、MuseTalk、Docker 镜像或模型。
+安装后运行 version、install.ps1 -Check、doctor、capabilities、chatcut-capabilities 和 install-plan --profile upstream-dialogue。不要发起付费生成，不要下载或启动 Voicebox、CosyVoice、MuseTalk、Docker 镜像或模型。
 ```
 
 只有静音或保留源音频时才使用：

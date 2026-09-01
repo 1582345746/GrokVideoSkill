@@ -1,4 +1,4 @@
 interface:
   display_name: "Grok Video Studio"
-  short_description: "Build evidence-reviewed AI videos and resumable edits"
-  default_prompt: "Use $grok-video-studio to inspect supplied media with hash-bound visual evidence, plan and generate a resumable video, then produce a reviewed native edit or truthful optional-backend handoff."
+  short_description: "Build evidence-reviewed AI videos and ChatCut-ready edits"
+  default_prompt: "Use $grok-video-studio to inspect supplied media with hash-bound visual evidence, plan and generate a resumable video, then produce a reviewed ChatCut timeline when task tools are authorized or a native FFmpeg edit with a truthful receipt and fallback."

@@ -2,11 +2,11 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.3.0 evidence-editor`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.4.0 chatcut-adapter`，发布分支为 `main`。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
 
-v2.3 把视觉判断升级为可审计的像素证据流程：图片归一化取证、视频安全抽帧、源文件/证据帧 SHA-256、逐帧多模态观察、置信度、身份来源和人工覆盖分别记录。原生 FFmpeg 编辑合同升级为 v2，可执行逐镜头速度/滤镜、逐边界转场、响度归一化和转场证据预览，同时保留干净母版。ChatCut 仍是任务级可选后端；剪映只提供显式实验交接包。
+v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装与 MCP 配置，明确区分“已安装”与“当前任务工具已授权”，把 edit-plan v2 映射为可编辑时间线操作，并要求远端项目/时间线、结构与视觉复核、下载文件 SHA-256 和未映射功能清单组成可验证回执。工具不可见或回执不完整时继续使用原生 FFmpeg，不伪造 ChatCut 成功；剪映只提供显式实验交接包。
 
 ## 产品路线
 
@@ -62,13 +62,13 @@ v2.3 把视觉判断升级为可审计的像素证据流程：图片归一化取
 | 精确字幕/配音/口型 | FFmpeg 字幕，Voicebox/CosyVoice 配音，MuseTalk 口型 | 本地 AI 组件可选，不随基础安装下载 |
 | 连续剧 | 季设定、逐集审批、实际结尾连续性、下一集恢复 | 不会未经批准批量生成整季 |
 | 新闻视频 | 当前来源、事实主张和逐镜头证据映射 | 需要联网研究，AI 画面不能冒充现场 |
-| 后期与 QA | FFmpeg 编辑计划 v2、逐镜头速度/滤镜、逐边界转场、响度、字幕副本、封面和审阅帧 | ChatCut 仅在当前任务工具可用时启用；剪映草稿为实验交接，不承诺直接导入 |
+| 后期与 QA | FFmpeg 编辑计划 v2、逐镜头速度/滤镜、逐边界转场、响度、字幕副本、封面和审阅帧 | ChatCut 插件存在且当前任务工具完整时生成可编辑时间线；否则回退 FFmpeg；剪映草稿为实验交接 |
 
 ## 视觉类型与后期
 
 初始化可传 `--visual-medium auto|photoreal|2d-anime|3d-anime|stylized-3d|motion-graphics|hybrid`。文本自动分类仍是付费前的保守初筛；对实际素材运行 `visual-evidence` 后，Codex 必须查看返回的像素帧，用 `visual-review-record` 保存置信度、逐帧观察和来源回执，再由 `visual-review-apply --confirm` 应用。`subject_nature` 专门区分实际真人 `real-person`、AI 合成真人 `synthetic-human` 与动漫/CG 类人虚构角色 `human-like-fictional`；`real-person` 还必须有已确认的实拍人物来源，通用“真人”描述和写实像素都不够。
 
-完成镜头生成后，运行 `edit-plan`、`edit-validate` 和 `edit`。计划 v2 可用 `--shot-filter`、`--shot-speed`、`--boundary`、`--normalize-lufs` 控制单镜头和单边界，并自动读取 v1 计划。`auto` 在独立 CLI 中稳定回退到原生 FFmpeg；只有当前 Codex 任务加载并授权了 `mcp__chatcut__*` 工具时，Skill 层才把计划交给 ChatCut。`edit-handoff --backend jianying-draft` 只导出媒体、重链接表和兼容性报告；本机剪映 11.2 的草稿 payload 已不是公开 JSON，因此 v2.3 仍不伪造 `draft_content.json`。
+完成镜头生成后，运行 `edit-plan`、`edit-validate` 和 `edit`。计划 v2 可用 `--shot-filter`、`--shot-speed`、`--boundary`、`--normalize-lufs` 控制单镜头和单边界，并自动读取 v1 计划。运行 `chatcut-capabilities` 查看插件安装、MCP 配置和当前任务工具门禁；`edit-handoff --backend chatcut` 会生成带语义映射和回执合同的任务包。只有当前 Codex 任务加载并授权了 `mcp__chatcut__*` 工具时，Skill 层才执行 ChatCut 项目操作；完成导出后用 `chatcut-receipt-validate` 校验并接受回执。工具不可见时 `auto` 稳定回退到原生 FFmpeg。`edit-handoff --backend jianying-draft` 只导出媒体、重链接表和兼容性报告；本机剪映 11.2 的草稿 payload 已不是公开 JSON，因此不伪造 `draft_content.json`。
 
 内置可编辑预设包括 `general-video`、`text-to-video`、`single-image-animation`、`character-consistent-story`、`short-drama`、`product-ad`、`dance-performance`、`comedy-action`、`scene-animation` 和 `news-video`。运行 `capabilities` 查看清单，运行 `describe <id>` 查看该预设的提问和提示词指导。预设只改变规划方式，不会虚构新的上游能力。
 
@@ -109,7 +109,7 @@ QuickAI New 视频 Key：<QUICKAINEW_VIDEO_KEY>
 
 先检查现有仓库和安装目录。工作区干净时使用 fast-forward 拉取 main；如果发现本地未提交修改，先报告，不要覆盖。然后使用 install.ps1 -Repair -Force 更新技能。
 
-要求保留已有 Windows DPAPI 凭据、安装档位、项目、CosyVoice/MuseTalk 源码和模型，不要要求我重新输入 Key，不要重新下载已有模型。完成后运行 version、install.ps1 -Check、doctor 和 capabilities，并报告版本、凭据角色、FFmpeg、可选组件状态；不要发起付费生成测试。
+要求保留已有 Windows DPAPI 凭据、安装档位、项目、CosyVoice/MuseTalk 源码和模型，不要要求我重新输入 Key，不要重新下载已有模型。完成后运行 version、install.ps1 -Check、doctor、capabilities 和 chatcut-capabilities，并报告版本、凭据角色、FFmpeg、可选组件状态、ChatCut 插件安装/MCP 配置/当前任务工具门禁；不要发起付费生成测试。
 ```
 
 手动安装只需：
@@ -209,6 +209,7 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 逐模块标准话术、费用边界、操作顺序和验收标准见：
 
 - [v2.3 像素证据与剪辑 v2 发布说明](docs/v2.3-evidence-editor-release.zh-CN.md)
+- [v2.4 ChatCut 适配器发布说明](docs/v2.4-chatcut-adapter-release.zh-CN.md)
 - [v2.3 发布验收报告](docs/v2.3-acceptance-report.zh-CN.md)
 - [v2.2 视觉类型与原生剪辑发布说明](docs/v2.2-visual-editing-release.zh-CN.md)
 - [v2.2 发布验收报告](docs/v2.2-acceptance-report.zh-CN.md)

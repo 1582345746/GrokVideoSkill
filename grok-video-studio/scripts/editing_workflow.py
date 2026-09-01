@@ -15,6 +15,7 @@ from typing import Any
 
 from gvs_common import SkillError, atomic_write_json, project_state_lock, read_json
 from media_tools import export_review_frames, postprocess_video, probe_media, quality_report
+from chatcut_adapter import build_chatcut_contract, chatcut_capability_report
 
 
 EDIT_PLAN_VERSION = 2
@@ -98,11 +99,7 @@ def editing_capabilities() -> dict[str, Any]:
             "output": "deliverables/final-edited.mp4",
             "preserves_clean_master": True,
         },
-        "chatcut": {
-            "available": "task-tool-discovery-required",
-            "detection": "Use ChatCut only when mcp__chatcut__ tools are loaded and authorized in the current Codex task.",
-            "standalone_cli_can_detect": False,
-        },
+        "chatcut": chatcut_capability_report(),
         "jianying-draft": {
             "available": "experimental-export-only",
             "portable": False,
@@ -883,6 +880,10 @@ def export_edit_handoff(root: Path, plan: dict[str, Any], *, backend: str) -> di
             }
         )
     if backend == "chatcut":
+        installation = chatcut_capability_report()
+        # Hash the project plan as stored on disk. The backend-specific copy is
+        # only an execution view; receipts must still bind to the user's plan.
+        contract = build_chatcut_contract(plan, manifest, installation=installation)
         packet = {
             "version": 1,
             "backend": "chatcut",
@@ -890,12 +891,31 @@ def export_edit_handoff(root: Path, plan: dict[str, Any], *, backend: str) -> di
             "capability_gate": {
                 "required": "mcp__chatcut__ tools loaded and authorized in the current Codex task",
                 "verified_by_cli": False,
+                "plugin_installed": bool(installation["plugin"]["installed"]),
+                "mcp_configured": bool(installation["mcp"]["configured"]),
+                "task_tools_visible": bool(installation["runtime"]["task_tools_visible"]),
                 "reason": "MCP tools are task-scoped and cannot be enumerated by this standalone process.",
             },
             "project_relative_root": ".",
             "edit_plan": handoff_plan,
             "media_manifest": manifest,
-            "required_receipt": ["remote_project_id", "rendered_asset", "output_sha256", "unmapped_features"],
+            "required_receipt": [
+                "remote_project_id",
+                "remote_timeline_id",
+                "rendered_asset",
+                "output_sha256",
+                "source_plan_sha256",
+                "unmapped_features",
+                "verification",
+                "tool_trace",
+            ],
+            "adapter": {
+                "name": "grok-video-studio-chatcut",
+                "version": contract["adapter_version"],
+                "source_plan_sha256": contract["source_plan_sha256"],
+            },
+            "installation": installation,
+            "integration_contract": contract,
         }
         output = root / "deliverables" / "chatcut-handoff.json"
         atomic_write_json(output, packet)

@@ -33,7 +33,7 @@ QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
 2. 使用仓库根目录 install.ps1 安装 upstream-dialogue 档位（新项目默认 `native-dialogue`、`generate_audio=true`、`subtitle_source=none`；需要静音或保留源音频时才使用 basic）。
 3. 通过 grok_video_studio.py configure --credentials-stdin 把 Key 传给技能；Windows 使用当前用户 DPAPI 保存。
 4. 不得把 Key 写进 Git 仓库、项目 JSON、源码、文档、命令行参数、日志或测试输出，也不要在回复中复述 Key。
-5. 安装后运行 version、install.ps1 -Check、doctor 和 capabilities。
+5. 安装后运行 version、install.ps1 -Check、doctor、capabilities 和 chatcut-capabilities。
 6. doctor 只允许查询模型和健康状态，不得发起生图、生视频或其他付费创建请求。
 7. 不安装 Voicebox、CosyVoice、MuseTalk、VoxCPM、Docker 镜像或模型权重，除非我之后单独批准下载范围和磁盘占用。
 8. 最后报告安装路径、技能版本、三个凭据角色是否已配置、默认视频上游和 FFmpeg 状态，但不要显示任何 Key 片段。

@@ -142,6 +142,7 @@ from visual_evidence import (
     refresh_visual_benchmark,
     validate_project_pixel_review,
 )
+from chatcut_adapter import apply_chatcut_receipt, chatcut_capability_report, validate_chatcut_receipt
 from workflow_registry import (
     GENRE_PACKS,
     default_custom_workflow_root,
@@ -151,7 +152,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.3.0"
+SKILL_VERSION = "2.4.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -3880,6 +3881,13 @@ def build_parser() -> argparse.ArgumentParser:
     visual_benchmark_score.add_argument("benchmark", type=Path)
 
     commands.add_parser("editing-capabilities", help="Show native FFmpeg, ChatCut handoff, and Jianying draft boundaries.")
+    commands.add_parser("chatcut-capabilities", help="Report installed ChatCut plugin and task-scoped MCP capability state.")
+    chatcut_receipt = commands.add_parser(
+        "chatcut-receipt-validate", help="Validate or accept a downloaded ChatCut render receipt against the edit plan."
+    )
+    chatcut_receipt.add_argument("project", type=Path)
+    chatcut_receipt.add_argument("receipt", type=Path)
+    chatcut_receipt.add_argument("--confirm", action="store_true", help="Accept the verified receipt and archive it immutably.")
     edit_plan = commands.add_parser("edit-plan", help="Create a deterministic, resumable edit plan without rendering media.")
     edit_plan.add_argument("project", type=Path)
     edit_plan.add_argument("--backend", choices=tuple(sorted(EDIT_BACKENDS)), default="auto")
@@ -4832,6 +4840,22 @@ def main() -> int:
         if args.command == "editing-capabilities":
             print_json({"ok": True, "capabilities": editing_capabilities()})
             return 0
+        if args.command == "chatcut-capabilities":
+            print_json({"ok": True, "capabilities": chatcut_capability_report()})
+            return 0
+        if args.command == "chatcut-receipt-validate":
+            root = args.project.resolve()
+            plan = load_edit_plan(root)
+            if args.confirm:
+                result = apply_chatcut_receipt(root, plan, args.receipt.resolve(), confirm=True)
+            else:
+                try:
+                    receipt = json.loads(args.receipt.resolve().read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                    raise SkillError(f"unable to read ChatCut receipt: {args.receipt}") from error
+                result = validate_chatcut_receipt(root, plan, receipt)
+            print_json({"ok": bool(result.get("ok")), "project": str(root), "chatcut": result})
+            return 0 if result.get("ok") else 1
         if args.command in {"edit-plan", "edit-validate", "edit", "edit-handoff"}:
             root = args.project.resolve()
             project = load_project(root)

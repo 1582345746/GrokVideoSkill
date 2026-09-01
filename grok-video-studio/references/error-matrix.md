@@ -1,4 +1,4 @@
-# Error Matrix (v2.3.0 evidence-editor)
+# Error Matrix (v2.4.0 chatcut-adapter)
 
 | Symptom | Layer | Action |
 | --- | --- | --- |

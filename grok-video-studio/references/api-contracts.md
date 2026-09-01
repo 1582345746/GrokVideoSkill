@@ -1,4 +1,4 @@
-# Direct API Contracts (v2.3.0 evidence-editor)
+# Direct API Contracts (v2.4.0 chatcut-adapter)
 
 ## Endpoint ownership
 

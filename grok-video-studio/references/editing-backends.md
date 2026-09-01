@@ -4,9 +4,9 @@ Editing is a separate, resumable stage after clean video generation. The clean `
 
 ## Backend order
 
-1. `auto`: use ChatCut only when ChatCut MCP tools are loaded and authorized in the current Codex task. A standalone Python process cannot discover task-scoped MCP tools, so its deterministic fallback is native FFmpeg.
+1. `auto`: use ChatCut only when the current host exposes and authorizes the required ChatCut MCP tools. A standalone Python process can detect the installed plugin and create a contract, but cannot discover task-scoped tools; its deterministic fallback is native FFmpeg.
 2. `native`: use the bundled FFmpeg editor. Edit-plan v2 supports project-relative clip windows, per-shot speed and filters, mixed hard-cut/transition boundaries, loudness normalization, optional music/voice/SRT burn, preview evidence, and resumable `edit-state.json`.
-3. `chatcut`: explicit handoff target. The CLI records the plan but does not pretend that ChatCut is installed, logged in, or available in another user's task. The ChatCut-capable Skill must import the same edit-plan contract and return a rendered asset or a clear failure receipt.
+3. `chatcut`: explicit task-scoped adapter target. The CLI emits `integration_contract` with semantic operations, required tools, source media hashes, and a receipt schema. The ChatCut-capable Skill must import the same edit-plan contract, keep the timeline editable, re-read and visually verify it, and return a rendered asset or a clear failure receipt.
 4. `jianying-draft`: explicit experimental export target only. It is not a default fallback and cannot be assumed portable across users, Windows paths, Jianying versions, locales, or login state.
 
 ## Native workflow
@@ -26,7 +26,7 @@ The native editor deliberately avoids opaque AI transitions, arbitrary third-par
 
 ## ChatCut receipt gate
 
-The current Codex task must actually expose and authorize ChatCut tools before an agent can submit a handoff. A JSON packet is not proof that ChatCut is installed or logged in. A successful adapter must return the required receipt fields (`remote_project_id`, rendered asset, output SHA-256, and unmapped features) and the downloaded render must pass the same MP4 and QA gates as native output. When tools are absent, `auto` stays native and the Skill must not simulate an integration.
+The current Codex task must actually expose and authorize ChatCut tools before an agent can submit a handoff. `chatcut-capabilities` reports plugin installation separately from task-tool visibility; a JSON packet is not proof that a timeline was changed. A successful adapter must return `schema_version=1`, `status=completed`, `remote_project_id`, `remote_timeline_id`, `rendered_asset.path` inside the project, matching `output_sha256`, matching `source_plan_sha256`, `verification.structural=true`, `verification.visual=true`, a non-empty `tool_trace`, `confirmed=true`, and an empty `unmapped_features` array. `chatcut-receipt-validate` then applies the same MP4 and technical QA gates as native output and archives the receipt by hash. When tools are absent, `auto` stays native and the Skill must not simulate an integration.
 
 ## Jianying boundary
 

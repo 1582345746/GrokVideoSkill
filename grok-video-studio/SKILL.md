@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and resumable editing. The installed CLI reports version `2.3.0` (`evidence-editor`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and resumable editing. The installed CLI reports version `2.4.0` (`chatcut-adapter`).
 
 The director layer applies to every video project: standalone T2V, I2V, supplied-image animation, short drama, ads, performance, sourced news, and episodic series. It compiles story beats into shot roles, camera coverage, performance progression, sound intent, cuttable exits, and edit windows. Episodic series add season canon and approval state; they do not own the director layer.
 
@@ -169,6 +169,7 @@ For episodic I2V, define multiple characters under `series.json.characters` and 
 - Create and validate a resumable edit contract with `edit-plan <project>` and `edit-validate <project>`.
 - Edit-plan v2 supports `--shot-filter SHOT=PRESET`, `--shot-speed SHOT=RATE`, and `--boundary AFTER_SHOT=TYPE:SECONDS`, plus `--normalize-lufs` or `--no-normalize`. It reads v1 plans through an in-memory compatibility migration.
 - Render native FFmpeg editing with `edit <project>`. This creates `deliverables/final-edited.mp4`, exports hash-bound boundary preview frames under `deliverables/edit-preview/`, and preserves the clean `deliverables/final.mp4`; read [references/editing-backends.md](references/editing-backends.md) before choosing ChatCut or Jianying.
+- When the request should remain editable in ChatCut, run `chatcut-capabilities` first. A cached plugin and a successful OAuth login are installation evidence only; the host must expose the task-scoped `mcp__chatcut__*` tools. Use `edit-handoff --backend chatcut` to create the plan-bound operation contract, then let the ChatCut MCP skills perform project discovery, asset import, timeline edits, `preview_timeline` verification, and export only when requested. Save the returned render locally and run `chatcut-receipt-validate <project> <receipt> --confirm`; this accepts only a completed, hash-matching MP4 with structural and visual verification and no unmapped features. When the tools are missing, use the native backend and tell the user that `codex mcp login chatcut` followed by a new Codex session is required.
 
 Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. `--retry-failed` requires `--retry-reason "..."`; the reason and prior task state are preserved in history. Polling, model discovery, and content download may retry safely with bounded backoff and a circuit breaker.
 
@@ -190,6 +191,6 @@ Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` 
 6. Report failed or unresolved task IDs without exposing credentials.
 7. Preserve `state.json`; it is the resume contract and contains no secrets.
 
-Use `postprocess <input.mp4> <output.mp4>` for one-off background music, voice-over, burned SRT subtitles, and fades. For repeatable transitions, filters, clip windows, audio mix, and a full timeline, use `edit-plan` plus native `edit`. ChatCut is optional and task-scoped; Jianying draft export is experimental and never the automatic fallback. The edited output is separate from the clean master.
+Use `postprocess <input.mp4> <output.mp4>` for one-off background music, voice-over, burned SRT subtitles, and fades. For repeatable transitions, filters, clip windows, audio mix, and a full timeline, use `edit-plan` plus native `edit`, or the ChatCut operation contract when its task tools are visible. ChatCut is task-scoped and must return the validated receipt described above; Jianying draft export is experimental and never the automatic fallback. The edited output is separate from the clean master.
 
 Use `subtitles <project-folder>` to export `deliverables/subtitles.srt`. Timed dialogue is preferred, then explicit subtitle cues, a shot's `subtitle`/`narration`, or news narration. Add `--burn --style clean|cinematic|news` to create `deliverables/final-subtitled.mp4` with local FFmpeg. For `native-dialogue`, first inspect the source for provider-baked captions; burning is blocked until `--confirm-source-clean` is supplied. This always preserves the clean `final.mp4`; a rejected subtitle design can be re-burned or omitted without another provider request. Never ask the generative video model to draw ordinary subtitles. `dialogue-render` reuses the declared dialogue windows for exact TTS/SRT alignment.
