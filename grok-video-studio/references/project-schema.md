@@ -1,4 +1,4 @@
-# Project Contract (v2.1.0 native-director)
+# Project Contract (v2.2.0 native-director)
 
 `project.json` is the creative input. `state.json` is script-owned runtime state. Never put credentials in either file.
 
@@ -30,6 +30,17 @@
   "story": "Short screenplay",
   "character_bible": "Concise stable identity, clothing, and props",
   "style_bible": "Concise stable visual language",
+  "visual_profile": {
+    "version": 1,
+    "mode": "auto",
+    "medium": "auto",
+    "subject": "auto",
+    "subject_nature": "auto",
+    "realism": "auto",
+    "identity_strictness": "auto",
+    "performance_complexity": "auto",
+    "confirmed": false
+  },
   "characters": [{
     "id": "lead",
     "name": "Lead",
@@ -158,6 +169,8 @@ Every character selected by `shot.character_ids` also contributes its `character
 Every clip is 1-15 seconds. Final composed image, video, and character-master prompts cannot exceed 4096 UTF-8 bytes; 3800 is the recommended working ceiling. Preflight exposes full/compact/minimal versions and remaining byte space. Limits are hard preflight gates and request counts include a generated character master.
 
 `video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `quickai` or `quickainew`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to QuickAI plus `automatic`. Supplying `--video-provider quickai|quickainew` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic QuickAI safely fails and the QuickAI New video key is configured, the runtime records a separate provider attempt and can continue with QuickAI New. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+
+`visual_profile` is optional for backwards compatibility. `medium` describes rendering language; it does not mean that the subject is real. A realistic anime or CG person uses `subject_nature=human-like-fictional`; an AI-generated live-action-looking person uses `synthetic-human`; only supplied/captured actual-human evidence uses `real-person`. Automatic text/filename analysis is a review signal only. See [visual-profile-schema.md](visual-profile-schema.md).
 
 New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536x1024`, `9:16`/`3:4`/`2:3` use `1024x1536`, and `1:1` uses `1024x1024`. Character master sheets remain square. Preflight warns when a generated keyframe's orientation conflicts with its target video aspect ratio because that mismatch increases cropping and composition drift.
 

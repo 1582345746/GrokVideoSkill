@@ -203,7 +203,7 @@ def dialogue_subtitle_cues(project: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
+def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any], *, visual_medium: str | None = None) -> str:
     lines = shot.get("dialogue", []) if isinstance(shot.get("dialogue"), list) else []
     characters = {
         str(item.get("id", "")): str(item.get("name", item.get("id", "")))
@@ -259,7 +259,15 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         if config["subtitle_source"] == "upstream" and has_spoken_content:
             policy += " Render synchronized, readable upstream captions for spoken content only."
         else:
-            policy += " Keep the picture as uninterrupted feature-film photography while all speech remains audible only."
+            visual_contract = {
+                "photoreal": "uninterrupted feature-film live-action photography",
+                "motion-graphics": "one intentional full-canvas motion-graphics composition",
+                "2d-anime": "uninterrupted feature-film animation in the declared 2D anime medium",
+                "3d-anime": "uninterrupted feature-film animation in the declared 3D anime medium",
+                "stylized-3d": "uninterrupted feature-film animation in the declared stylized 3D medium",
+                "hybrid": "one uninterrupted composition in the declared shot medium",
+            }.get(str(visual_medium or ""), "one uninterrupted composition in the declared visual medium")
+            policy += f" Keep the picture as {visual_contract} while all speech remains audible only."
         policy += sound_context
     else:
         if not lines:

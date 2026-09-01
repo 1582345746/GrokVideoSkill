@@ -108,6 +108,31 @@ from voice_workflow import (
     voice_doctor,
 )
 from voice_setup import voicebox_setup_plan
+from editing_workflow import (
+    EDIT_BACKENDS,
+    FILTER_PRESETS,
+    TRANSITIONS,
+    create_edit_plan,
+    edit_plan_path,
+    editing_capabilities,
+    export_edit_handoff,
+    load_edit_plan,
+    render_native_edit,
+    validate_edit_plan,
+)
+from visual_profiles import (
+    VISUAL_LEVELS,
+    VISUAL_MEDIA,
+    VISUAL_REALISM,
+    VISUAL_SUBJECTS,
+    VISUAL_SUBJECT_NATURES,
+    apply_visual_profile,
+    classify_visual_text,
+    default_visual_profile,
+    resolve_visual_profile,
+    validate_visual_profile,
+    visual_prompt_direction,
+)
 from workflow_registry import (
     GENRE_PACKS,
     default_custom_workflow_root,
@@ -117,7 +142,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.1.0"
+SKILL_VERSION = "2.2.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -203,6 +228,47 @@ def load_project(root: Path) -> dict[str, Any]:
     if value.get("workflow") == "news-video" and (root / "news.json").is_file():
         value = apply_news_script(value, load_news_contract(root))
     return value
+
+
+@locked_project_state
+def migrate_project(root: Path) -> dict[str, Any]:
+    project = load_project(root)
+    original = json.loads(json.dumps(project, ensure_ascii=False))
+    changes: list[str] = []
+    if not isinstance(project.get("visual_profile"), dict):
+        project["visual_profile"] = default_visual_profile()
+        changes.append("visual_profile")
+    limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
+    if "max_prompt_bytes" not in limits and "max_prompt_chars" in limits:
+        limits["max_prompt_bytes"] = limits.pop("max_prompt_chars")
+        project["limits"] = limits
+        changes.append("limits.max_prompt_chars->max_prompt_bytes")
+    if "frame_layout" not in project:
+        project["frame_layout"] = "single-full-frame"
+        changes.append("frame_layout")
+    if "allow_multi_panel" not in project:
+        project["allow_multi_panel"] = False
+        changes.append("allow_multi_panel")
+    if "layout_risk_policy" not in project:
+        project["layout_risk_policy"] = "block"
+        changes.append("layout_risk_policy")
+    if "prompt_version" not in project:
+        project["prompt_version"] = "auto"
+        changes.append("prompt_version")
+    backup = root / "project.pre-v2.2.json"
+    if changes:
+        if not backup.exists():
+            atomic_write_json(backup, original)
+        atomic_write_json(project_file(root), project)
+    errors = validate_project(root, project)
+    return {
+        "changed": bool(changes),
+        "changes": changes,
+        "backup": str(backup) if backup.exists() else "",
+        "project": str(project_file(root)),
+        "valid": not errors,
+        "errors": errors,
+    }
 
 
 def fresh_state() -> dict[str, Any]:
@@ -688,6 +754,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("defaults.audio_policy must be preserve or mute")
     errors.extend(validate_dialogue(root, project))
     errors.extend(validate_director(project))
+    errors.extend(validate_visual_profile(project))
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -1120,8 +1187,19 @@ def genre_direction(project: dict[str, Any], *, image_only: bool = False) -> str
     return "\n".join(lines)
 
 
+def clean_frame_direction(project: dict[str, Any]) -> str:
+    medium = str(resolve_visual_profile(project)["medium"])
+    base = "No app UI, controls, overlays, unintended text, captions, logos, watermarks, or stickers. "
+    if medium == "photoreal":
+        return base + "Feature-film camera original. The physical scene fills every edge and remains one uninterrupted photographic image."
+    if medium == "motion-graphics":
+        return base + "Use one intentional full-canvas graphic composition; include text or logos only when explicitly authored in the shot contract."
+    return base + "Animation camera original. The rendered scene fills every edge and remains one uninterrupted composition in the declared animation medium."
+
+
 def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
+    sections.append("[VISUAL MEDIUM CONTRACT]\n" + visual_prompt_direction(project))
     character = str(project.get("character_bible", "")).strip()
     style = str(project.get("style_bible", "")).strip()
     if character:
@@ -1139,17 +1217,14 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
         sections.append("[EPISODE CONTINUITY]\n" + episode_continuity)
     sections.append("[FRAME LAYOUT]\n" + frame_layout_direction(project, shot))
     if not allow_ui_elements(project, shot):
-        sections.append(
-            "[CLEAN FRAME POLICY]\n"
-            "No app UI, controls, overlays, text, captions, logos, watermarks, or stickers. "
-            "Feature-film camera original. The physical scene fills every edge of the frame and remains one uninterrupted photographic image."
-        )
+        sections.append("[CLEAN FRAME POLICY]\n" + clean_frame_direction(project))
     sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
     return "\n\n".join(sections)
 
 
 def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
+    sections.append("[VISUAL MEDIUM CONTRACT]\n" + visual_prompt_direction(project))
     character = str(project.get("character_bible", "")).strip()
     style = str(project.get("style_bible", "")).strip()
     structured = structured_shot_context(project, shot)
@@ -1178,12 +1253,8 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections.append("[FRAME LAYOUT]\n" + frame_layout_direction(project, shot))
     subtitle_source = audio_config(project)["subtitle_source"]
     if not allow_ui_elements(project, shot) and subtitle_source != "upstream":
-        sections.append(
-            "[CLEAN FRAME POLICY]\n"
-            "No app UI, controls, overlays, text, captions, logos, watermarks, or stickers. "
-            "Feature-film camera original. The physical scene fills every edge of the frame and remains one uninterrupted photographic image."
-        )
-    native_audio = dialogue_prompt(project, shot)
+        sections.append("[CLEAN FRAME POLICY]\n" + clean_frame_direction(project))
+    native_audio = dialogue_prompt(project, shot, visual_medium=str(resolve_visual_profile(project)["medium"]))
     if native_audio:
         sections.append("[NATIVE AUDIO AND PERFORMANCE]\n" + native_audio)
     sound_parts = []
@@ -1261,7 +1332,11 @@ def _compact_shot_facts(project: dict[str, Any], shot: dict[str, Any], *, kind: 
     if str(shot.get(source_key, "")).strip():
         facts.append(("Keyframe: " if kind == "image" else "Motion: ") + str(shot[source_key]).strip())
     facts.append("Frame layout: " + frame_layout(project, shot))
-    spoken = dialogue_prompt(project, shot) if kind == "video" else ""
+    spoken = (
+        dialogue_prompt(project, shot, visual_medium=str(resolve_visual_profile(project)["medium"]))
+        if kind == "video"
+        else ""
+    )
     if spoken:
         facts.append("Dialogue and sound: " + spoken)
     return facts
@@ -1310,7 +1385,7 @@ def prompt_variants(project: dict[str, Any], shot: dict[str, Any] | None = None,
         caption_rule = (
             "Include synchronized upstream captions only for spoken lines."
             if audio_config(project)["subtitle_source"] == "upstream"
-            else "Keep every pixel as part of the photographed physical scene."
+            else clean_frame_direction(project)
         )
         audio_rule = (
             "Generate and preserve native scene audio."
@@ -1402,6 +1477,11 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
     prompts: list[dict[str, Any]] = []
     references_report: list[dict[str, Any]] = []
     warnings: list[str] = []
+    resolved_visual_profile = resolve_visual_profile(project)
+    if resolved_visual_profile["review_required"]:
+        warnings.append(
+            "visual profile needs confirmation before paid generation; set a manual medium or confirm the auto analysis"
+        )
     layout_risks: list[dict[str, Any]] = []
     state_for_references = load_state(root) if root is not None else None
     if bool(master.get("enabled", False)) and bool(master.get("generate", False)) and str(master.get("prompt", "")).strip():
@@ -1548,6 +1628,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
     except SkillError as error:
         cost = {"error": str(error), "within_budget": False}
     return {
+        "visual_profile": resolved_visual_profile,
         "workflow": project.get("workflow", "general-video"),
         "requests": {
             "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
@@ -2267,11 +2348,29 @@ def generate_videos(
                 video["status"] = status
                 video["last_polled_at"] = int(time.time())
                 provider_progress = task_progress(payload)
+                display_progress = normalized_task_progress(status, provider_progress, video.get("progress"))
                 if provider_progress is not None:
-                    video["progress"] = provider_progress
-                update_provider_attempt(video, attempt_id=attempt_id, status=status, progress=provider_progress)
+                    video["provider_progress_raw"] = provider_progress
+                if display_progress is not None:
+                    video["progress"] = display_progress
+                update_provider_attempt(
+                    video,
+                    attempt_id=attempt_id,
+                    status=status,
+                    progress=display_progress,
+                    provider_progress_raw=provider_progress,
+                )
                 save_state(root, state)
-                emit_progress(progress, phase="video_poll", shot_id=shot_id, provider=active_provider, task_id=task_id, status=status, progress=provider_progress)
+                emit_progress(
+                    progress,
+                    phase="video_poll",
+                    shot_id=shot_id,
+                    provider=active_provider,
+                    task_id=task_id,
+                    status=status,
+                    progress=display_progress,
+                    provider_progress_raw=provider_progress,
+                )
 
             upstream_completed = False
             try:
@@ -2339,6 +2438,21 @@ def media_frame_rate(value: Any) -> float:
         return round(float(text), 3)
     except (TypeError, ValueError, ZeroDivisionError):
         return 0.0
+
+
+def normalized_task_progress(status: str, provider_progress: float | None, previous: Any = None) -> float | None:
+    normalized_status = str(status).strip().lower()
+    if normalized_status in {"completed", "complete", "done", "succeeded", "success"}:
+        return 100.0
+    try:
+        previous_value = max(0.0, float(previous)) if previous is not None else 0.0
+    except (TypeError, ValueError):
+        previous_value = 0.0
+    if provider_progress is None:
+        return round(previous_value, 2) if previous_value > 0 else None
+    cap = 20.0 if normalized_status in {"queued", "pending", "created", "submitted"} else 99.0
+    current = max(0.0, min(float(provider_progress), cap))
+    return round(max(min(previous_value, cap), current), 2)
 
 
 def probe_media(path: Path) -> dict[str, Any]:
@@ -2593,6 +2707,27 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
 def qa_project(root: Path) -> dict[str, Any]:
     project = require_valid_project(root)
     dialogue = dialogue_preflight(project)
+    visual_profile = resolve_visual_profile(project)
+    subject_nature_checks = {
+        "real-person": [
+            "the real-person label is supported by supplied or captured actual-person evidence, not appearance alone",
+            "the approved person's likeness and identity remain stable without substitution",
+        ],
+        "synthetic-human": [
+            "the subject reads as live-action/photoreal but is not represented as an actual person's identity",
+            "hands, held props, liquids, cloth, and contact physics remain coherent throughout motion",
+        ],
+        "human-like-fictional": [
+            "the subject remains an explicitly fictional anime/CG character even when the render is close to photoreal",
+            "character design and stylization do not drift into an unintended real-person identity",
+        ],
+    }.get(str(visual_profile["subject_nature"]), [])
+    visual_checks = [
+        f"rendered medium visibly matches {visual_profile['medium']}; reject or reclassify style drift",
+        f"subject nature visibly matches {visual_profile['subject_nature']}; appearance alone never proves a real person",
+        *subject_nature_checks,
+        *[f"check {value}" for value in visual_profile["generation_policy"]["qa_priorities"]],
+    ]
     state = load_state(root)
     reports: list[dict[str, Any]] = []
     review_root = root / "deliverables" / "qa-frames"
@@ -2638,6 +2773,14 @@ def qa_project(root: Path) -> dict[str, Any]:
             scan_start=qa_edit_in,
             scan_end=qa_edit_out,
         )
+        report["visual_profile_review"] = {
+            "status": review_status if review_status in {"approved", "rejected"} else "human-review-required",
+            "medium": visual_profile["medium"],
+            "subject": visual_profile["subject"],
+            "subject_nature": visual_profile["subject_nature"],
+            "blocking_checks": visual_checks,
+        }
+        report.setdefault("blocking_review_items", []).extend(visual_checks)
         if report["media"].get("has_subtitles") and audio_config(project).get("subtitle_source") == "none":
             report["errors"].append("clean delivery contains an embedded subtitle stream while audio.subtitle_source is none")
             report["ok"] = False
@@ -2702,6 +2845,7 @@ def qa_project(root: Path) -> dict[str, Any]:
                 "the selected exit has continuing motivated action and no generic sigh, freeze, farewell, or final pose",
                 "micro-expression progression is readable without exaggerated head or mouth motion",
                 "the frame layout matches the contract; reject unrequested split-screen, triptych, repeated panels, or comic cells",
+                *visual_checks,
             ],
         }
         report["asset_review"] = review
@@ -2726,6 +2870,14 @@ def qa_project(root: Path) -> dict[str, Any]:
                 if isinstance(shot, dict)
             ),
         )
+        report["visual_profile_review"] = {
+            "status": "human-review-required",
+            "medium": visual_profile["medium"],
+            "subject": visual_profile["subject"],
+            "subject_nature": visual_profile["subject_nature"],
+            "blocking_checks": visual_checks,
+        }
+        report.setdefault("blocking_review_items", []).extend(visual_checks)
         expected_audio_policy = audio_policy(project)
         if expected_audio_policy == "preserve" and not report["media"]["has_audio"]:
             report["errors"].append("final delivery has no audio track while defaults.audio_policy is preserve")
@@ -2797,6 +2949,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         "reports": reports,
         "project_audit": audit_project(root, project),
         "dialogue_review": dialogue_review,
+        "visual_profile_review": {"profile": visual_profile, "blocking_checks": visual_checks},
         "visual_review_required": True,
         "manual_review_complete": manual_review_complete,
         "review_summary": {
@@ -2858,6 +3011,7 @@ def init_project(
     genre_packs_value: list[str] | None = None,
     frame_layout_value: str = "single-full-frame",
     prompt_version_value: str = "auto",
+    visual_medium_value: str = "auto",
 ) -> Path:
     root = root.resolve()
     path = project_file(root)
@@ -2951,6 +3105,7 @@ def init_project(
         },
         "character_bible": "",
         "style_bible": "",
+        "visual_profile": default_visual_profile(medium=visual_medium_value),
         "characters": [],
         "audio": {
             "mode": audio_mode_value,
@@ -3491,6 +3646,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--skip-test", action="store_true")
 
     commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")
+    migrate = commands.add_parser("migrate", help="Add v2.2 optional fields to an old project while preserving a one-time backup.")
+    migrate.add_argument("project", type=Path)
 
     install_plan = commands.add_parser(
         "install-plan", help="Show a side-effect-free capability installation plan and dependency checks."
@@ -3554,6 +3711,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use one full-frame camera view by default; multi-panel layouts require this explicit option.",
     )
     init.add_argument("--prompt-version", choices=tuple(sorted(PROMPT_VERSIONS)), default="auto")
+    init.add_argument("--visual-medium", choices=tuple(sorted(VISUAL_MEDIA)), default="auto")
     init.add_argument("--seconds", type=int)
 
     series_init = commands.add_parser("series-init", help="Create a series contract and standard episode projects.")
@@ -3573,6 +3731,7 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
     series_init.add_argument("--install-profile", help="Explicitly apply this profile to this project; saved profiles are not inherited.")
     series_init.add_argument("--genre", action="append", choices=tuple(sorted(GENRE_PACKS)), help="Compose a built-in genre direction pack for every episode.")
+    series_init.add_argument("--visual-medium", choices=tuple(sorted(VISUAL_MEDIA)), default="auto")
     series_init.add_argument("--clip-seconds", type=int)
 
     for name in ("series-validate", "series-preflight", "series-status", "series-next", "series-sync", "series-voice-sync"):
@@ -3639,6 +3798,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use one full-frame camera view by default; multi-panel layouts require this explicit option.",
     )
     news_init.add_argument("--prompt-version", choices=tuple(sorted(PROMPT_VERSIONS)), default="auto")
+    news_init.add_argument("--visual-medium", choices=tuple(sorted(VISUAL_MEDIA)), default="auto")
+
+    visual_classify = commands.add_parser(
+        "visual-classify", help="Classify a visual medium from text and reference filenames without reading media pixels."
+    )
+    visual_classify.add_argument("--text", required=True)
+    visual_classify.add_argument("--reference", action="append", default=[])
+
+    visual_show = commands.add_parser("visual-profile", help="Resolve the effective visual profile and generation policy for a project.")
+    visual_show.add_argument("project", type=Path)
+
+    visual_apply = commands.add_parser("visual-profile-apply", help="Persist an automatic or manual visual profile in a project.")
+    visual_apply.add_argument("project", type=Path)
+    visual_apply.add_argument("--mode", choices=("auto", "manual"), required=True)
+    visual_apply.add_argument("--medium", choices=tuple(sorted(VISUAL_MEDIA)), default="auto")
+    visual_apply.add_argument("--subject", choices=tuple(sorted(VISUAL_SUBJECTS)), default="auto")
+    visual_apply.add_argument("--subject-nature", choices=tuple(sorted(VISUAL_SUBJECT_NATURES)), default="auto")
+    visual_apply.add_argument("--realism", choices=tuple(sorted(VISUAL_REALISM)), default="auto")
+    visual_apply.add_argument("--identity-strictness", choices=tuple(sorted(VISUAL_LEVELS)), default="auto")
+    visual_apply.add_argument("--performance-complexity", choices=tuple(sorted(VISUAL_LEVELS)), default="auto")
+    visual_apply.add_argument("--confirm", action="store_true", help="Record that a human or multimodal reviewer confirmed this profile.")
+
+    commands.add_parser("editing-capabilities", help="Show native FFmpeg, ChatCut handoff, and Jianying draft boundaries.")
+    edit_plan = commands.add_parser("edit-plan", help="Create a deterministic, resumable edit plan without rendering media.")
+    edit_plan.add_argument("project", type=Path)
+    edit_plan.add_argument("--backend", choices=tuple(sorted(EDIT_BACKENDS)), default="auto")
+    edit_plan.add_argument("--transition", choices=tuple(sorted(TRANSITIONS)), default="cut")
+    edit_plan.add_argument("--transition-seconds", type=float, default=0.0)
+    edit_plan.add_argument("--filter", dest="filter_preset", choices=tuple(sorted(FILTER_PRESETS)), default="none")
+    edit_validate = commands.add_parser("edit-validate", help="Validate an edit plan and its current media inputs.")
+    edit_validate.add_argument("project", type=Path)
+    edit = commands.add_parser("edit", help="Render a native FFmpeg edit plan into final-edited.mp4 and resume safely.")
+    edit.add_argument("project", type=Path)
+    edit.add_argument("--no-resume", action="store_true")
+    edit_handoff = commands.add_parser("edit-handoff", help="Export a truthful ChatCut packet or experimental Jianying media bundle.")
+    edit_handoff.add_argument("project", type=Path)
+    edit_handoff.add_argument("--backend", choices=("chatcut", "jianying-draft"), required=True)
 
     for name in ("news-validate", "news-context"):
         command = commands.add_parser(name)
@@ -3833,6 +4029,7 @@ def main() -> int:
                         "layout_risk_policy": "block vertical multi-character T2V until I2V or explicit risk acceptance",
                         "prompt_version": "auto (compact for vertical multi-character single-frame shots)",
                         "third_party_modules": "disabled unless explicitly selected",
+                        "visual_profile": "auto text/reference-name classification with explicit review when confidence is low",
                     },
                     "video_provider_default": configured_default_video_provider(),
                     "video_provider_selection": {
@@ -3919,6 +4116,9 @@ def main() -> int:
         if args.command == "describe":
             print_json({"ok": True, "workflow": get_workflow(args.workflow)})
             return 0
+        if args.command == "visual-classify":
+            print_json({"ok": True, "visual_profile": classify_visual_text(args.text, reference_paths=args.reference)})
+            return 0
         if args.command == "workflow-validate":
             result = validate_workflow_file(args.path, WORKFLOW_ROOT)
             print_json(result)
@@ -3930,6 +4130,10 @@ def main() -> int:
             code, result = doctor()
             print_json(result)
             return code
+        if args.command == "migrate":
+            result = migrate_project(args.project.resolve())
+            print_json({"ok": bool(result["valid"]), **result})
+            return 0 if result["valid"] else 1
         if args.command == "install-plan":
             print_json({"ok": True, **install_profile_plan(args.profile)})
             return 0
@@ -4091,6 +4295,7 @@ def main() -> int:
                     selected_audio_mode,
                     selected_subtitle_source,
                     args.genre,
+                    visual_medium_value=args.visual_medium,
                 )
             synced = sync_all_episode_contracts(root, series)
             print_json(
@@ -4356,6 +4561,7 @@ def main() -> int:
                 args.genre,
                 args.frame_layout,
                 args.prompt_version,
+                args.visual_medium,
             )
             package = create_news_contract(
                 root,
@@ -4428,6 +4634,9 @@ def main() -> int:
                 selected_audio_mode,
                 selected_subtitle_source,
                 args.genre,
+                args.frame_layout,
+                args.prompt_version,
+                args.visual_medium,
             )
             print_json(
                 {
@@ -4440,8 +4649,63 @@ def main() -> int:
                     "target_seconds": sum(durations),
                     "frame_layout": args.frame_layout,
                     "prompt_version": args.prompt_version,
+                    "visual_medium": args.visual_medium,
                 }
             )
+            return 0
+        if args.command in {"visual-profile", "visual-profile-apply"}:
+            root = args.project.resolve()
+            project = load_project(root)
+            if args.command == "visual-profile-apply":
+                try:
+                    resolved = apply_visual_profile(
+                        project,
+                        mode=args.mode,
+                        medium=args.medium,
+                        subject=args.subject,
+                        subject_nature=args.subject_nature,
+                        realism=args.realism,
+                        identity_strictness=args.identity_strictness,
+                        performance_complexity=args.performance_complexity,
+                        confirmed=args.confirm,
+                    )
+                except ValueError as error:
+                    raise SkillError(str(error)) from error
+                atomic_write_json(project_file(root), project)
+            else:
+                resolved = resolve_visual_profile(project)
+            print_json({"ok": True, "project": str(root), "visual_profile": resolved})
+            return 0
+        if args.command == "editing-capabilities":
+            print_json({"ok": True, "capabilities": editing_capabilities()})
+            return 0
+        if args.command in {"edit-plan", "edit-validate", "edit", "edit-handoff"}:
+            root = args.project.resolve()
+            project = load_project(root)
+            state = load_state(root)
+            if args.command == "edit-plan":
+                plan = create_edit_plan(
+                    root,
+                    project,
+                    state,
+                    backend=args.backend,
+                    transition=args.transition,
+                    transition_seconds=args.transition_seconds,
+                    filter_preset=args.filter_preset,
+                )
+                print_json({"ok": True, "project": str(root), "plan": plan, "path": str(edit_plan_path(root))})
+                return 0
+            plan = load_edit_plan(root)
+            if args.command == "edit-validate":
+                errors = validate_edit_plan(root, plan, require_inputs=True)
+                print_json({"ok": not errors, "project": str(root), "errors": errors, "plan": plan})
+                return 0 if not errors else 1
+            if args.command == "edit-handoff":
+                result = export_edit_handoff(root, plan, backend=args.backend)
+                print_json({"ok": True, "project": str(root), "handoff": result})
+                return 0
+            result = render_native_edit(root, plan, resume=not args.no_resume)
+            print_json({"ok": True, "project": str(root), "edit": result})
             return 0
         if args.command == "assemble-files":
             clips = [path.resolve() for path in args.clips]

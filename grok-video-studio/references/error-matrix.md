@@ -1,4 +1,4 @@
-# Error Matrix (v2.1.0 native-director)
+# Error Matrix (v2.2.0 native-director)
 
 | Symptom | Layer | Action |
 | --- | --- | --- |

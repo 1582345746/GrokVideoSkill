@@ -2,11 +2,11 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.1.0 native-director`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.2.0 native-director`，发布分支为 `main`。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
 
-v2.1 的导演规划、原生上游音频、有效片段剪辑和表演 QA 是所有视频路线共用的核心层，不只服务连续剧。连续剧在此基础上额外增加季级世界观、逐集审批和跨集连续性。
+v2.2 在共用导演核心上增加多维视觉类型合同和可恢复后期：画面媒介、主体类别、主体真实性、写实程度、一致性和表演复杂度分别记录；原生 FFmpeg 时间线可执行裁切、转场、滤镜、混音和字幕，并保留干净母版。ChatCut 是任务级可选后端，剪映只提供显式实验交接包。
 
 ## 产品路线
 
@@ -31,12 +31,13 @@ v2.1 的导演规划、原生上游音频、有效片段剪辑和表演 QA 是�
 ## 核心能力
 
 - 先展示剧本、分镜、提示词、请求数量和预算，用户批准后才付费生成。
+- 区分 `photoreal`、`2d-anime`、`3d-anime`、`stylized-3d`、`motion-graphics` 和 `hybrid`；主体再分为实际真人 `real-person`、AI 合成真人 `synthetic-human` 和类人虚构角色 `human-like-fictional`。类似真人的动漫/CG 角色不会当成真人。
 - 每次创建任务前写入 `state.json`，支持轮询恢复、断点续跑和指定镜头重试。
 - 默认禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸；原生对白仍可能被上游烧进画面，必须人工检查。
 - 图生视频支持两种不同链路：用户图片直接动画，或角色母版/镜头提示词生成关键帧后再动画。
 - 连续剧保存整季设定、逐集审批状态和上一集实际结尾。
 - 新闻视频保存来源、发布时间、事实主张和逐镜头引用关系。
-- 保留 `deliverables/final.mp4` 干净母版，再通过 FFmpeg 输出对白版、字幕版、混音版和封面等独立衍生物。
+- 保留 `deliverables/final.mp4` 干净母版，通过独立 `edit-plan.json` 和 `edit-state.json` 输出可恢复的 `final-edited.mp4`，支持显式转场、滤镜、混音和字幕。
 - QA 检查格式、时长、方向、黑帧、冻结、音量和静音占比，并要求人工查看每个镜头的审阅帧。
 
 ## 当前模块与预设
@@ -60,7 +61,13 @@ v2.1 的导演规划、原生上游音频、有效片段剪辑和表演 QA 是�
 | 精确字幕/配音/口型 | FFmpeg 字幕，Voicebox/CosyVoice 配音，MuseTalk 口型 | 本地 AI 组件可选，不随基础安装下载 |
 | 连续剧 | 季设定、逐集审批、实际结尾连续性、下一集恢复 | 不会未经批准批量生成整季 |
 | 新闻视频 | 当前来源、事实主张和逐镜头证据映射 | 需要联网研究，AI 画面不能冒充现场 |
-| 后期与 QA | 拼接、混音、字幕副本、封面、媒体和审阅帧检查 | 技术 QA 不能替代人工观片/听审 |
+| 后期与 QA | 原生 FFmpeg 时间线、裁切、转场、滤镜、混音、字幕副本、封面和审阅帧检查 | ChatCut 仅在当前任务工具可用时启用；剪映草稿为实验交接，不承诺直接导入 |
+
+## 视觉类型与后期
+
+初始化可传 `--visual-medium auto|photoreal|2d-anime|3d-anime|stylized-3d|motion-graphics|hybrid`。自动分类只使用文本和引用文件名；Codex 查看实际素材后，应使用 `visual-profile-apply --mode manual ... --confirm` 保存人工确认结果。`subject_nature` 专门区分实际真人 `real-person`、AI 合成真人 `synthetic-human` 与动漫/CG 类人虚构角色 `human-like-fictional`；通用“真人”描述只决定写实媒介，不自动证明存在实际人物身份。
+
+完成镜头生成后，运行 `edit-plan`、`edit-validate` 和 `edit`。`auto` 在独立 CLI 中稳定回退到原生 FFmpeg；只有当前 Codex 任务加载并授权了 `mcp__chatcut__*` 工具时，Skill 层才把计划交给 ChatCut。`edit-handoff --backend jianying-draft` 只导出媒体、重链接表和兼容性报告；本机剪映 11.2 的草稿 payload 已不是公开 JSON，因此 v2.2 不伪造 `draft_content.json`。
 
 内置可编辑预设包括 `general-video`、`text-to-video`、`single-image-animation`、`character-consistent-story`、`short-drama`、`product-ad`、`dance-performance`、`comedy-action`、`scene-animation` 和 `news-video`。运行 `capabilities` 查看清单，运行 `describe <id>` 查看该预设的提问和提示词指导。预设只改变规划方式，不会虚构新的上游能力。
 
@@ -200,7 +207,9 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 
 逐模块标准话术、费用边界、操作顺序和验收标准见：
 
-- [v2.1 native-director 发布与验收说明](docs/v2.1-native-director-release.zh-CN.md)
+- [v2.2 视觉类型与原生剪辑发布说明](docs/v2.2-visual-editing-release.zh-CN.md)
+- [v2.2 发布验收报告](docs/v2.2-acceptance-report.zh-CN.md)
+- [v2.1 native-director 历史发布说明](docs/v2.1-native-director-release.zh-CN.md)
 
 - [完整测试与使用指南](docs/testing-and-usage-guide.zh-CN.md)
 - [用户安装与使用话术](docs/user-installation-and-usage-prompts.zh-CN.md)
@@ -210,6 +219,8 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 - [v2.0.2 拒绝素材归档修复](docs/v2.0.2-rejected-asset-archive.zh-CN.md)
 - [技能运行说明](grok-video-studio/SKILL.md)
 - [项目字段规范](grok-video-studio/references/project-schema.md)
+- [视觉类型字段规范](grok-video-studio/references/visual-profile-schema.md)
+- [剪辑后端与剪映边界](grok-video-studio/references/editing-backends.md)
 - [连续剧字段规范](grok-video-studio/references/series-schema.md)
 - [新闻证据规范](grok-video-studio/references/news-schema.md)
 - [对白和本地组件](grok-video-studio/references/dialogue-and-components.md)

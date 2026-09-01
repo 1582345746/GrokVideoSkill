@@ -1,4 +1,4 @@
-# Workflow Catalog (v2.1.0 native-director)
+# Workflow Catalog (v2.2.0 native-director)
 
 Workflow definitions live in `assets/workflow-templates/*.json`. Edit those JSON files to improve titles, questions, and prompt guidance without changing the Python client.
 

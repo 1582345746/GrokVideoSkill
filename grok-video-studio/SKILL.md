@@ -1,15 +1,17 @@
 ---
 name: grok-video-studio
-description: Plan and build resumable standalone, episodic, or sourced-news AI video projects with QuickAI and QuickAI New image/video generation, native or deterministic local character dialogue, approved multi-character Voicebox/Qwen or CosyVoice TTS, optional MuseTalk lip sync, series bibles, per-episode approval and continuity state, reusable character masters, current-news evidence contracts, deterministic subtitles, clean-frame review, audio QA, validated MP4 downloads, and lightweight post-production. Use for text-to-video, image-to-video, supplied-image animation, character consistency, speaking AI characters, voice-over, voice auditions, lip sync, product ads, multi-shot narratives, short drama, multi-episode series, current hot-news videos, subtitles, batch generation, or requests such as 写剧本、生图、生视频、图生视频、人物讲话、角色配音、音色试听、口型同步、短剧、连续剧、多集视频、生成下一集、热点新闻视频、字幕、批量生成视频 or 合并视频.
+description: Plan and build resumable standalone, episodic, or sourced-news AI video projects with QuickAI and QuickAI New image/video generation, multidimensional visual-medium classification, native or deterministic local character dialogue, approved multi-character Voicebox/Qwen or CosyVoice TTS, optional MuseTalk lip sync, series bibles, per-episode approval and continuity state, reusable character masters, current-news evidence contracts, deterministic subtitles, clean-frame review, audio QA, validated MP4 downloads, and resumable FFmpeg editing with optional ChatCut or experimental Jianying handoff. Use for text-to-video, image-to-video, supplied-image animation, 真人/动漫/动画 type selection, character consistency, speaking AI characters, voice-over, voice auditions, lip sync, product ads, multi-shot narratives, short drama, multi-episode series, current hot-news videos, subtitles, batch generation, editing, or requests such as 写剧本、生图、生视频、图生视频、人物讲话、角色配音、音色试听、口型同步、短剧、连续剧、多集视频、生成下一集、热点新闻视频、字幕、批量生成视频、剪辑、转场、特效、滤镜 or 合并视频.
 ---
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and lightweight post-production. The installed CLI reports version `2.1.0` (`native-director`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, and resumable editing. The installed CLI reports version `2.2.0` (`native-director`).
 
 The director layer applies to every video project: standalone T2V, I2V, supplied-image animation, short drama, ads, performance, sourced news, and episodic series. It compiles story beats into shot roles, camera coverage, performance progression, sound intent, cuttable exits, and edit windows. Episodic series add season canon and approval state; they do not own the director layer.
 
 For v1 projects, read `references/v2.0-upstream-first-migration.zh-CN.md` before changing audio, subtitle, prompt, retry, or series fields.
+
+For visual type selection, read [references/visual-profile-schema.md](references/visual-profile-schema.md). `photoreal` describes appearance only. Reserve `real-person` for supplied/captured actual-human identity, use `synthetic-human` for an AI-generated live-action-looking person, and use `human-like-fictional` for every near-real anime or CG character. Use `visual-profile-apply --mode manual ... --confirm` after reviewing supplied media.
 
 ## Setup
 
@@ -100,9 +102,10 @@ Before rendering local dialogue, keep voice selection as its own approval stage:
 2. Let the CLI plan a variable number of shots from the target duration, or override with `--shots`. Every shot must be 1-15 seconds; no project is fixed to eight clips.
 3. Fill `project.json`: story, concise identity and style bibles, and every shot's image/video prompts. Add a `shot_role` (`establishing`, `wide`, `medium`, `closeup`, `over_shoulder`, `insert`, `reaction`, `transition`, or `ending_hook`) plus location, time, weather, lighting, props, camera motion, environment motion, and ending pose where relevant. For speech, add stable character voice data and timed `dialogue` lines; the dialogue text is authoritative only when `subtitle_source=project`. Keep stable shot and line IDs.
 4. Put user-supplied references under `assets/references/` and use only project-relative paths.
-5. Run `python scripts/grok_video_studio.py preflight <project-folder>` before spending. Review request counts, total duration, prompt lengths, warnings, and errors.
-6. Set `budget.image_request`, `budget.video_request`, and `budget.max_estimated_cost` when a hard project spending ceiling is required. Every attempted paid request is recorded in `state.json` before it is sent. The default retry policy is three total attempts (initial request plus two retries); provider failover counts toward that total. A `submission_unknown` create is never recreated automatically.
-7. Run `audit` to review structured character IDs, wardrobe changes, adjacent-shot continuity notes, and the manual review checklist.
+5. Resolve the visual contract before spending: use `--visual-medium auto|photoreal|2d-anime|3d-anime|stylized-3d|motion-graphics|hybrid` on `init`, or run `visual-profile` and then persist a confirmed manual profile. Review `subject_nature`; do not equate photoreal rendering with a real person.
+6. Run `python scripts/grok_video_studio.py preflight <project-folder>` before spending. Review request counts, total duration, prompt lengths, visual profile confidence, warnings, and errors.
+7. Set `budget.image_request`, `budget.video_request`, and `budget.max_estimated_cost` when a hard project spending ceiling is required. Every attempted paid request is recorded in `state.json` before it is sent. The default retry policy is three total attempts (initial request plus two retries); provider failover counts toward that total. A `submission_unknown` create is never recreated automatically.
+8. Run `audit` to review structured character IDs, wardrobe changes, adjacent-shot continuity notes, visual medium, and the manual review checklist.
 
 Read [references/project-schema.md](references/project-schema.md) before editing `project.json`. Read [references/prompt-contract.md](references/prompt-contract.md) before writing prompts.
 
@@ -159,6 +162,8 @@ For episodic I2V, define multiple characters under `series.json.characters` and 
 - Inspect durable state with `status`.
 - Assemble completed clips with `assemble`.
 - Normalize and combine arbitrary existing clips with `assemble-files <output.mp4> <clip...>`.
+- Create and validate a resumable edit contract with `edit-plan <project>` and `edit-validate <project>`.
+- Render native FFmpeg editing with `edit <project>`. This creates `deliverables/final-edited.mp4` and preserves the clean `deliverables/final.mp4`; read [references/editing-backends.md](references/editing-backends.md) before choosing ChatCut or Jianying.
 
 Treat every image or video create request as billable. The script records an attempt before sending it and does not retry an ambiguous create failure. `--retry-failed` requires `--retry-reason "..."`; the reason and prior task state are preserved in history. Polling, model discovery, and content download may retry safely with bounded backoff and a circuit breaker.
 
@@ -180,6 +185,6 @@ Video contracts are explicit in `project.json`: `video_mode` is `text-to-video` 
 6. Report failed or unresolved task IDs without exposing credentials.
 7. Preserve `state.json`; it is the resume contract and contains no secrets.
 
-Use `postprocess <input.mp4> <output.mp4>` for optional background music, voice-over, burned SRT subtitles, and fades. Use `cover <input.mp4> <cover.jpg>` to export a publishing cover. These commands cover lightweight delivery; use a dedicated editing skill for complex transitions, motion graphics, dialogue editing, or a full timeline.
+Use `postprocess <input.mp4> <output.mp4>` for one-off background music, voice-over, burned SRT subtitles, and fades. For repeatable transitions, filters, clip windows, audio mix, and a full timeline, use `edit-plan` plus native `edit`. ChatCut is optional and task-scoped; Jianying draft export is experimental and never the automatic fallback. The edited output is separate from the clean master.
 
 Use `subtitles <project-folder>` to export `deliverables/subtitles.srt`. Timed dialogue is preferred, then explicit subtitle cues, a shot's `subtitle`/`narration`, or news narration. Add `--burn --style clean|cinematic|news` to create `deliverables/final-subtitled.mp4` with local FFmpeg. For `native-dialogue`, first inspect the source for provider-baked captions; burning is blocked until `--confirm-source-clean` is supplied. This always preserves the clean `final.mp4`; a rejected subtitle design can be re-burned or omitted without another provider request. Never ask the generative video model to draw ordinary subtitles. `dialogue-render` reuses the declared dialogue windows for exact TTS/SRT alignment.

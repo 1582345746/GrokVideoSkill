@@ -1,4 +1,4 @@
 interface:
   display_name: "Grok Video Studio"
-  short_description: "Build resumable AI videos with dialogue and review gates"
-  default_prompt: "Use $grok-video-studio to create a text, image, episodic, or sourced-news video with optional native or local character dialogue, deterministic subtitles, continuity, review gates, and validated delivery."
+  short_description: "Build typed, resumable AI videos and edited deliveries"
+  default_prompt: "Use $grok-video-studio to classify the visual medium and subject reality, plan and generate a resumable video, then create an approved native edit or optional backend handoff with validated clean and edited deliveries."

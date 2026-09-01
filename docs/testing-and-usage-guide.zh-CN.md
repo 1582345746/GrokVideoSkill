@@ -1,13 +1,15 @@
-# Grok Video Studio v2.1.0 native-director 测试与使用指南
+# Grok Video Studio v2.2.0 native-director 测试与使用指南
 
 本文面向技能使用者和验收人员。所有示例都是可以直接发给 Codex 的标准话术，不包含真实 Key。导演规划、原生上游音频、有效片段剪辑和表演 QA 适用于所有视频路线；连续剧只是额外增加系列连续性和逐集审批。
 
-### v2.1 画面布局验收（所有模块）
+### v2.2 视觉类型与画面布局验收（所有模块）
 
 - 默认检查 `frame_layout=single-full-frame`，要求一个连续的物理场景，不能出现重复横向画面、三联画、漫画格或社交平台 UI。
 - 只有明确需要比较、电话两端、监控墙或图形蒙太奇时，才在具体镜头设置 `frame_layout=split-screen|triptych|comic-panel` 和 `allow_multi_panel=true`。
 - 竖屏多人 T2V 单画面组合在付费前默认阻断；先生成一张单画面关键帧并审核，再走 I2V。只有明确接受风险时才使用 `layout_risk_policy=allow`。
 - 每个镜头复核首帧、有效中段和剪辑出口；不要直接使用生成片段最后的叹气、停顿或定格。
+- `photoreal` 只是渲染外观；实际来源真人、AI 合成真人、类似真人的动漫/CG 角色分别使用 `real-person`、`synthetic-human`、`human-like-fictional`。不能靠“像真人”推断实际真人身份。
+- 自动类型分析只读文本与文件名。Codex 实际查看图片/视频后，用 `visual-profile-apply --mode manual ... --confirm` 保存结论。
 
 ## 目录
 
@@ -62,7 +64,7 @@
 
 通过标准：
 
-- 安装版本为 `2.1.0`。
+- 安装版本为 `2.2.0`。
 - 安装目录可读取，默认 `install-plan --profile upstream-dialogue` 成功；需要静音或保留源音频时另验 `basic`。
 - 既有凭据角色仍可用，输出中没有 Key 或 Key 片段。
 - FFmpeg 和 ffprobe 可用。
