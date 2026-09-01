@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/2.2.0"
+USER_AGENT = "GrokVideoStudioSkill/2.3.0"
 DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
 DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"

@@ -1,4 +1,4 @@
-# Direct API Contracts (v2.2.0 native-director)
+# Direct API Contracts (v2.3.0 evidence-editor)
 
 ## Endpoint ownership
 

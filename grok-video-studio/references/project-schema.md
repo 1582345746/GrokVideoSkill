@@ -1,4 +1,4 @@
-# Project Contract (v2.2.0 native-director)
+# Project Contract (v2.3.0 evidence-editor)
 
 `project.json` is the creative input. `state.json` is script-owned runtime state. Never put credentials in either file.
 

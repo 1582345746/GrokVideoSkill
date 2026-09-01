@@ -133,6 +133,15 @@ from visual_profiles import (
     validate_visual_profile,
     visual_prompt_direction,
 )
+from visual_evidence import (
+    IDENTITY_ORIGINS,
+    apply_visual_review_receipt,
+    build_visual_benchmark,
+    collect_visual_evidence,
+    create_visual_review_receipt,
+    refresh_visual_benchmark,
+    validate_project_pixel_review,
+)
 from workflow_registry import (
     GENRE_PACKS,
     default_custom_workflow_root,
@@ -142,7 +151,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.2.0"
+SKILL_VERSION = "2.3.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -710,7 +719,7 @@ def _unsupported_reference_errors(root: Path, references: Any, prefix: str, max_
 
 
 def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
-    errors: list[str] = []
+    errors: list[str] = validate_project_pixel_review(root, project)
     if project.get("version") != PROJECT_VERSION:
         errors.append("project.version must be 1")
     for field in ("title", "topic", "story"):
@@ -3646,7 +3655,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--skip-test", action="store_true")
 
     commands.add_parser("doctor", help="Check credentials, model routing, and ffmpeg without generating media.")
-    migrate = commands.add_parser("migrate", help="Add v2.2 optional fields to an old project while preserving a one-time backup.")
+    migrate = commands.add_parser("migrate", help="Add optional contract fields to an old project while preserving a one-time backup.")
     migrate.add_argument("project", type=Path)
 
     install_plan = commands.add_parser(
@@ -3820,6 +3829,56 @@ def build_parser() -> argparse.ArgumentParser:
     visual_apply.add_argument("--performance-complexity", choices=tuple(sorted(VISUAL_LEVELS)), default="auto")
     visual_apply.add_argument("--confirm", action="store_true", help="Record that a human or multimodal reviewer confirmed this profile.")
 
+    visual_evidence = commands.add_parser(
+        "visual-evidence", help="Extract hash-bound image/video evidence frames for an auditable pixel review."
+    )
+    visual_evidence.add_argument("project", type=Path)
+    visual_evidence.add_argument("media", type=Path, nargs="+")
+    visual_evidence.add_argument("--frames", type=int, default=5)
+
+    visual_review = commands.add_parser(
+        "visual-review-record", help="Record a multimodal or human classification bound to an evidence manifest."
+    )
+    visual_review.add_argument("manifest", type=Path)
+    visual_review.add_argument("--project", type=Path, help="Optional project root for resolving a project-relative manifest path.")
+    visual_review.add_argument("--reviewer-id", required=True)
+    visual_review.add_argument("--reviewer-kind", choices=("multimodal-agent", "human"), default="multimodal-agent")
+    visual_review.add_argument("--medium", choices=tuple(sorted(VISUAL_MEDIA - {"auto"})), required=True)
+    visual_review.add_argument("--subject", choices=tuple(sorted(VISUAL_SUBJECTS - {"auto"})), required=True)
+    visual_review.add_argument("--subject-nature", choices=tuple(sorted(VISUAL_SUBJECT_NATURES - {"auto"})), required=True)
+    visual_review.add_argument("--realism", choices=tuple(sorted(VISUAL_REALISM - {"auto"})), required=True)
+    visual_review.add_argument("--identity-strictness", choices=tuple(sorted(VISUAL_LEVELS)), default="auto")
+    visual_review.add_argument("--performance-complexity", choices=tuple(sorted(VISUAL_LEVELS)), default="auto")
+    visual_review.add_argument("--confidence", type=float, required=True)
+    visual_review.add_argument("--identity-origin", choices=tuple(sorted(IDENTITY_ORIGINS)), default="unknown")
+    visual_review.add_argument("--provenance-confirmed", action="store_true")
+    visual_review.add_argument("--provenance-evidence", default="")
+    visual_review.add_argument(
+        "--frame-evidence", action="append", required=True, help="Repeat FRAME_ID=visible observation; cite only extracted frames."
+    )
+    visual_review.add_argument("--limitation", action="append", default=[])
+    visual_review.add_argument("--confirm", action="store_true")
+
+    visual_review_apply = commands.add_parser(
+        "visual-review-apply", help="Apply an accepted, hash-bound pixel review to a project visual profile."
+    )
+    visual_review_apply.add_argument("project", type=Path)
+    visual_review_apply.add_argument("manifest", type=Path)
+    visual_review_apply.add_argument("receipt", type=Path)
+    visual_review_apply.add_argument("--confirm", action="store_true")
+
+    visual_benchmark_build = commands.add_parser(
+        "visual-benchmark-build", help="Build a deterministic, non-ingesting external visual benchmark."
+    )
+    visual_benchmark_build.add_argument("dataset", type=Path)
+    visual_benchmark_build.add_argument("output", type=Path)
+    visual_benchmark_build.add_argument("--per-group", type=int, default=3)
+    visual_benchmark_build.add_argument("--frames", type=int, default=3)
+    visual_benchmark_score = commands.add_parser(
+        "visual-benchmark-score", help="Validate benchmark receipts and refresh the weak-label regression report."
+    )
+    visual_benchmark_score.add_argument("benchmark", type=Path)
+
     commands.add_parser("editing-capabilities", help="Show native FFmpeg, ChatCut handoff, and Jianying draft boundaries.")
     edit_plan = commands.add_parser("edit-plan", help="Create a deterministic, resumable edit plan without rendering media.")
     edit_plan.add_argument("project", type=Path)
@@ -3827,6 +3886,13 @@ def build_parser() -> argparse.ArgumentParser:
     edit_plan.add_argument("--transition", choices=tuple(sorted(TRANSITIONS)), default="cut")
     edit_plan.add_argument("--transition-seconds", type=float, default=0.0)
     edit_plan.add_argument("--filter", dest="filter_preset", choices=tuple(sorted(FILTER_PRESETS)), default="none")
+    edit_plan.add_argument("--shot-filter", action="append", default=[], help="Repeat SHOT_ID=PRESET for one input.")
+    edit_plan.add_argument("--shot-speed", action="append", default=[], help="Repeat SHOT_ID=RATE; RATE must be 0.25 to 4.0.")
+    edit_plan.add_argument(
+        "--boundary", action="append", default=[], help="Repeat AFTER_SHOT=TYPE:SECONDS; cut may omit :SECONDS."
+    )
+    edit_plan.add_argument("--normalize-lufs", type=float, default=-16.0)
+    edit_plan.add_argument("--no-normalize", action="store_true", help="Preserve timeline loudness instead of applying loudnorm.")
     edit_validate = commands.add_parser("edit-validate", help="Validate an edit plan and its current media inputs.")
     edit_validate.add_argument("project", type=Path)
     edit = commands.add_parser("edit", help="Render a native FFmpeg edit plan into final-edited.mp4 and resume safely.")
@@ -4653,6 +4719,93 @@ def main() -> int:
                 }
             )
             return 0
+        if args.command == "visual-evidence":
+            root = args.project.resolve()
+            load_project(root)
+            outputs = []
+            for raw in args.media:
+                source = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+                result = collect_visual_evidence(
+                    source,
+                    root / "deliverables" / "visual-evidence",
+                    frame_count=args.frames,
+                    project_root=root,
+                )
+                outputs.append(
+                    {
+                        "asset_id": result["manifest"]["asset_id"],
+                        "source": result["manifest"]["source"],
+                        "manifest": str(result["manifest_path"]),
+                        "review_template": str(result["review_template_path"]),
+                        "frames": [str(result["manifest_path"].parent / item["path"]) for item in result["manifest"]["frames"]],
+                    }
+                )
+            print_json({"ok": True, "project": str(root), "evidence": outputs})
+            return 0
+        if args.command == "visual-review-record":
+            root = args.project.resolve() if args.project else Path.cwd().resolve()
+            if args.project:
+                load_project(root)
+            manifest = args.manifest.resolve() if args.manifest.is_absolute() else (root / args.manifest).resolve()
+            cited = []
+            for value in args.frame_evidence:
+                frame_id, separator, observation = value.partition("=")
+                if not separator or not frame_id.strip() or not observation.strip():
+                    raise SkillError("--frame-evidence must use FRAME_ID=visible observation")
+                cited.append({"frame_id": frame_id.strip(), "observation": observation.strip()})
+            result = create_visual_review_receipt(
+                manifest,
+                reviewer_id=args.reviewer_id,
+                reviewer_kind=args.reviewer_kind,
+                medium=args.medium,
+                subject=args.subject,
+                subject_nature=args.subject_nature,
+                realism=args.realism,
+                confidence=args.confidence,
+                identity_origin=args.identity_origin,
+                provenance_confirmed=args.provenance_confirmed,
+                provenance_evidence=args.provenance_evidence,
+                frame_evidence=cited,
+                limitations=args.limitation,
+                identity_strictness=args.identity_strictness,
+                performance_complexity=args.performance_complexity,
+                confirm=args.confirm,
+            )
+            print_json(
+                {
+                    "ok": True,
+                    "project": str(root) if args.project else None,
+                    "receipt": result["receipt"],
+                    "path": str(result["receipt_path"]),
+                }
+            )
+            return 0
+        if args.command == "visual-review-apply":
+            root = args.project.resolve()
+            project = load_project(root)
+            manifest = args.manifest.resolve() if args.manifest.is_absolute() else (root / args.manifest).resolve()
+            receipt = args.receipt.resolve() if args.receipt.is_absolute() else (root / args.receipt).resolve()
+            resolved = apply_visual_review_receipt(project, manifest, receipt, confirm=args.confirm, project_root=root)
+            atomic_write_json(project_file(root), project)
+            print_json({"ok": True, "project": str(root), "visual_profile": resolved})
+            return 0
+        if args.command == "visual-benchmark-build":
+            result = build_visual_benchmark(
+                args.dataset.resolve(), args.output.resolve(), per_group=args.per_group, frame_count=args.frames
+            )
+            print_json(
+                {
+                    "ok": True,
+                    "benchmark": str(result["plan_path"]),
+                    "report": str(result["report_path"]),
+                    "summary": result["report"]["summary"],
+                }
+            )
+            return 0
+        if args.command == "visual-benchmark-score":
+            result = refresh_visual_benchmark(args.benchmark.resolve())
+            print_json({"ok": True, "report": str(result["report_path"]), "summary": result["report"]["summary"]})
+            return 0
         if args.command in {"visual-profile", "visual-profile-apply"}:
             root = args.project.resolve()
             project = load_project(root)
@@ -4684,6 +4837,36 @@ def main() -> int:
             project = load_project(root)
             state = load_state(root)
             if args.command == "edit-plan":
+                shot_filters: dict[str, str] = {}
+                for value in args.shot_filter:
+                    shot_id, separator, preset = value.partition("=")
+                    if not separator or not shot_id.strip() or preset not in set(FILTER_PRESETS) - {"none"}:
+                        raise SkillError("--shot-filter must use SHOT_ID=PRESET with a supported non-none preset")
+                    shot_filters[shot_id.strip()] = preset
+                shot_speeds: dict[str, float] = {}
+                for value in args.shot_speed:
+                    shot_id, separator, rate = value.partition("=")
+                    try:
+                        parsed_rate = float(rate)
+                    except ValueError as error:
+                        raise SkillError("--shot-speed must use SHOT_ID=RATE") from error
+                    if not separator or not shot_id.strip():
+                        raise SkillError("--shot-speed must use SHOT_ID=RATE")
+                    shot_speeds[shot_id.strip()] = parsed_rate
+                boundaries: dict[str, tuple[str, float]] = {}
+                for value in args.boundary:
+                    shot_id, separator, specification = value.partition("=")
+                    transition_name, seconds_separator, raw_seconds = specification.partition(":")
+                    if not separator or not shot_id.strip() or transition_name not in TRANSITIONS:
+                        raise SkillError("--boundary must use AFTER_SHOT=TYPE:SECONDS with a supported transition")
+                    if transition_name == "cut" and not seconds_separator:
+                        seconds = 0.0
+                    else:
+                        try:
+                            seconds = float(raw_seconds)
+                        except ValueError as error:
+                            raise SkillError("--boundary must include a numeric duration for non-cut transitions") from error
+                    boundaries[shot_id.strip()] = (transition_name, seconds)
                 plan = create_edit_plan(
                     root,
                     project,
@@ -4692,6 +4875,10 @@ def main() -> int:
                     transition=args.transition,
                     transition_seconds=args.transition_seconds,
                     filter_preset=args.filter_preset,
+                    shot_filters=shot_filters,
+                    shot_speeds=shot_speeds,
+                    boundary_transitions=boundaries,
+                    normalize_lufs=None if args.no_normalize else args.normalize_lufs,
                 )
                 print_json({"ok": True, "project": str(root), "plan": plan, "path": str(edit_plan_path(root))})
                 return 0

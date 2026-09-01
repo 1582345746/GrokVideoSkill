@@ -12,16 +12,18 @@ import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKILL_ROOT = REPO_ROOT / "grok-video-studio"
+CLI = SKILL_ROOT / "scripts" / "grok_video_studio.py"
 sys.path.insert(0, str(SKILL_ROOT / "scripts"))
 
 from editing_workflow import (  # noqa: E402
     create_edit_plan,
     edit_state_path,
     export_edit_handoff,
+    migrate_edit_plan,
     render_native_edit,
     validate_edit_plan,
 )
-from media_tools import probe_media  # noqa: E402
+from media_tools import postprocess_video, probe_media  # noqa: E402
 
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
@@ -149,6 +151,118 @@ class EditingWorkflowTests(unittest.TestCase):
             self.assertEqual(len(manifest["media"]), 2)
             self.assertTrue(all((bundle / item["bundle_path"]).is_file() for item in manifest["media"]))
             self.assertFalse((bundle / "draft_content.json").exists())
+
+    def test_v2_per_shot_speed_filter_loudness_and_preview_evidence_render(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, state = self._project(root)
+            plan = create_edit_plan(
+                root,
+                project,
+                state,
+                transition="dissolve",
+                transition_seconds=0.2,
+                shot_filters={"shot-001": "monochrome", "shot-002": "sharpen"},
+                shot_speeds={"shot-001": 2.0, "shot-002": 0.5},
+                normalize_lufs=-14.0,
+            )
+            self.assertEqual(plan["version"], 2)
+            self.assertEqual(plan["timeline"]["inputs"][0]["speed"], 2.0)
+            self.assertEqual(plan["timeline"]["inputs"][1]["filters"], ["sharpen"])
+            result = render_native_edit(root, plan)
+            self.assertGreater(result["media"]["duration"], 2.5)
+            self.assertLess(result["media"]["duration"], 3.1)
+            self.assertGreaterEqual(len(result["preview_evidence"]), 3)
+            self.assertTrue(all((root / item["path"]).is_file() for item in result["preview_evidence"]))
+            self.assertTrue(all(len(item["sha256"]) == 64 for item in result["preview_evidence"]))
+
+    def test_v2_mixes_hard_cut_and_dissolve_boundaries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, state = self._project(root)
+            self._make_clip(root, "shot-003.mp4", "green")
+            project["shots"].append({"id": "shot-003", "seconds": 1})
+            state["shots"]["shot-003"] = {"video": {"status": "completed", "path": "clips/shot-003.mp4"}}
+            plan = create_edit_plan(
+                root,
+                project,
+                state,
+                transition="cut",
+                boundary_transitions={"shot-002": ("dissolve", 0.2)},
+            )
+            self.assertEqual([item["type"] for item in plan["timeline"]["transitions"]], ["cut", "dissolve"])
+            self.assertEqual(validate_edit_plan(root, plan, require_inputs=True), [])
+            result = render_native_edit(root, plan)
+            self.assertTrue(result["qa"]["ok"])
+            self.assertGreater(result["media"]["duration"], 3.1)
+            self.assertLess(result["media"]["duration"], 3.7)
+
+    def test_v1_plan_migrates_in_memory_without_changing_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, state = self._project(root)
+            current = create_edit_plan(root, project, state, transition="cut")
+            legacy = json.loads(json.dumps(current))
+            legacy["version"] = 1
+            legacy.pop("preview_evidence")
+            legacy.pop("migration", None)
+            for item in legacy["timeline"]["inputs"]:
+                item.pop("speed")
+                item.pop("filters")
+            migrated = migrate_edit_plan(legacy)
+            self.assertEqual(migrated["version"], 2)
+            self.assertTrue(all(item["speed"] == 1.0 for item in migrated["timeline"]["inputs"]))
+            self.assertEqual(validate_edit_plan(root, legacy, require_inputs=True), [])
+            result = render_native_edit(root, legacy)
+            self.assertTrue(result["qa"]["ok"])
+
+    def test_cli_parses_per_shot_and_per_boundary_v2_options(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            project, state = self._project(root)
+            (root / "project.json").write_text(json.dumps(project), encoding="utf-8")
+            (root / "state.json").write_text(json.dumps({"version": 1, **state}), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CLI),
+                    "edit-plan",
+                    str(root),
+                    "--shot-filter",
+                    "shot-001=warm",
+                    "--shot-speed",
+                    "shot-002=1.25",
+                    "--boundary",
+                    "shot-001=dissolve:0.2",
+                    "--normalize-lufs",
+                    "-15",
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            plan = json.loads(result.stdout)["plan"]
+            self.assertEqual(plan["timeline"]["inputs"][0]["filters"], ["warm"])
+            self.assertEqual(plan["timeline"]["inputs"][1]["speed"], 1.25)
+            self.assertEqual(plan["timeline"]["transitions"][0]["type"], "dissolve")
+            self.assertEqual(plan["audio_mix"]["normalize_lufs"], -15.0)
+
+    def test_audio_mix_can_explicitly_disable_or_select_loudness_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = self._make_clip(root, "source.mp4", "red")
+            disabled = postprocess_video(
+                source, root / "disabled.mp4", music=source, normalize_audio=False, normalize_lufs=None
+            )
+            enabled = postprocess_video(
+                source, root / "enabled.mp4", music=source, normalize_audio=True, normalize_lufs=-14.0
+            )
+            self.assertIsNone(disabled["normalize_lufs"])
+            self.assertEqual(enabled["normalize_lufs"], -14.0)
+            self.assertTrue(probe_media(root / "disabled.mp4")["has_audio"])
+            self.assertTrue(probe_media(root / "enabled.mp4")["has_audio"])
 
 
 if __name__ == "__main__":

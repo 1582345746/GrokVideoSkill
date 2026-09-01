@@ -1,15 +1,16 @@
-# Grok Video Studio v2.2.0 native-director 测试与使用指南
+# Grok Video Studio v2.3.0 evidence-editor 测试与使用指南
 
 本文面向技能使用者和验收人员。所有示例都是可以直接发给 Codex 的标准话术，不包含真实 Key。导演规划、原生上游音频、有效片段剪辑和表演 QA 适用于所有视频路线；连续剧只是额外增加系列连续性和逐集审批。
 
-### v2.2 视觉类型与画面布局验收（所有模块）
+### v2.3 像素证据、视觉类型与画面布局验收（所有模块）
 
 - 默认检查 `frame_layout=single-full-frame`，要求一个连续的物理场景，不能出现重复横向画面、三联画、漫画格或社交平台 UI。
 - 只有明确需要比较、电话两端、监控墙或图形蒙太奇时，才在具体镜头设置 `frame_layout=split-screen|triptych|comic-panel` 和 `allow_multi_panel=true`。
 - 竖屏多人 T2V 单画面组合在付费前默认阻断；先生成一张单画面关键帧并审核，再走 I2V。只有明确接受风险时才使用 `layout_risk_policy=allow`。
 - 每个镜头复核首帧、有效中段和剪辑出口；不要直接使用生成片段最后的叹气、停顿或定格。
 - `photoreal` 只是渲染外观；实际来源真人、AI 合成真人、类似真人的动漫/CG 角色分别使用 `real-person`、`synthetic-human`、`human-like-fictional`。不能靠“像真人”推断实际真人身份。
-- 自动类型分析只读文本与文件名。Codex 实际查看图片/视频后，用 `visual-profile-apply --mode manual ... --confirm` 保存结论。
+- 自动文本分析只读文字与文件名。对实际图片/视频运行 `visual-evidence`，Codex 打开所有证据帧后用 `visual-review-record` 写入逐帧观察、置信度和来源，再用 `visual-review-apply --confirm` 应用。证据帧或 manifest 哈希变化必须阻断旧回执。
+- `real-person` 必须有 `captured-real-person` 来源确认；相似真人的动漫/CG 仍为 `human-like-fictional`，AI 生成的真人镜头语言为 `synthetic-human`。
 
 ## 目录
 
@@ -64,7 +65,7 @@
 
 通过标准：
 
-- 安装版本为 `2.2.0`。
+- 安装版本为 `2.3.0`。
 - 安装目录可读取，默认 `install-plan --profile upstream-dialogue` 成功；需要静音或保留源音频时另验 `basic`。
 - 既有凭据角色仍可用，输出中没有 Key 或 Key 片段。
 - FFmpeg 和 ffprobe 可用。
@@ -276,6 +277,14 @@
 ```text
 使用 $grok-video-studio 对 <输入视频> 做轻量后期：添加 <音乐路径>、<旁白路径>、<SRT 路径> 和 0.5 秒淡入淡出。先检查素材存在和授权，压低背景音乐避免遮住人声，输出到新文件并运行媒体 QA。不要调用上游生成接口。
 ```
+
+### 可恢复时间线剪辑 v2
+
+```text
+使用 $grok-video-studio 为 <项目目录> 创建 edit-plan v2。shot-002 使用 warm 滤镜，shot-003 速度设为 1.25；shot-001 后硬切，shot-002 后 dissolve 0.3 秒；最终音频归一化到 -16 LUFS。先运行 edit-validate，再执行 edit。保留 deliverables/final.mp4，输出 final-edited.mp4，并打开 deliverables/edit-preview 下的开始、转场边界和结束证据帧逐一检查。不要调用生图或生视频接口。
+```
+
+通过标准：计划中每个镜头和边界都可追溯；速度变化后的有效时长正确；硬切与转场可混用；输出音视频可读；第二次相同渲染返回 `resumed=true`；预览帧带 SHA-256；干净母版哈希不变。旧 edit-plan v1 应通过内存迁移继续验证和渲染。
 
 ### 封面
 

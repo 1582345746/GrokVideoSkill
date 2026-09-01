@@ -608,6 +608,8 @@ def postprocess_video(
     subtitles: Path | None = None,
     subtitle_style: str = "clean",
     fade_seconds: float = 0.0,
+    normalize_lufs: float | None = None,
+    normalize_audio: bool | None = None,
 ) -> dict[str, Any]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
@@ -620,6 +622,11 @@ def postprocess_video(
             raise SkillError(f"post-production input does not exist: {optional}")
     if fade_seconds < 0 or fade_seconds > media["duration"] / 2:
         raise SkillError("fade seconds must be non-negative and no more than half the video duration")
+    if normalize_lufs is not None and (float(normalize_lufs) < -24 or float(normalize_lufs) > -10):
+        raise SkillError("normalize_lufs must be from -24 to -10")
+    if normalize_audio is not None and not isinstance(normalize_audio, bool):
+        raise SkillError("normalize_audio must be a boolean when provided")
+    target_lufs = float(normalize_lufs) if normalize_lufs is not None else -16.0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     command = [ffmpeg, "-y", "-i", str(input_path)]
@@ -647,6 +654,7 @@ def postprocess_video(
         command.extend(["-vf", ",".join(video_filters)])
     command.extend(["-map", "0:v:0"])
 
+    apply_normalize = False
     if audio_inputs:
         filters: list[str] = []
         labels: list[str] = []
@@ -659,16 +667,22 @@ def postprocess_video(
             volume = "0.20" if name == "music" else "1.0"
             filters.append(f"[{index}:a]volume={volume},apad,atrim=0:{media['duration']:.3f}[{label}]")
             labels.append(f"[{label}]")
+        apply_normalize = True if normalize_audio is None else normalize_audio
         if len(labels) == 1:
-            filters.append(f"{labels[0]}loudnorm=I=-16:LRA=11:TP=-1.5[aout]")
+            suffix = f"loudnorm=I={target_lufs:.1f}:LRA=11:TP=-1.5" if apply_normalize else "anull"
+            filters.append(f"{labels[0]}{suffix}[aout]")
         else:
+            suffix = f",loudnorm=I={target_lufs:.1f}:LRA=11:TP=-1.5" if apply_normalize else ""
             filters.append(
-                f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=2:normalize=0,"
-                "loudnorm=I=-16:LRA=11:TP=-1.5[aout]"
+                f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:dropout_transition=2:normalize=0"
+                f"{suffix}[aout]"
             )
         command.extend(["-filter_complex", ";".join(filters), "-map", "[aout]"])
     elif media["has_audio"]:
         command.extend(["-map", "0:a:0?"])
+        apply_normalize = normalize_lufs is not None if normalize_audio is None else normalize_audio
+        if apply_normalize:
+            command.extend(["-af", f"loudnorm=I={target_lufs:.1f}:LRA=11:TP=-1.5"])
 
     command.extend(
         [
@@ -700,6 +714,7 @@ def postprocess_video(
         "bytes": output_path.stat().st_size,
         **result,
         "subtitle_style": subtitle_style if subtitles else "",
+        "normalize_lufs": target_lufs if apply_normalize else None,
     }
 
 

@@ -14,11 +14,11 @@ from pathlib import Path
 from typing import Any
 
 from gvs_common import SkillError, atomic_write_json, project_state_lock, read_json
-from media_tools import postprocess_video, probe_media, quality_report
+from media_tools import export_review_frames, postprocess_video, probe_media, quality_report
 
 
-EDIT_PLAN_VERSION = 1
-EDIT_STATE_VERSION = 1
+EDIT_PLAN_VERSION = 2
+EDIT_STATE_VERSION = 2
 EDIT_BACKENDS = {"auto", "native", "chatcut", "jianying-draft"}
 TRANSITIONS = {
     "cut": "",
@@ -87,6 +87,13 @@ def editing_capabilities() -> dict[str, Any]:
             "ffprobe": ffprobe or "not_found",
             "transitions": sorted(TRANSITIONS),
             "filters": sorted(FILTER_PRESETS),
+            "per_shot_filters": True,
+            "per_shot_speed": {"minimum": 0.25, "maximum": 4.0},
+            "per_boundary_transitions": True,
+            "mixed_cut_and_transition_boundaries": True,
+            "loudness_normalization_lufs": {"minimum": -24, "maximum": -10},
+            "preview_evidence": True,
+            "edit_plan_versions": {"write": EDIT_PLAN_VERSION, "read": [1, EDIT_PLAN_VERSION]},
             "resumable": True,
             "output": "deliverables/final-edited.mp4",
             "preserves_clean_master": True,
@@ -158,6 +165,10 @@ def create_edit_plan(
     transition: str = "cut",
     transition_seconds: float = 0.0,
     filter_preset: str = "none",
+    shot_filters: dict[str, str] | None = None,
+    shot_speeds: dict[str, float] | None = None,
+    boundary_transitions: dict[str, tuple[str, float]] | None = None,
+    normalize_lufs: float | None = -16.0,
 ) -> dict[str, Any]:
     if backend not in EDIT_BACKENDS:
         raise SkillError("editing backend is unsupported")
@@ -165,6 +176,15 @@ def create_edit_plan(
         raise SkillError("editing transition is unsupported")
     if filter_preset not in FILTER_PRESETS:
         raise SkillError("editing filter preset is unsupported")
+    shot_filters = dict(shot_filters or {})
+    shot_speeds = dict(shot_speeds or {})
+    boundary_transitions = dict(boundary_transitions or {})
+    if any(value not in set(FILTER_PRESETS) - {"none"} for value in shot_filters.values()):
+        raise SkillError("one or more per-shot filters are unsupported")
+    if any(float(value) < 0.25 or float(value) > 4.0 for value in shot_speeds.values()):
+        raise SkillError("per-shot speed must be from 0.25 to 4.0")
+    if normalize_lufs is not None and (float(normalize_lufs) < -24 or float(normalize_lufs) > -10):
+        raise SkillError("normalize_lufs must be from -24 to -10")
     if transition == "cut":
         transition_seconds = 0.0
     elif transition_seconds <= 0 or transition_seconds > 2.0:
@@ -176,15 +196,32 @@ def create_edit_plan(
         edit_in = float(shot.get("edit_in") or 0.0)
         raw_edit_out = shot.get("edit_out")
         edit_out = float(raw_edit_out) if raw_edit_out not in (None, "") else None
+        shot_id = str(shot.get("id", ""))
         inputs.append(
             {
-                "id": str(shot.get("id", "")),
-                "path": _runtime_clip(state, str(shot.get("id", ""))),
+                "id": shot_id,
+                "path": _runtime_clip(state, shot_id),
                 "edit_in": round(edit_in, 3),
                 "edit_out": round(edit_out, 3) if edit_out is not None else None,
                 "generation_seconds": round(seconds, 3),
+                "speed": round(float(shot_speeds.get(shot_id, 1.0)), 4),
+                "filters": [] if shot_id not in shot_filters else [shot_filters[shot_id]],
             }
         )
+    known_ids = {str(item["id"]) for item in inputs}
+    unknown_shots = (set(shot_filters) | set(shot_speeds)) - known_ids
+    if unknown_shots:
+        raise SkillError("per-shot edit override references unknown input: " + ", ".join(sorted(unknown_shots)))
+    unknown_boundaries = set(boundary_transitions) - {str(item["id"]) for item in inputs[:-1]}
+    if unknown_boundaries:
+        raise SkillError("boundary transition references an unknown or final input: " + ", ".join(sorted(unknown_boundaries)))
+    for after, (kind, seconds) in boundary_transitions.items():
+        if kind not in TRANSITIONS:
+            raise SkillError(f"boundary transition after {after} is unsupported")
+        if (kind == "cut" and abs(float(seconds)) > 0.001) or (
+            kind != "cut" and (float(seconds) <= 0 or float(seconds) > 2.0)
+        ):
+            raise SkillError(f"boundary transition duration after {after} is invalid")
     post = project.get("postproduction") if isinstance(project.get("postproduction"), dict) else {}
     plan = {
         "version": EDIT_PLAN_VERSION,
@@ -204,9 +241,15 @@ def create_edit_plan(
             "transitions": [
                 {
                     "after": inputs[index]["id"],
-                    "type": transition,
-                    "duration": round(float(transition_seconds), 3),
-                    "reason": "explicit global edit-plan choice",
+                    "type": boundary_transitions.get(inputs[index]["id"], (transition, transition_seconds))[0],
+                    "duration": round(
+                        float(boundary_transitions.get(inputs[index]["id"], (transition, transition_seconds))[1]), 3
+                    ),
+                    "reason": (
+                        "explicit per-boundary edit-plan choice"
+                        if inputs[index]["id"] in boundary_transitions
+                        else "explicit global edit-plan choice"
+                    ),
                 }
                 for index in range(max(0, len(inputs) - 1))
             ],
@@ -217,7 +260,7 @@ def create_edit_plan(
             "preserve_source": True,
             "music": str(post.get("music", "")).strip(),
             "voice": str(post.get("voice", "")).strip(),
-            "normalize_lufs": -16,
+            "normalize_lufs": float(normalize_lufs) if normalize_lufs is not None else None,
         },
         "subtitles": {
             "path": str(post.get("subtitles", "")).strip(),
@@ -225,6 +268,12 @@ def create_edit_plan(
             "burn": bool(str(post.get("subtitles", "")).strip()),
         },
         "finishing": {"fade_seconds": float(post.get("fade_seconds") or 0.0)},
+        "preview_evidence": {
+            "enabled": True,
+            "directory": "deliverables/edit-preview",
+            "include_boundaries": True,
+            "maximum_frames": 9,
+        },
         "deliveries": {
             "clean_master": "deliverables/final.mp4",
             "edited_master": "deliverables/final-edited.mp4",
@@ -238,13 +287,40 @@ def create_edit_plan(
 
 
 def load_edit_plan(root: Path) -> dict[str, Any]:
-    return read_json(edit_plan_path(root))
+    return migrate_edit_plan(read_json(edit_plan_path(root)))
+
+
+def migrate_edit_plan(plan: dict[str, Any]) -> dict[str, Any]:
+    version = plan.get("version")
+    if version == EDIT_PLAN_VERSION:
+        return copy.deepcopy(plan)
+    if version != 1:
+        raise SkillError(f"edit plan version {version} is unsupported")
+    migrated = copy.deepcopy(plan)
+    migrated["version"] = EDIT_PLAN_VERSION
+    timeline = migrated.get("timeline") if isinstance(migrated.get("timeline"), dict) else {}
+    for item in timeline.get("inputs", []):
+        if isinstance(item, dict):
+            item.setdefault("speed", 1.0)
+            item.setdefault("filters", [])
+    migrated.setdefault(
+        "preview_evidence",
+        {"enabled": True, "directory": "deliverables/edit-preview", "include_boundaries": True, "maximum_frames": 9},
+    )
+    migrated["migration"] = {
+        "from_version": 1,
+        "to_version": EDIT_PLAN_VERSION,
+        "semantics": "global filters, speed=1, original boundary transitions, and -16 LUFS normalization preserved",
+    }
+    return migrated
 
 
 def validate_edit_plan(root: Path, plan: dict[str, Any], *, require_inputs: bool) -> list[str]:
     errors: list[str] = []
-    if plan.get("version") != EDIT_PLAN_VERSION:
-        errors.append(f"edit-plan.version must be {EDIT_PLAN_VERSION}")
+    try:
+        plan = migrate_edit_plan(plan)
+    except SkillError as error:
+        return [str(error)]
     backend = plan.get("backend") if isinstance(plan.get("backend"), dict) else {}
     if backend.get("requested") not in EDIT_BACKENDS or backend.get("selected") not in EDIT_BACKENDS - {"auto"}:
         errors.append("edit-plan.backend requested or selected value is unsupported")
@@ -264,8 +340,9 @@ def validate_edit_plan(root: Path, plan: dict[str, Any], *, require_inputs: bool
         if not identifier or identifier in seen:
             errors.append(f"{prefix}.id must be non-empty and unique")
         seen.add(identifier)
+        input_path: Path | None = None
         try:
-            _project_path(root, str(item.get("path", "")), must_exist=require_inputs)
+            input_path = _project_path(root, str(item.get("path", "")), must_exist=require_inputs)
         except SkillError as error:
             errors.append(str(error))
         try:
@@ -274,21 +351,32 @@ def validate_edit_plan(root: Path, plan: dict[str, Any], *, require_inputs: bool
             parsed_out = float(edit_out) if edit_out not in (None, "") else None
             if edit_in < 0 or (parsed_out is not None and parsed_out <= edit_in):
                 raise ValueError
-            durations.append(None if parsed_out is None else parsed_out - edit_in)
+            speed = float(item.get("speed", 1.0))
+            if speed < 0.25 or speed > 4.0:
+                raise ValueError
+            if parsed_out is None and require_inputs and input_path is not None:
+                parsed_out = float(probe_media(input_path)["duration"])
+                if parsed_out <= edit_in:
+                    raise ValueError
+            durations.append(None if parsed_out is None else (parsed_out - edit_in) / speed)
         except (TypeError, ValueError):
-            errors.append(f"{prefix} must satisfy 0 <= edit_in < edit_out")
+            errors.append(f"{prefix} must satisfy 0 <= edit_in < edit_out and speed must be from 0.25 to 4.0")
             durations.append(None)
+        filters = item.get("filters") if isinstance(item.get("filters"), list) else None
+        if filters is None or any(value not in set(FILTER_PRESETS) - {"none"} for value in filters):
+            errors.append(f"{prefix}.filters must contain supported non-none presets")
     transitions = timeline.get("transitions") if isinstance(timeline.get("transitions"), list) else []
     if len(transitions) != max(0, len(inputs) - 1):
         errors.append("edit-plan.timeline.transitions must contain one entry per input boundary")
-    transition_types: set[str] = set()
     for index, item in enumerate(transitions):
         prefix = f"edit-plan.timeline.transitions[{index}]"
         if not isinstance(item, dict) or item.get("type") not in TRANSITIONS:
             errors.append(f"{prefix}.type is unsupported")
             continue
+        expected_after = str(inputs[index].get("id", "")) if index < len(inputs) and isinstance(inputs[index], dict) else ""
+        if item.get("after") != expected_after:
+            errors.append(f"{prefix}.after must equal {expected_after}")
         transition_type = str(item["type"])
-        transition_types.add(transition_type)
         try:
             duration = float(item.get("duration", 0))
         except (TypeError, ValueError):
@@ -302,12 +390,34 @@ def validate_edit_plan(root: Path, plan: dict[str, Any], *, require_inputs: bool
         if transition_type != "cut" and all(value is not None for value in neighboring):
             if duration >= min(float(value) for value in neighboring):
                 errors.append(f"{prefix}.duration must be shorter than both adjacent clips")
-    if "cut" in transition_types and len(transition_types) > 1:
-        errors.append("native edit v1 cannot mix cut and xfade boundaries in one timeline")
     raw_filters = plan.get("filters") if isinstance(plan.get("filters"), list) else []
     for index, item in enumerate(raw_filters):
         if not isinstance(item, dict) or item.get("preset") not in set(FILTER_PRESETS) - {"none"}:
             errors.append(f"edit-plan.filters[{index}].preset is unsupported")
+        elif item.get("scope", "all") != "all":
+            errors.append(f"edit-plan.filters[{index}].scope must be all; use timeline input filters for one shot")
+    audio = plan.get("audio_mix") if isinstance(plan.get("audio_mix"), dict) else {}
+    normalize_lufs = audio.get("normalize_lufs")
+    try:
+        if normalize_lufs is not None and (float(normalize_lufs) < -24 or float(normalize_lufs) > -10):
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("edit-plan.audio_mix.normalize_lufs must be null or from -24 to -10")
+    preview = plan.get("preview_evidence") if isinstance(plan.get("preview_evidence"), dict) else {}
+    if not isinstance(preview.get("enabled", True), bool) or not isinstance(preview.get("include_boundaries", True), bool):
+        errors.append("edit-plan.preview_evidence flags must be booleans")
+    try:
+        maximum_frames = int(preview.get("maximum_frames", 9))
+        if maximum_frames < 1 or maximum_frames > 9:
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("edit-plan.preview_evidence.maximum_frames must be from 1 to 9")
+    try:
+        preview_path = _project_path(root, str(preview.get("directory", "deliverables/edit-preview")))
+        if preview_path == root.resolve():
+            errors.append("edit-plan.preview_evidence.directory must be a non-empty project subdirectory")
+    except SkillError as error:
+        errors.append(str(error))
     deliveries = plan.get("deliveries") if isinstance(plan.get("deliveries"), dict) else {}
     try:
         clean = _project_path(root, str(deliveries.get("clean_master", "")))
@@ -349,18 +459,37 @@ def _target_dimensions(plan: dict[str, Any], media: list[dict[str, Any]]) -> tup
     return width, height
 
 
-def _filter_chain(plan: dict[str, Any], width: int, height: int) -> str:
+def _atempo_chain(speed: float) -> str:
+    values: list[float] = []
+    remaining = float(speed)
+    while remaining < 0.5 - 1e-9:
+        values.append(0.5)
+        remaining /= 0.5
+    while remaining > 2.0 + 1e-9:
+        values.append(2.0)
+        remaining /= 2.0
+    values.append(remaining)
+    return ",".join(f"atempo={value:.6f}" for value in values)
+
+
+def _filter_chain(plan: dict[str, Any], item: dict[str, Any], width: int, height: int) -> str:
     values = [
         f"scale={width}:{height}:force_original_aspect_ratio=decrease",
         f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
-        "fps=30",
-        "format=yuv420p",
     ]
-    for item in plan.get("filters", []):
-        preset = str(item.get("preset", "")) if isinstance(item, dict) else ""
+    for global_filter in plan.get("filters", []):
+        preset = str(global_filter.get("preset", "")) if isinstance(global_filter, dict) else ""
         expression = FILTER_PRESETS.get(preset, "")
         if expression:
             values.append(expression)
+    for preset in item.get("filters", []):
+        expression = FILTER_PRESETS.get(str(preset), "")
+        if expression:
+            values.append(expression)
+    speed = float(item.get("speed", 1.0))
+    if abs(speed - 1.0) > 1e-9:
+        values.append(f"setpts=PTS/{speed:.6f}")
+    values.extend(["fps=30", "format=yuv420p"])
     return ",".join(values)
 
 
@@ -388,7 +517,9 @@ def _normalize_inputs(
         edit_out = float(edit_out_value) if edit_out_value not in (None, "") else float(probe["duration"])
         if edit_out > float(probe["duration"]) + 0.15:
             raise SkillError(f"edit window for {item['id']} exceeds the source duration")
-        duration = edit_out - edit_in
+        source_duration = edit_out - edit_in
+        speed = float(item.get("speed", 1.0))
+        duration = source_duration / speed
         reusable = False
         if output.is_file():
             try:
@@ -397,7 +528,7 @@ def _normalize_inputs(
             except SkillError:
                 reusable = False
         if not reusable:
-            command = [ffmpeg, "-y", "-ss", f"{edit_in:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+            command = [ffmpeg, "-y", "-ss", f"{edit_in:.3f}", "-t", f"{source_duration:.3f}", "-i", str(source)]
             audio_index = 0
             if not probe["has_audio"]:
                 command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"])
@@ -409,9 +540,9 @@ def _normalize_inputs(
                     "-map",
                     f"{audio_index}:a:0",
                     "-vf",
-                    _filter_chain(plan, width, height),
+                    _filter_chain(plan, item, width, height),
                     "-af",
-                    "apad",
+                    f"{_atempo_chain(speed)},apad",
                     "-t",
                     f"{duration:.3f}",
                     "-c:v",
@@ -443,6 +574,8 @@ def _normalize_inputs(
             "status": "completed",
             "path": str(output.relative_to(root).as_posix()),
             "duration": current["duration"],
+            "speed": speed,
+            "filters": list(item.get("filters", [])),
             "updated_at": int(time.time()),
         }
         atomic_write_json(edit_state_path(root), state)
@@ -472,6 +605,37 @@ def _assemble_timeline(
             )
         return sum(float(item["duration"]) for item in segment_media)
 
+    if any(item.get("type") == "cut" for item in transitions):
+        groups: list[list[Path]] = [[segments[0]]]
+        group_media_items: list[list[dict[str, Any]]] = [[segment_media[0]]]
+        group_transitions: list[dict[str, Any]] = []
+        for index, transition in enumerate(transitions, 1):
+            if transition.get("type") == "cut":
+                groups[-1].append(segments[index])
+                group_media_items[-1].append(segment_media[index])
+            else:
+                group_transitions.append(transition)
+                groups.append([segments[index]])
+                group_media_items.append([segment_media[index]])
+        with tempfile.TemporaryDirectory(prefix=".gvs-edit-groups-", dir=str(output.parent)) as temp_name:
+            grouped_segments: list[Path] = []
+            grouped_media: list[dict[str, Any]] = []
+            for index, (group, media_items) in enumerate(zip(groups, group_media_items), 1):
+                if len(group) == 1:
+                    grouped_segments.append(group[0])
+                    grouped_media.append(media_items[0])
+                    continue
+                grouped = Path(temp_name) / f"group-{index:03d}.mp4"
+                _assemble_timeline(
+                    group,
+                    media_items,
+                    [{"type": "cut", "duration": 0.0} for _ in range(len(group) - 1)],
+                    grouped,
+                )
+                grouped_segments.append(grouped)
+                grouped_media.append(probe_media(grouped))
+            return _assemble_timeline(grouped_segments, grouped_media, group_transitions, output)
+
     command = [ffmpeg, "-y"]
     for segment in segments:
         command.extend(["-i", str(segment)])
@@ -481,16 +645,22 @@ def _assemble_timeline(
     accumulated = float(segment_media[0]["duration"])
     for index, transition in enumerate(transitions, 1):
         duration = float(transition["duration"])
-        offset = accumulated - duration
         next_video = f"v{index}"
         next_audio = f"a{index}"
-        filters.append(
-            f"[{video_label}][{index}:v]xfade=transition={TRANSITIONS[str(transition['type'])]}:duration={duration:.3f}:offset={offset:.3f}[{next_video}]"
-        )
-        filters.append(f"[{audio_label}][{index}:a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[{next_audio}]")
+        if transition.get("type") == "cut":
+            filters.append(
+                f"[{video_label}][{audio_label}][{index}:v][{index}:a]concat=n=2:v=1:a=1[{next_video}][{next_audio}]"
+            )
+            accumulated += float(segment_media[index]["duration"])
+        else:
+            offset = accumulated - duration
+            filters.append(
+                f"[{video_label}][{index}:v]xfade=transition={TRANSITIONS[str(transition['type'])]}:duration={duration:.3f}:offset={offset:.3f}[{next_video}]"
+            )
+            filters.append(f"[{audio_label}][{index}:a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[{next_audio}]")
+            accumulated += float(segment_media[index]["duration"]) - duration
         video_label = next_video
         audio_label = next_audio
-        accumulated += float(segment_media[index]["duration"]) - duration
     command.extend(
         [
             "-filter_complex",
@@ -525,6 +695,7 @@ def _assemble_timeline(
 
 
 def _input_signature(root: Path, plan: dict[str, Any]) -> str:
+    plan = migrate_edit_plan(plan)
     inputs = list((plan.get("timeline") or {}).get("inputs") or [])
     material = {"plan": plan, "inputs": []}
     for item in inputs:
@@ -533,8 +704,33 @@ def _input_signature(root: Path, plan: dict[str, Any]) -> str:
     return _json_digest(material)
 
 
+def _preview_times(
+    segment_media: list[dict[str, Any]], transitions: list[dict[str, Any]], *, maximum_frames: int
+) -> list[float]:
+    if not segment_media:
+        return []
+    accumulated = float(segment_media[0]["duration"])
+    boundaries: list[float] = []
+    for index, transition in enumerate(transitions, 1):
+        duration = float(transition.get("duration", 0.0))
+        boundaries.append(accumulated - duration / 2.0)
+        accumulated += float(segment_media[index]["duration"]) - duration
+    values = [min(0.05, max(0.0, accumulated / 2.0)), *boundaries, max(0.0, accumulated - 0.05)]
+    deduplicated: list[float] = []
+    for value in values:
+        if not deduplicated or abs(value - deduplicated[-1]) > 0.02:
+            deduplicated.append(value)
+    if len(deduplicated) <= maximum_frames:
+        return deduplicated
+    if maximum_frames == 1:
+        return [deduplicated[len(deduplicated) // 2]]
+    selected = [round(index * (len(deduplicated) - 1) / (maximum_frames - 1)) for index in range(maximum_frames)]
+    return [deduplicated[index] for index in selected]
+
+
 def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True) -> dict[str, Any]:
     root = root.resolve()
+    plan = migrate_edit_plan(plan)
     errors = validate_edit_plan(root, plan, require_inputs=True)
     if errors:
         raise SkillError("invalid edit plan: " + "; ".join(errors))
@@ -552,7 +748,13 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
             and output.is_file()
             and previous.get("output", {}).get("sha256") == _digest(output)
         ):
-            return {"status": "completed", "resumed": True, **previous.get("output", {}), "qa": previous.get("qa", {})}
+            return {
+                "status": "completed",
+                "resumed": True,
+                **previous.get("output", {}),
+                "qa": previous.get("qa", {}),
+                "preview_evidence": previous.get("preview_evidence", []),
+            }
         state: dict[str, Any] = {
             "version": EDIT_STATE_VERSION,
             "status": "rendering",
@@ -575,10 +777,17 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
             audio = plan.get("audio_mix") if isinstance(plan.get("audio_mix"), dict) else {}
             subtitles = plan.get("subtitles") if isinstance(plan.get("subtitles"), dict) else {}
             finishing = plan.get("finishing") if isinstance(plan.get("finishing"), dict) else {}
+            normalize_lufs = audio.get("normalize_lufs")
             music_value = str(audio.get("music", "")).strip()
             voice_value = str(audio.get("voice", "")).strip()
             subtitle_value = str(subtitles.get("path", "")).strip() if subtitles.get("burn") else ""
-            needs_finish = bool(music_value or voice_value or subtitle_value or float(finishing.get("fade_seconds") or 0.0))
+            needs_finish = bool(
+                music_value
+                or voice_value
+                or subtitle_value
+                or float(finishing.get("fade_seconds") or 0.0)
+                or normalize_lufs is not None
+            )
             if needs_finish:
                 postprocess_video(
                     timeline_output,
@@ -588,6 +797,8 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
                     subtitles=_project_path(root, subtitle_value, must_exist=True) if subtitle_value else None,
                     subtitle_style=str(subtitles.get("style", "clean")),
                     fade_seconds=float(finishing.get("fade_seconds") or 0.0),
+                    normalize_lufs=float(normalize_lufs) if normalize_lufs is not None else None,
+                    normalize_audio=normalize_lufs is not None,
                 )
                 timeline_output.unlink(missing_ok=True)
             else:
@@ -595,6 +806,25 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
             probe = probe_media(output)
             expected_size = str((plan.get("timeline") or {}).get("target_size") or "auto")
             qa = quality_report(output, expected_size=expected_size, expected_duration=expected_duration)
+            preview_config = plan.get("preview_evidence") if isinstance(plan.get("preview_evidence"), dict) else {}
+            preview_frames: list[dict[str, Any]] = []
+            if preview_config.get("enabled", True):
+                preview_root = _project_path(root, str(preview_config.get("directory", "deliverables/edit-preview")))
+                maximum_frames = int(preview_config.get("maximum_frames", 9))
+                transitions = list((plan.get("timeline") or {}).get("transitions") or [])
+                if preview_config.get("include_boundaries", True):
+                    times = _preview_times(media, transitions, maximum_frames=maximum_frames)
+                    exported = export_review_frames(output, preview_root, stem="final-edited", at_seconds=times)
+                else:
+                    exported = export_review_frames(output, preview_root, stem="final-edited", count=min(5, maximum_frames))
+                preview_frames = [
+                    {
+                        **frame,
+                        "path": Path(str(frame["path"])).relative_to(root).as_posix(),
+                        "sha256": _digest(Path(str(frame["path"]))),
+                    }
+                    for frame in exported
+                ]
             state.update(
                 {
                     "status": "completed",
@@ -606,10 +836,17 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
                         "media": probe,
                     },
                     "qa": qa,
+                    "preview_evidence": preview_frames,
                 }
             )
             atomic_write_json(edit_state_path(root), state)
-            return {"status": "completed", "resumed": False, **state["output"], "qa": qa}
+            return {
+                "status": "completed",
+                "resumed": False,
+                **state["output"],
+                "qa": qa,
+                "preview_evidence": preview_frames,
+            }
         except Exception as error:
             state.update({"status": "failed", "failed_at": int(time.time()), "error": str(error)})
             atomic_write_json(edit_state_path(root), state)
@@ -618,6 +855,7 @@ def render_native_edit(root: Path, plan: dict[str, Any], *, resume: bool = True)
 
 def export_edit_handoff(root: Path, plan: dict[str, Any], *, backend: str) -> dict[str, Any]:
     root = root.resolve()
+    plan = migrate_edit_plan(plan)
     if backend not in {"chatcut", "jianying-draft"}:
         raise SkillError("handoff backend must be chatcut or jianying-draft")
     errors = validate_edit_plan(root, plan, require_inputs=True)

@@ -1,4 +1,4 @@
-# 二次开发与自定义工作流（v2.2.0 native-director）
+# 二次开发与自定义工作流（v2.3.0 evidence-editor）
 
 Grok Video Studio 把“产品路线”和“内部工作流预设”分开。T2V、I2V、连续剧和新闻视频是稳定产品路线；`assets/workflow-templates/*.json` 是可编辑的问答和提示词指导。新增一个创意模板通常不需要修改 Python；新增上游、媒体类型或状态语义才需要代码和合同变更。
 

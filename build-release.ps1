@@ -39,6 +39,7 @@ try {
     New-Item -ItemType Directory -Path $bundleRoot -Force | Out-Null
     Copy-Item -LiteralPath (Join-Path $repoRoot "install.ps1") -Destination $bundleRoot
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $bundleRoot
+    Copy-Item -LiteralPath (Join-Path $repoRoot "docs") -Destination $bundleRoot -Recurse
     Copy-Item -LiteralPath $skillSource -Destination $bundleRoot -Recurse
 
     $stagedInstaller = Join-Path $bundleRoot "install.ps1"

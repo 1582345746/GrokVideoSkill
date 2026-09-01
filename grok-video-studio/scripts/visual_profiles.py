@@ -247,6 +247,17 @@ def validate_visual_profile(project: dict[str, Any]) -> list[str]:
         errors.append("visual_profile.confirmed must be a boolean")
     if raw.get("last_analysis") is not None and not isinstance(raw.get("last_analysis"), dict):
         errors.append("visual_profile.last_analysis must be an object")
+    if raw.get("pixel_review") is not None:
+        review = raw.get("pixel_review") if isinstance(raw.get("pixel_review"), dict) else {}
+        if not review:
+            errors.append("visual_profile.pixel_review must be an object")
+        elif (
+            review.get("decision") != "accepted"
+            or not re.fullmatch(r"[0-9a-f]{64}", str(review.get("source_sha256", "")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(review.get("manifest_sha256", "")))
+            or not re.fullmatch(r"[0-9a-f]{64}", str(review.get("receipt_sha256", "")))
+        ):
+            errors.append("visual_profile.pixel_review receipt metadata is invalid")
     return errors
 
 
