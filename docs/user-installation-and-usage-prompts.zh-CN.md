@@ -9,10 +9,10 @@
 
 | 用户说法 | 实际视频上游 | 是否自动回退 |
 | --- | --- | --- |
-| 不指定上游，或说“默认上游” | 优先 QuickAI | 仅在安全分类失败时回退 QuickAI New |
-| “生视频选择 QuickAI New” | 固定 QuickAI New | 否，不先调用 QuickAI |
-| “生视频选择 QuickAI” | 固定 QuickAI | 否 |
-| “优先 QuickAI，安全失败时备用 QuickAI New” | QuickAI → QuickAI New | 是 |
+| 不指定上游，或说“默认上游” | 优先 Sub2Api | 仅在安全分类失败时回退 NewApi |
+| “生视频选择 NewApi” | 固定 NewApi | 否，不先调用 Sub2Api |
+| “生视频选择 Sub2Api” | 固定 Sub2Api | 否 |
+| “优先 Sub2Api，安全失败时备用 NewApi” | Sub2Api → NewApi | 是 |
 
 显式选择对文生视频和图生视频都生效。创建请求结果不明确、已获得任务 ID 后轮询超时、内容审核失败、输入错误、鉴权错误或余额错误时，不允许自动创建第二个付费任务。
 
@@ -24,14 +24,17 @@
 请开启目标模式，从 main 分支安装 Grok Video Studio：
 https://github.com/1582345746/GrokVideoSkill.git
 
-QuickAI 生图 Key：<QUICKAI_IMAGE_KEY>
-QuickAI 视频 Key：<QUICKAI_VIDEO_KEY>
-QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
+Sub2Api 生图 Key：<SUB2API_IMAGE_KEY>
+Sub2Api 视频 Key：<SUB2API_VIDEO_KEY>
+NewApi 视频 Key：<NEWAPI_VIDEO_KEY>
+Sub2Api 生图 URL：<IMAGE_BASE_URL>
+Sub2Api 视频 URL：<SUB2API_VIDEO_BASE_URL>
+NewApi 视频 URL：<NEWAPI_VIDEO_BASE_URL>
 
 安装要求：
 1. 检查 Git、PowerShell、Python、FFmpeg 和 ffprobe；缺少系统依赖时先报告，不要静默修改系统。
 2. 使用仓库根目录 install.ps1 安装 upstream-dialogue 档位（新项目默认 `native-dialogue`、`generate_audio=true`、`subtitle_source=none`；需要静音或保留源音频时才使用 basic）。
-3. 通过 grok_video_studio.py configure --credentials-stdin 把 Key 传给技能；Windows 使用当前用户 DPAPI 保存。
+3. 使用用户提供的 URL，通过 grok_video_studio.py configure --credentials-stdin 把 Key 传给技能；Windows 使用当前用户 DPAPI 保存。
 4. 不得把 Key 写进 Git 仓库、项目 JSON、源码、文档、命令行参数、日志或测试输出，也不要在回复中复述 Key。
 5. 安装后运行 version、install.ps1 -Check、doctor、capabilities 和 chatcut-capabilities。
 6. doctor 只允许查询模型和健康状态，不得发起生图、生视频或其他付费创建请求。
@@ -39,7 +42,7 @@ QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
 8. 最后报告安装路径、技能版本、三个凭据角色是否已配置、默认视频上游和 FFmpeg 状态，但不要显示任何 Key 片段。
 ```
 
-如果只拥有部分 Key，可以删除没有的 Key 行。QuickAI New 只有视频能力；生图始终使用 QuickAI 生图凭据。
+如果只使用部分能力，可以删除不用的 URL 和 Key 行；每个已配置 Key 都必须提供对应 URL。NewApi 只有视频能力；生图始终使用 Sub2Api 生图凭据。
 
 ### 2.2 安装并允许最小付费验收
 
@@ -47,11 +50,11 @@ QuickAI New 视频 Key：<QUICKAI_NEW_VIDEO_KEY>
 按 upstream-dialogue 档位安装 Grok Video Studio，并先完成所有离线测试和 doctor。
 
 离线检查全部通过后，允许执行以下最小真实 API 验收：
-- QuickAI 生图最多 1 次；
-- QuickAI 文生视频最多 1 次；
-- QuickAI 图生视频最多 1 次；
-- QuickAI New 文生视频最多 1 次；
-- QuickAI New 图生视频最多 1 次。
+- Sub2Api 生图最多 1 次；
+- Sub2Api 文生视频最多 1 次；
+- Sub2Api 图生视频最多 1 次；
+- NewApi 文生视频最多 1 次；
+- NewApi 图生视频最多 1 次。
 
 每次真实创建前必须告诉我：提供方、能力、请求次数、可能收费、是否下载结果；只生成 1 秒或上游允许的最短单镜头测试素材，不生成整集、不下载本地模型。
 创建请求结果不明确时停止，不要自动重试。每项测试完成后记录 request_id、attempt_id、task_id、最终提供方、文件哈希和媒体 QA；不得输出 Key。
@@ -78,35 +81,35 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 ## 四、通用制作话术
 
-### 4.1 默认 QuickAI
+### 4.1 默认 Sub2Api
 
-不写上游名称时，新项目默认优先使用 QuickAI，并在安全分类失败时自动尝试 QuickAI New。需要完全禁止备用时显式选择 QuickAI；需要固定 QuickAI New 时显式选择 QuickAI New。QuickAI 和 QuickAI New 都支持 T2V/I2V；当前都不支持 MP4 视频参考、视频编辑/延展或 WAV/预设音色参考，预检会明确阻断。
+不写上游名称时，新项目默认优先使用 Sub2Api，并在安全分类失败时自动尝试 NewApi。需要完全禁止备用时显式选择 Sub2Api；需要固定 NewApi 时显式选择 NewApi。Sub2Api 和 NewApi 都支持 T2V/I2V；当前都不支持 MP4 视频参考、视频编辑/延展或 WAV/预设音色参考，预检会明确阻断。
 
 ```text
 使用 $grok-video-studio 制作 <视频主题>。
-默认选择生视频上游：优先 QuickAI，在安全分类失败时使用 QuickAI New。只有我明确固定 QuickAI 或固定 QuickAI New 时，才关闭自动回退。
+默认选择生视频上游：优先 Sub2Api，在安全分类失败时使用 NewApi。只有我明确固定 Sub2Api 或固定 NewApi 时，才关闭自动回退。
 
 先确认产品路线、画面比例、总时长、镜头数、是否使用参考图、音频模式和字幕来源。然后展示故事、分镜、最终提示词、图片/视频请求数、总视频秒数和预算，不要立即创建付费任务。
 
 等我明确批准后再逐镜头生成。完成后保存最终提供方和完整尝试历史，运行技术 QA，展示首中末审阅帧，并检查意外字幕、按钮、评论、Logo、水印、人物漂移、肢体异常、冻结、黑帧和音频静音比例。
 ```
 
-### 4.2 显式选择 QuickAI New
+### 4.2 显式选择 NewApi
 
 ```text
-使用 $grok-video-studio 制作 <视频主题>，生视频选择 QuickAI New。
+使用 $grok-video-studio 制作 <视频主题>，生视频选择 NewApi。
 
-这个项目的文生视频和图生视频都必须固定直连 QuickAI New，不先调用 QuickAI，也不自动切换其他视频上游。QuickAI New 使用显式 `generate_audio`；QuickAI 的音频能力是模型默认生成。QuickAI 只在确实需要生成关键帧时承担生图。
+这个项目的文生视频和图生视频都必须固定直连 NewApi，不先调用 Sub2Api，也不自动切换其他视频上游。NewApi 使用显式 `generate_audio`；Sub2Api 的音频能力是模型默认生成。Sub2Api 只在确实需要生成关键帧时承担生图。
 
-先展示剧本、分镜、最终提示词、请求数量和预算，等我批准后再生成。状态中必须保存 video_provider=quickainew、video_provider_policy=fixed、最终提供方、任务 ID、尝试历史和文件哈希。
+先展示剧本、分镜、最终提示词、请求数量和预算，等我批准后再生成。状态中必须保存 video_provider=newapi、video_provider_policy=fixed、最终提供方、任务 ID、尝试历史和文件哈希。
 ```
 
-### 4.3 显式选择 QuickAI
+### 4.3 显式选择 Sub2Api
 
 ```text
-使用 $grok-video-studio 制作 <视频主题>，生视频固定选择 QuickAI。
+使用 $grok-video-studio 制作 <视频主题>，生视频固定选择 Sub2Api。
 
-文生视频和图生视频都不要回退到 QuickAI New。创建失败或任务失败时保留状态并停止，说明失败类别和再次付费风险，除非我明确给出重试原因，否则不要创建替代任务。
+文生视频和图生视频都不要回退到 NewApi。创建失败或任务失败时保留状态并停止，说明失败类别和再次付费风险，除非我明确给出重试原因，否则不要创建替代任务。
 ```
 
 ## 五、按产品路线使用
@@ -118,7 +121,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 不要生成关键帧，不要把旧图片自动带入视频请求。先给我故事、人物设定、风格约束、逐镜头动作、镜头运动、每镜头时长、最终提示词、视频请求数和预算。
 
-默认优先 QuickAI，只有安全分类失败才备用 QuickAI New。画面禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸。我批准后再生成，完成后逐镜头运行 QA 和人工抽帧检查。
+默认优先 Sub2Api，只有安全分类失败才备用 NewApi。画面禁止意外字幕、点赞、评论、弹幕、按钮、Logo、水印和贴纸。我批准后再生成，完成后逐镜头运行 QA 和人工抽帧检查。
 ```
 
 ### 5.2 用户现成图片直接动画
@@ -128,7 +131,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 
 不要重新生图。把图片复制到项目 assets/references，记录原图 SHA-256；锁定人物身份、脸型、服装、产品外形、构图和背景，只增加 <自然眨眼、呼吸、发丝轻动和轻微转头>。
 
-生视频选择 <QuickAI New>。先预检并展示唯一一次视频请求和预算，等我批准后再创建任务。完成后对比输入图与首中末帧，明确报告参考图保真度、最终提供方、任务状态、媒体参数和音频情况。
+生视频选择 <NewApi>。先预检并展示唯一一次视频请求和预算，等我批准后再创建任务。完成后对比输入图与首中末帧，明确报告参考图保真度、最终提供方、任务状态、媒体参数和音频情况。
 ```
 
 ### 5.3 先生成关键帧再做图生视频
@@ -136,7 +139,7 @@ https://github.com/1582345746/GrokVideoSkill.git
 ```text
 使用 $grok-video-studio 做一个 <主题> 图生视频项目。
 
-先用 QuickAI 为每个镜头生成关键帧。每张图片生成后停下来展示并等待我接受或拒绝；接受的图片必须记录哈希并锁定。只有关键帧全部批准后，才按已选视频上游逐镜头做图生视频。
+先用 Sub2Api 为每个镜头生成关键帧。每张图片生成后停下来展示并等待我接受或拒绝；接受的图片必须记录哈希并锁定。只有关键帧全部批准后，才按已选视频上游逐镜头做图生视频。
 
 任何被拒绝的图片或视频都保留原文件。替换生成必须使用显式 retry reason，并重新计算可能收费的请求数。
 ```

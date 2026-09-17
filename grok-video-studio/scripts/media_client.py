@@ -174,7 +174,7 @@ def image_reference_report(path: Path, aspect_ratio: str) -> dict[str, Any]:
     return report
 
 
-def _prepare_quickai_reference(path: Path, aspect_ratio: str, temporary_directory: Path) -> Path:
+def _prepare_sub2api_reference(path: Path, aspect_ratio: str, temporary_directory: Path) -> Path:
     """Convert a valid still to a gateway-compatible JPEG canvas."""
     report = image_reference_report(path, aspect_ratio)
     if report["errors"]:
@@ -185,7 +185,7 @@ def _prepare_quickai_reference(path: Path, aspect_ratio: str, temporary_director
         return path
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        raise SkillError("ffmpeg is required to normalize QuickAI I2V references")
+        raise SkillError("ffmpeg is required to normalize Sub2Api I2V references")
     width, height = REFERENCE_CANVASES.get(aspect_ratio, (1280, 720))
     output = temporary_directory / f"{uuid.uuid4().hex}.jpg"
     command = [
@@ -279,7 +279,7 @@ def _extract_image(payload: dict[str, Any]) -> bytes:
     raise SkillError("image provider response has neither b64_json nor URL")
 
 
-class QuickAIImageClient:
+class Sub2ApiImageClient:
     def __init__(self, base_url: str, key: str, model: str) -> None:
         self.base_url = base_url
         self.key = key
@@ -340,7 +340,7 @@ class QuickAIImageClient:
         return _extract_image(payload)
 
 
-class QuickAINewVideoClient:
+class NewApiVideoClient:
     def __init__(self, base_url: str, key: str, model: str) -> None:
         self.base_url = base_url
         self.key = key
@@ -470,8 +470,8 @@ class QuickAINewVideoClient:
         raise SkillError(f"video content is unavailable: {content_error}")
 
 
-class QuickAIVideoClient:
-    """QuickAI JSON video adapter; its endpoints differ from QuickAI New."""
+class Sub2ApiVideoClient:
+    """Sub2Api JSON video adapter; its endpoints differ from NewApi."""
 
     def __init__(self, base_url: str, key: str, model: str) -> None:
         self.base_url = base_url
@@ -518,13 +518,13 @@ class QuickAIVideoClient:
             "resolution": resolution,
             "aspect_ratio": aspect_ratio,
         }
-        # The QuickAI gateway currently rejects PNG data URIs for I2V even
+        # Some Sub2Api gateways reject PNG data URIs for I2V even
         # though the upstream xAI contract accepts them. Normalize valid stills
         # to a cropped JPEG only for the outbound request; source files remain
         # untouched and malformed fixtures retain their original bytes.
         with tempfile.TemporaryDirectory(prefix="gvs-i2v-") as temporary:
             temporary_directory = Path(temporary)
-            prepared = [_prepare_quickai_reference(path, aspect_ratio, temporary_directory) for path in reference_paths]
+            prepared = [_prepare_sub2api_reference(path, aspect_ratio, temporary_directory) for path in reference_paths]
             if len(prepared) == 1:
                 payload["image"] = {"url": self._data_url(prepared[0])}
             elif prepared:

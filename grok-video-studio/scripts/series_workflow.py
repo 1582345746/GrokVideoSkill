@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from gvs_common import SkillError, atomic_write_json, load_settings, read_json
-from media_client import QuickAIImageClient, save_image_bytes
+from media_client import Sub2ApiImageClient, save_image_bytes
 from provider_contracts import REPAIRABLE_INPUT_CATEGORIES, classify_provider_error
 from voice_contracts import canonical_voice_contract, duplicate_voice_errors, validate_voice_contract
 
@@ -224,6 +224,13 @@ def _contains_secret(value: Any) -> bool:
             name = str(key).lower().replace("-", "_")
             if name in {
                 "api_key",
+                "sub2api_key",
+                "newapi_key",
+                "sub2api_image_key",
+                "sub2api_video_key",
+                "newapi_video_key",
+                "image_api_key",
+                "video_api_key",
                 "quickai_key",
                 "quickainew_key",
                 "quickai_image_key",
@@ -272,8 +279,8 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
     if defaults.get("video_mode") not in {"text-to-video", "image-to-video"}:
         errors.append("series.defaults.video_mode must be text-to-video or image-to-video")
-    if defaults.get("video_provider") not in {"quickai", "quickainew"}:
-        errors.append("series.defaults.video_provider must be quickai or quickainew")
+    if defaults.get("video_provider") not in {"sub2api", "newapi"}:
+        errors.append("series.defaults.video_provider must be sub2api or newapi")
     if defaults.get("video_provider_policy", "automatic") not in {"automatic", "fixed"}:
         errors.append("series.defaults.video_provider_policy must be automatic or fixed")
     retry_policy = series.get("retry_policy") if isinstance(series.get("retry_policy"), dict) else {}
@@ -496,7 +503,7 @@ def sync_episode_contract(
     if isinstance(series.get("audio"), dict):
         project["audio"] = dict(series["audio"])
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
-    project["video_provider"] = str(defaults.get("video_provider", "quickai"))
+    project["video_provider"] = str(defaults.get("video_provider", "sub2api"))
     project["video_provider_policy"] = str(defaults.get("video_provider_policy", "automatic"))
     if str(series.get("style_bible", "")).strip():
         project["style_bible"] = str(series["style_bible"]).strip()
@@ -1014,10 +1021,10 @@ def generate_series_characters(
         raise SkillError("series validation failed: " + "; ".join(errors))
     state = load_series_state(root, series)
     settings = load_settings()
-    if not settings.get("quickai_image_key"):
-        raise SkillError("QuickAI image key is required for series character masters")
-    client = QuickAIImageClient(
-        settings["quickai_base_url"], settings["quickai_image_key"], settings["image_model"]
+    if not settings.get("sub2api_image_key"):
+        raise SkillError("Sub2Api image key is required for series character masters")
+    client = Sub2ApiImageClient(
+        settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"]
     )
     by_id = {str(item.get("id", "")): item for item in character_records(series)}
     requested = list(dict.fromkeys(character_ids or by_id.keys()))

@@ -12,7 +12,7 @@ Dialogue is part of the project contract, not prose hidden in a prompt. The same
 | `local-voice` | Approved Voicebox or CosyVoice provider | Exact approved text, timing, subtitles, loudness | Mouth motion is not corrected |
 | `local-lipsync` | Approved TTS provider + MuseTalk | Exact text/audio plus mouth correction | Larger install and slower GPU render |
 
-`native-dialogue` injects timed lines into the video prompt. QuickAI uses its current JSON video contract without a non-standard `generate_audio` field; QuickAI New sends `generate_audio=true` in its multipart contract. A real QuickAI acceptance test confirmed an audible AAC track, but the provider also burned Chinese dialogue into the image despite the clean-frame instruction. Always inspect and listen.
+`native-dialogue` injects timed lines into the video prompt. Sub2Api uses its current JSON video contract without a non-standard `generate_audio` field; NewApi sends `generate_audio=true` in its multipart contract. A real Sub2Api acceptance test confirmed an audible AAC track, but the provider also burned Chinese dialogue into the image despite the clean-frame instruction. Always inspect and listen.
 
 `qa` exposes a `blocking_review_items` entry for native-dialogue clips and deliverables. A human must inspect the exported first/key/end frames; any model-baked captions or dialogue text blocks clean delivery even when the audio track is present and technically healthy.
 

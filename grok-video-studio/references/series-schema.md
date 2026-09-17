@@ -83,7 +83,7 @@ series-root/
     "episode_target_seconds": 90,
     "workflow": "character-consistent-story",
     "video_mode": "image-to-video",
-    "video_provider": "quickai",
+    "video_provider": "sub2api",
     "video_provider_policy": "automatic",
     "video_size": "1280x720",
     "video_resolution": "480p",
@@ -150,7 +150,7 @@ Do not treat a planned `intended_continuity_out` as fact. Only `series-accept --
 
 ## Route alignment
 
-- Series text-to-video uses the same prompt-only T2V behavior as a standalone project. It needs the QuickAI video credential (shared by T2V/I2V) but does not require character masters or an image credential. Long-range identity remains best-effort.
-- Series image-to-video uses the QuickAI image credential for persistent character masters and per-shot keyframes, then prefers QuickAI for animation. A safely classified QuickAI failure may continue with QuickAI New when configured. The video request receives only the current shot keyframe.
+- Series text-to-video uses the same prompt-only T2V behavior as a standalone project. It needs the Sub2Api video credential (shared by T2V/I2V) but does not require character masters or an image credential. Long-range identity remains best-effort.
+- Series image-to-video uses the Sub2Api image credential for persistent character masters and per-shot keyframes, then prefers Sub2Api for animation. A safely classified Sub2Api failure may continue with NewApi when configured. The video request receives only the current shot keyframe.
 - Neither provider currently supports MP4 video reference/edit/extend or preset/file audio reference; those requests are blocked and reserved for independent future routes.
-- A supplied-image animation is not a series workflow. Use a standalone `single-image-animation` project with `generate_image=false` and place the supplied image in `video_references`; no QuickAI image credential is required.
+- A supplied-image animation is not a series workflow. Use a standalone `single-image-animation` project with `generate_image=false` and place the supplied image in `video_references`; no Sub2Api image credential is required.

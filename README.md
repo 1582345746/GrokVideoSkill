@@ -12,14 +12,14 @@ v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装
 
 | 路线 | 适用场景 | 默认生成链路 |
 | --- | --- | --- |
-| 文生视频 | 单条视频、多镜头故事、无参考图创作 | QuickAI 文生视频 |
-| 图生视频 | 用户现成图片直接动画，或关键帧/角色母版动画 | 现成图片直接动画只调用视频上游；关键帧路线才调用 QuickAI 生图，再调用视频上游 |
+| 文生视频 | 单条视频、多镜头故事、无参考图创作 | Sub2Api 文生视频 |
+| 图生视频 | 用户现成图片直接动画，或关键帧/角色母版动画 | 现成图片直接动画只调用视频上游；关键帧路线才调用 Sub2Api 生图，再调用视频上游 |
 | 连续剧 | 多集共享角色、世界观和剧情连续性 | 每集使用文生视频或图生视频，逐集审批与验收 |
 | 新闻视频 | 当前热点、来源核验、旁白型资讯视频 | Codex 联网检索并建立证据合同，再进入标准视频链路 |
 
 用户现成图片的动画属于图生视频，不是第五条产品路线。
 
-文生视频和图生视频在未指定上游时默认优先 QuickAI，并使用 `automatic` 策略只对安全分类失败尝试 QuickAI New。用户明确说“生视频选择 QuickAI New”时，必须固定直连 QuickAI New，不先调用 QuickAI；明确选择 QuickAI 时同理。默认总尝试次数为 3 次，备用也计入次数，提交结果不明时不自动重建。
+本技能没有内置生产上游地址。用户必须分别提供生图 URL/Key、Sub2Api 视频 URL/Key 和 NewApi 视频 URL/Key；配置完成后，未指定视频提供方时默认优先用户配置的 Sub2Api，并使用 `automatic` 策略只对安全分类失败尝试用户配置的 NewApi。用户明确说“生视频选择 NewApi”时，必须固定直连 NewApi，不先调用 Sub2Api；明确选择 Sub2Api 时同理。默认总尝试次数为 3 次，备用也计入次数，提交结果不明时不自动重建。
 
 ### 画面布局规则
 
@@ -56,7 +56,7 @@ v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装
 
 | 模块 | 当前效果 | 边界 |
 | --- | --- | --- |
-| T2V / I2V | QuickAI 与 QuickAI New 均可生成和恢复任务；QuickAI 还负责 T2I | 单镜头 1-15 秒，长片通过多镜头拼接；竖屏多人 T2V 默认需要 I2V 回退 |
+| T2V / I2V | Sub2Api 与 NewApi 均可生成和恢复任务；Sub2Api 还负责 T2I | 单镜头 1-15 秒，长片通过多镜头拼接；竖屏多人 T2V 默认需要 I2V 回退 |
 | 角色与关键帧 | 角色母版、用户参考图、逐镜头关键帧和哈希锁定 | 严格一致性仍需要人工审核 |
 | 原生对白 | 上游尝试生成对白、声音和口型 | 逐字、音色、口型和内嵌字幕不确定 |
 | 精确字幕/配音/口型 | FFmpeg 字幕，Voicebox/CosyVoice 配音，MuseTalk 口型 | 本地 AI 组件可选，不随基础安装下载 |
@@ -88,13 +88,16 @@ v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装
 请从 main 分支安装 Grok Video Studio 技能：
 仓库：https://github.com/1582345746/GrokVideoSkill.git
 
-QuickAI 生图 Key：<QUICKAI_IMAGE_KEY>
-QuickAI 视频 Key（T2V/I2V）：<QUICKAI_VIDEO_KEY>
-QuickAI New 视频 Key：<QUICKAINEW_VIDEO_KEY>
+Sub2Api 生图 Key：<SUB2API_IMAGE_KEY>
+Sub2Api 视频 Key（T2V/I2V）：<SUB2API_VIDEO_KEY>
+NewApi 视频 Key：<NEWAPI_VIDEO_KEY>
+Sub2Api 生图 URL：<IMAGE_BASE_URL>
+Sub2Api 视频 URL：<SUB2API_VIDEO_BASE_URL>
+NewApi 视频 URL：<NEWAPI_VIDEO_BASE_URL>
 
 要求：
 1. 使用仓库根目录 install.ps1 安装 `upstream-dialogue` 档位；需要静音或保留源音频时才显式选择 `basic`。
-2. 通过标准输入把三个 Key 配置给技能；Windows 使用 DPAPI 保存。
+2. 使用用户提供的三个 URL，并通过标准输入把三个 Key 配置给技能；Windows 使用 DPAPI 保存。
 3. 不得把 Key 写入源码、项目文件、临时文件、命令行参数或终端输出。
 4. 安装后运行 version、install.ps1 -Check 和 doctor。
 5. `doctor` 只做凭据、模型列表和媒体依赖诊断，不发起任何付费生图或生视频测试。
@@ -124,11 +127,11 @@ cd GrokVideoSkill
 
 | 凭据 | 用途 |
 | --- | --- |
-| QuickAI 生图 Key | T2I、角色母版和需要先生关键帧的 I2V |
-| QuickAI 视频 Key（T2V/I2V） | QuickAI 的 T2V 与 I2V 视频请求 |
-| QuickAI New 视频 Key | QuickAI New 的 T2V 与 I2V；自动备用或显式固定选择 |
+| Sub2Api 生图 Key | T2I、角色母版和需要先生关键帧的 I2V |
+| Sub2Api 视频 Key（T2V/I2V） | Sub2Api 的 T2V 与 I2V 视频请求 |
+| NewApi 视频 Key | NewApi 的 T2V 与 I2V；自动备用或显式固定选择 |
 
-Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，不进入技能目录。旧版 `quickai_key` 和 `quickainew_key` 配置仍可迁移，但新安装应按职责分开配置。
+Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，不进入技能目录。旧版 `sub2api_key` 和 `newapi_key` 配置仍可迁移，但新安装应按职责分开配置。
 
 ## 安装档位
 
@@ -146,9 +149,9 @@ Windows 凭据通过 DPAPI 保存在当前用户的本地应用数据目录，�
 
 ## 上游能力合同
 
-运行 `python scripts/grok_video_studio.py capabilities` 可以看到当前安装的真实合同。QuickAI 支持 T2I、T2V、I2V；QuickAI New 支持 T2V、I2V，不提供 T2I。两者当前均不支持视频参考、视频编辑/延展、预设音色参考或音频文件参考。QuickAI 的音频是模型默认能力，不能假设一定生成；QuickAI New 使用显式 `generate_audio` 字段。MP4/WAV 不能塞进普通 `input_reference`，预检会阻断并指向未来独立路线。
+运行 `python scripts/grok_video_studio.py capabilities` 可以看到当前安装的真实合同。Sub2Api 支持 T2I、T2V、I2V；NewApi 支持 T2V、I2V，不提供 T2I。两者当前均不支持视频参考、视频编辑/延展、预设音色参考或音频文件参考。Sub2Api 的音频是模型默认能力，不能假设一定生成；NewApi 使用显式 `generate_audio` 字段。MP4/WAV 不能塞进普通 `input_reference`，预检会阻断并指向未来独立路线。
 
-QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检检查参考图格式、尺寸、比例和清晰度，并仅在请求体内将有效静帧中心裁剪为临时 JPEG，原图保持不变。QuickAI New 使用原始图片 multipart 上传。这个兼容处理只影响请求体，不改变项目中的原图。
+Sub2Api 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检检查参考图格式、尺寸、比例和清晰度，并仅在请求体内将有效静帧中心裁剪为临时 JPEG，原图保持不变。NewApi 使用原始图片 multipart 上传。这个兼容处理只影响请求体，不改变项目中的原图。
 
 ## 音频与字幕
 
@@ -183,7 +186,7 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 ### 图生视频
 
 ```text
-使用 $grok-video-studio 把我提供的图片制作成 8 秒 9:16 图生视频。不要重新生图，锁定人物身份、服装、构图和背景，只增加自然眨眼、呼吸和轻微转头。先预检并等我批准，再按默认规则优先调用 QuickAI；只有安全分类失败才切换 QuickAI New。完成后交付原片、最终提供方、尝试历史和 QA 报告。
+使用 $grok-video-studio 把我提供的图片制作成 8 秒 9:16 图生视频。不要重新生图，锁定人物身份、服装、构图和背景，只增加自然眨眼、呼吸和轻微转头。先预检并等我批准，再按默认规则优先调用 Sub2Api；只有安全分类失败才切换 NewApi。完成后交付原片、最终提供方、尝试历史和 QA 报告。
 ```
 
 ### 连续剧
@@ -237,7 +240,7 @@ QuickAI 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 ## 产品边界
 
 - 图像和视频创建请求可能收费；预检、状态查询、下载、FFmpeg 处理和本地 QA 不会创建新的上游生成任务。
-- 用户已有图片直接做 I2V 不需要 QuickAI 生图 Key；只有角色母版或镜头关键帧路线需要生图 Key。
+- 用户已有图片直接做 I2V 不需要 Sub2Api 生图 Key；只有角色母版或镜头关键帧路线需要生图 Key。
 - 提示词硬上限为 4096 UTF-8 字节，建议把最终合成提示词控制在 3800 字节以内。预检会同时显示完整、精简、最小版本、字节数、剩余空间和压缩建议，绝不静默截断。
 - 文生视频的人物一致性是文本约束下的尽力而为；严格一致性应使用角色母版、逐镜头关键帧和图生视频。
 - `native-dialogue` 的声音、逐字内容、内嵌字幕和口型是生成式结果，不能承诺完全准确。

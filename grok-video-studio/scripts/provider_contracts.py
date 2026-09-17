@@ -38,9 +38,9 @@ class ProviderCapabilities:
 
 
 PROVIDER_CAPABILITIES = {
-    "quickai": ProviderCapabilities(
-        provider="quickai",
-        title="QuickAI",
+    "sub2api": ProviderCapabilities(
+        provider="sub2api",
+        title="Sub2Api",
         text_to_image=True,
         text_to_video=True,
         image_to_video=True,
@@ -51,11 +51,11 @@ PROVIDER_CAPABILITIES = {
         preset_voice_reference=False,
         audio_file_reference=False,
         priority=1,
-        credential_role="quickai_video_key",
+        credential_role="sub2api_video_key",
     ),
-    "quickainew": ProviderCapabilities(
-        provider="quickainew",
-        title="QuickAI New",
+    "newapi": ProviderCapabilities(
+        provider="newapi",
+        title="NewApi",
         text_to_image=False,
         text_to_video=True,
         image_to_video=True,
@@ -66,7 +66,7 @@ PROVIDER_CAPABILITIES = {
         preset_voice_reference=False,
         audio_file_reference=False,
         priority=2,
-        credential_role="quickainew_video_key",
+        credential_role="newapi_video_key",
     ),
 }
 

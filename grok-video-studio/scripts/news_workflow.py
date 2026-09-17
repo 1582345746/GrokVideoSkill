@@ -87,6 +87,13 @@ def _contains_secret_field(value: Any) -> bool:
             name = str(key).lower().replace("-", "_")
             if name in {
                 "api_key",
+                "sub2api_key",
+                "newapi_key",
+                "sub2api_image_key",
+                "sub2api_video_key",
+                "newapi_video_key",
+                "image_api_key",
+                "video_api_key",
                 "quickai_key",
                 "quickainew_key",
                 "quickai_image_key",

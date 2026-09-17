@@ -3,11 +3,11 @@
   "profiles": {
     "basic": {
       "title": "Basic modules",
-      "description": "Core project planning, QuickAI generation, clean-frame rules, resume, assembly, and technical QA.",
+      "description": "Core project planning, Sub2Api generation, clean-frame rules, resume, assembly, and technical QA.",
       "component_profile": "core",
       "audio_mode": "preserve",
       "subtitle_source": "upstream",
-      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "key_roles": ["sub2api_image_key", "sub2api_video_key", "newapi_video_key"],
       "dependencies": ["ffmpeg"],
       "model_download_gb": 0,
       "gpu_required": false
@@ -18,7 +18,7 @@
       "component_profile": "native-dialogue",
       "audio_mode": "native-dialogue",
       "subtitle_source": "none",
-      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "key_roles": ["sub2api_image_key", "sub2api_video_key", "newapi_video_key"],
       "dependencies": ["ffmpeg"],
       "model_download_gb": 0,
       "gpu_required": false
@@ -29,7 +29,7 @@
       "component_profile": "core",
       "audio_mode": "preserve",
       "subtitle_source": "project",
-      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "key_roles": ["sub2api_image_key", "sub2api_video_key", "newapi_video_key"],
       "dependencies": ["ffmpeg"],
       "model_download_gb": 0,
       "gpu_required": false
@@ -40,7 +40,7 @@
       "component_profile": "local-voice",
       "audio_mode": "local-voice",
       "subtitle_source": "project",
-      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "key_roles": ["sub2api_image_key", "sub2api_video_key", "newapi_video_key"],
       "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
       "model_download_gb": 10.0,
       "gpu_required": true
@@ -51,7 +51,7 @@
       "component_profile": "full-dialogue",
       "audio_mode": "local-lipsync",
       "subtitle_source": "project",
-      "key_roles": ["quickai_image_key", "quickai_video_key", "quickainew_video_key"],
+      "key_roles": ["sub2api_image_key", "sub2api_video_key", "newapi_video_key"],
       "dependencies": ["ffmpeg", "docker", "nvidia-gpu"],
       "model_download_gb": 17.0,
       "gpu_required": true

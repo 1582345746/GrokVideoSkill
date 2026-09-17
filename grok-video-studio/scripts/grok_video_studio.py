@@ -19,8 +19,6 @@ from typing import Any, Callable
 from gvs_common import (
     APIError,
     DEFAULT_IMAGE_MODEL,
-    DEFAULT_QUICKAI_URL,
-    DEFAULT_QUICKAINEW_URL,
     DEFAULT_VIDEO_MODEL,
     SkillError,
     assert_mp4,
@@ -59,9 +57,9 @@ from dialogue_workflow import (
 )
 from director_contracts import director_config, director_gate, edit_window, shot_audio_intent, validate_director
 from media_client import (
-    QuickAIImageClient,
-    QuickAINewVideoClient,
-    QuickAIVideoClient,
+    Sub2ApiImageClient,
+    NewApiVideoClient,
+    Sub2ApiVideoClient,
     VIDEO_RESOLUTIONS,
     image_reference_report,
     save_image_bytes,
@@ -334,6 +332,13 @@ def _known_secret_field(value: Any) -> bool:
             normalized = str(key).lower().replace("-", "_")
             if normalized in {
                 "api_key",
+                "sub2api_key",
+                "newapi_key",
+                "sub2api_image_key",
+                "sub2api_video_key",
+                "newapi_video_key",
+                "image_api_key",
+                "video_api_key",
                 "quickai_key",
                 "quickainew_key",
                 "quickai_image_key",
@@ -367,32 +372,32 @@ def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = No
     value = str(project.get("video_provider", "")).strip()
     if value:
         return value
-    return str((settings or {}).get("default_video_provider", "quickai"))
+    return str((settings or {}).get("default_video_provider", "sub2api"))
 
 
 def video_provider_policy(project: dict[str, Any]) -> str:
     value = str(project.get("video_provider_policy", "")).strip().lower()
     if value:
         return value
-    return "fixed" if video_provider(project) == "quickainew" else "automatic"
+    return "fixed" if video_provider(project) == "newapi" else "automatic"
 
 
 def configured_default_video_provider() -> str:
     path = config_path()
     if not path.is_file():
-        return "quickai"
+        return "sub2api"
     try:
-        value = str(read_json(path).get("default_video_provider", "quickai")).strip().lower()
+        value = str(read_json(path).get("default_video_provider", "sub2api")).strip().lower()
     except SkillError:
-        return "quickai"
-    return value if value in PROVIDER_CAPABILITIES else "quickai"
+        return "sub2api"
+    return value if value in PROVIDER_CAPABILITIES else "sub2api"
 
 
 def resolve_video_provider_options(provider: str | None, policy: str | None) -> tuple[str, str]:
     selected_provider = str(provider or configured_default_video_provider()).strip().lower()
     selected_policy = str(policy or "").strip().lower()
     if not selected_policy:
-        selected_policy = "fixed" if provider or selected_provider == "quickainew" else "automatic"
+        selected_policy = "fixed" if provider or selected_provider == "newapi" else "automatic"
     return selected_provider, selected_policy
 
 
@@ -414,8 +419,8 @@ def provider_capability_report(settings: dict[str, Any]) -> dict[str, dict[str, 
             "priority": capabilities.priority,
             "video_configured": video_configured,
         }
-        if provider == "quickai":
-            value["image_configured"] = bool(settings.get("quickai_image_key"))
+        if provider == "sub2api":
+            value["image_configured"] = bool(settings.get("sub2api_image_key"))
         report[provider] = value
     return report
 
@@ -426,7 +431,7 @@ def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any])
     mode = video_mode(project)
     capability_name = "text_to_video" if mode == "text-to-video" else "image_to_video"
     if preferred not in PROVIDER_CAPABILITIES:
-        raise SkillError("video_provider must be quickai or quickainew")
+        raise SkillError("video_provider must be sub2api or newapi")
     if not getattr(PROVIDER_CAPABILITIES[preferred], capability_name):
         raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} does not support {mode}")
 
@@ -438,18 +443,18 @@ def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any])
     if policy != "automatic":
         raise SkillError("video_provider_policy must be automatic or fixed")
 
-    if preferred == "quickainew":
-        if settings.get("quickainew_video_key"):
-            return ["quickainew"]
-        raise SkillError("QuickAI New 视频 Key 未配置，无法执行明确指定的 QuickAI New 视频任务")
+    if preferred == "newapi":
+        if settings.get("newapi_video_key"):
+            return ["newapi"]
+        raise SkillError("NewApi 视频 Key 未配置，无法执行明确指定的 NewApi 视频任务")
 
     candidates = []
-    if settings.get("quickai_video_key"):
-        candidates.append("quickai")
-    if settings.get("quickainew_video_key"):
-        candidates.append("quickainew")
+    if settings.get("sub2api_video_key"):
+        candidates.append("sub2api")
+    if settings.get("newapi_video_key"):
+        candidates.append("newapi")
     if not candidates:
-        raise SkillError("未配置可用的视频 Key：请配置 QuickAI 视频 Key 或 QuickAI New 视频 Key")
+        raise SkillError("未配置可用的视频 Key：请配置 Sub2Api 或 NewApi 视频 Key")
     return candidates
 
 
@@ -742,9 +747,9 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             )
     except SkillError as error:
         errors.append(str(error))
-    if provider and provider not in {"quickai", "quickainew"}:
-        errors.append("project.video_provider must be quickai or quickainew")
-    policy = str(project.get("video_provider_policy", "automatic" if provider != "quickainew" else "fixed")).strip()
+    if provider and provider not in {"sub2api", "newapi"}:
+        errors.append("project.video_provider must be sub2api or newapi")
+    policy = str(project.get("video_provider_policy", "automatic" if provider != "newapi" else "fixed")).strip()
     if policy not in {"automatic", "fixed"}:
         errors.append("project.video_provider_policy must be automatic or fixed")
     if project.get("allow_ui_elements") is not None and not isinstance(project.get("allow_ui_elements"), bool):
@@ -1539,7 +1544,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
             if not orientation_matches:
                 warnings.append(
                     f"{shot_id}: video_size {video_size} orientation does not match video aspect ratio {aspect_ratio}; "
-                    "QuickAI New will omit the conflicting size and use resolution plus aspect_ratio"
+                    "NewApi will omit the conflicting size and use resolution plus aspect_ratio"
                 )
         if str(shot.get("image_prompt", "")).strip():
             prompts.append(
@@ -1751,25 +1756,25 @@ def write_event(root: Path, event: dict[str, Any]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
-def clients(*, require_secrets: bool = True) -> tuple[QuickAIImageClient, QuickAINewVideoClient, dict[str, Any]]:
+def clients(*, require_secrets: bool = True) -> tuple[Sub2ApiImageClient, NewApiVideoClient, dict[str, Any]]:
     settings = load_settings(require_secrets=require_secrets)
     return (
-        QuickAIImageClient(settings["quickai_base_url"], settings["quickai_image_key"], settings["image_model"]),
-        QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"]),
+        Sub2ApiImageClient(settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"]),
+        NewApiVideoClient(settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"]),
         settings,
     )
 
 
-def select_video_client(settings: dict[str, Any], provider: str) -> QuickAIVideoClient | QuickAINewVideoClient:
-    if provider == "quickai":
-        if not settings.get("quickai_video_key"):
-            raise SkillError("QuickAI video key is required for video_provider=quickai")
-        return QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_video_key"], settings["video_model"])
-    if provider == "quickainew":
-        if not settings.get("quickainew_video_key"):
-            raise SkillError("QuickAI New video key is required for video_provider=quickainew")
-        return QuickAINewVideoClient(settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"])
-    raise SkillError("video_provider must be quickai or quickainew")
+def select_video_client(settings: dict[str, Any], provider: str) -> Sub2ApiVideoClient | NewApiVideoClient:
+    if provider == "sub2api":
+        if not settings.get("sub2api_video_key"):
+            raise SkillError("Sub2Api video key is required for video_provider=sub2api")
+        return Sub2ApiVideoClient(settings["sub2api_video_base_url"], settings["sub2api_video_key"], settings["video_model"])
+    if provider == "newapi":
+        if not settings.get("newapi_video_key"):
+            raise SkillError("NewApi video key is required for video_provider=newapi")
+        return NewApiVideoClient(settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"])
+    raise SkillError("video_provider must be sub2api or newapi")
 
 
 def resolved_character_master(root: Path, project: dict[str, Any], state: dict[str, Any]) -> Path:
@@ -1810,8 +1815,8 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         return {"status": "completed", "path": str(path), "source": "external", "skipped": True}
 
     image_client, _, settings = clients()
-    if not settings.get("quickai_image_key"):
-        raise SkillError("QuickAI image key is required for image generation")
+    if not settings.get("sub2api_image_key"):
+        raise SkillError("Sub2Api image key is required for image generation")
     references = [resolve_project_path(root, value) for value in master.get("source_references", [])]
     prompt_variants_value = prompt_variants(project, kind="character_master")
     prompt_version, prompt = select_prompt_variant(
@@ -1842,7 +1847,7 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
             "request_id": uuid.uuid4().hex,
             "attempt_id": uuid.uuid4().hex,
             "signature": current_signature,
-            "provider": "quickai",
+            "provider": "sub2api",
             "model": settings["image_model"],
             "prompt": prompt,
             "prompt_original": prompt_variants_value["full"],
@@ -1911,8 +1916,8 @@ def generate_images(
     if not generating:
         return {"completed": [], "skipped": skipped}
     image_client, _, settings = clients()
-    if not settings.get("quickai_image_key"):
-        raise SkillError("QuickAI image key is required for image generation")
+    if not settings.get("sub2api_image_key"):
+        raise SkillError("Sub2Api image key is required for image generation")
     completed: list[str] = []
     for shot in generating:
         shot_id = str(shot["id"])
@@ -1955,7 +1960,7 @@ def generate_images(
                 "request_id": uuid.uuid4().hex,
                 "attempt_id": uuid.uuid4().hex,
                 "signature": current_signature,
-                "provider": "quickai",
+                "provider": "sub2api",
                 "model": settings["image_model"],
                 "prompt": prompt,
                 "prompt_original": prompt_variants_value["full"],
@@ -2021,9 +2026,9 @@ def sanitized_provider_error(error: Exception, settings: dict[str, Any]) -> str:
     return redact(
         str(error)[:1000],
         [
-            str(settings.get("quickai_image_key", "")),
-            str(settings.get("quickai_video_key", "")),
-            str(settings.get("quickainew_video_key", "")),
+            str(settings.get("sub2api_image_key", "")),
+            str(settings.get("sub2api_video_key", "")),
+            str(settings.get("newapi_video_key", "")),
         ],
     )
 
@@ -3211,25 +3216,25 @@ def doctor() -> tuple[int, dict[str, Any]]:
         result["ok"] = False
     checks = [
         (
-            "quickai_image",
-            settings.get("quickai_image_key", ""),
+            "sub2api_image",
+            settings.get("sub2api_image_key", ""),
             settings["image_model"],
-            QuickAIImageClient(settings["quickai_base_url"], settings["quickai_image_key"], settings["image_model"]),
+            Sub2ApiImageClient(settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"]),
             False,
         ),
         (
-            "quickai_video",
-            settings.get("quickai_video_key", ""),
+            "sub2api_video",
+            settings.get("sub2api_video_key", ""),
             settings["video_model"],
-            QuickAIVideoClient(settings["quickai_base_url"], settings["quickai_video_key"], settings["video_model"]),
+            Sub2ApiVideoClient(settings["sub2api_video_base_url"], settings["sub2api_video_key"], settings["video_model"]),
             False,
         ),
         (
-            "quickainew_video",
-            settings.get("quickainew_video_key", ""),
+            "newapi_video",
+            settings.get("newapi_video_key", ""),
             settings["video_model"],
-            QuickAINewVideoClient(
-                settings["quickainew_base_url"], settings["quickainew_video_key"], settings["video_model"]
+            NewApiVideoClient(
+                settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"]
             ),
             False,
         ),
@@ -3274,16 +3279,16 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "circuit": client.health_snapshot(),
             }
             result["ok"] = False
-    if not settings.get("quickai_image_key"):
-        result["diagnostics_zh"].append("QuickAI 生图 Key 未配置：生图会在付费请求前停止，且不会切换到 QuickAI New。")
-    if not settings.get("quickai_video_key") and not settings.get("quickainew_video_key"):
-        result["diagnostics_zh"].append("QuickAI 与 QuickAI New 视频 Key 均未配置：当前不能生成视频。")
-    elif not settings.get("quickainew_video_key"):
-        result["diagnostics_zh"].append("QuickAI New 视频 Key 未配置：QuickAI 视频失败时不会进入备用提供方。")
+    if not settings.get("sub2api_image_key"):
+        result["diagnostics_zh"].append("Sub2Api 生图 Key 未配置：生图会在付费请求前停止。")
+    if not settings.get("sub2api_video_key") and not settings.get("newapi_video_key"):
+        result["diagnostics_zh"].append("Sub2Api 与 NewApi 视频 Key 均未配置：当前不能生成视频。")
+    elif not settings.get("newapi_video_key"):
+        result["diagnostics_zh"].append("NewApi 视频 Key 未配置：Sub2Api 视频失败时不会进入备用提供方。")
     return (0 if result["ok"] else 1), result
 
 
-def read_credentials_payload() -> tuple[str, str, str]:
+def read_credentials_payload() -> tuple[str, str, str, str]:
     prompt = "Credential payload JSON: "
     raw = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline(MAX_CREDENTIAL_PAYLOAD_CHARS + 1)
     if len(raw) > MAX_CREDENTIAL_PAYLOAD_CHARS:
@@ -3294,90 +3299,107 @@ def read_credentials_payload() -> tuple[str, str, str]:
         raise SkillError("credential payload must be one JSON object") from error
     if not isinstance(payload, dict):
         raise SkillError("credential payload must be one JSON object")
-    for name in ("quickai_key", "quickainew_key", "quickai_image_key", "quickai_video_key", "quickainew_video_key"):
+    # Legacy QuickAI field names are accepted only for migrating an existing
+    # installation; configure writes only the Sub2Api/NewApi role names.
+    for name in (
+        "sub2api_key", "newapi_key", "sub2api_image_key", "sub2api_video_key", "newapi_video_key",
+        "image_api_key", "video_api_key",
+        "quickai_key", "quickainew_key", "quickai_image_key", "quickai_video_key", "quickainew_video_key",
+    ):
         if name in payload and not isinstance(payload[name], str):
             raise SkillError(f"credential payload field {name} must be a string when provided")
-    legacy_quickai = str(payload.get("quickai_key", "")).strip()
-    legacy_quickainew = str(payload.get("quickainew_key", "")).strip()
-    image_key = str(payload["quickai_image_key"]).strip() if "quickai_image_key" in payload else legacy_quickai
-    video_key = str(payload["quickai_video_key"]).strip() if "quickai_video_key" in payload else legacy_quickai
-    new_video_key = (
-        str(payload["quickainew_video_key"]).strip() if "quickainew_video_key" in payload else legacy_quickainew
-    )
-    return image_key, video_key, new_video_key
+    sub2api_key = str(payload.get("sub2api_key", "")).strip() or str(payload.get("quickai_key", "")).strip()
+    newapi_key = str(payload.get("newapi_key", "")).strip() or str(payload.get("quickainew_key", "")).strip()
+
+    def role_key(*names: str, fallback: str) -> str:
+        for name in names:
+            if name in payload:
+                return str(payload[name]).strip()
+        return fallback
+
+    # Only an explicitly shared key may fill multiple roles. An empty role
+    # field deliberately disables that role, including during legacy migration.
+    image_key = role_key("image_api_key", "sub2api_image_key", "quickai_image_key", fallback=sub2api_key)
+    video_key = role_key("video_api_key", "sub2api_video_key", "quickai_video_key", fallback=sub2api_key)
+    new_video_key = role_key("newapi_video_key", "quickainew_video_key", fallback=newapi_key)
+    return image_key, video_key, new_video_key, sub2api_key
 
 
 def configure(args: argparse.Namespace) -> dict[str, Any]:
     if args.credentials_stdin and args.environment_only:
         raise SkillError("--credentials-stdin cannot be combined with --environment-only because the supplied keys would not persist")
     if args.credentials_stdin:
-        quickai_image_key, quickai_video_key, quickainew_video_key = read_credentials_payload()
+        image_key, video_key, new_video_key, sub2api_key = read_credentials_payload()
+        newapi_key = new_video_key
         credential_source = "agent-stdin"
     else:
-        legacy_quickai = os.environ.get("GVS_QUICKAI_KEY", "").strip()
-        legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip()
-        quickai_image_key = (
-            os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip()
-            or os.environ.get("QUICKAI_IMAGE_API_KEY", "").strip()
-            or legacy_quickai
-        )
-        quickai_video_key = (
-            os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip()
-            or os.environ.get("QUICKAI_VIDEO_API_KEY", "").strip()
-            or legacy_quickai
-        )
-        quickainew_video_key = (
-            os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip()
-            or os.environ.get("QUICKAI_NEW_VIDEO_API_KEY", "").strip()
-            or legacy_quickainew
-        )
-        if not quickai_image_key:
-            quickai_image_key = getpass.getpass("QuickAI image key (optional): ").strip()
-        if not quickai_video_key:
-            quickai_video_key = getpass.getpass("QuickAI video key for T2V/I2V (optional): ").strip()
-        if not quickainew_video_key:
-            quickainew_video_key = getpass.getpass("QuickAI New video key (optional): ").strip()
+        image_key = (os.environ.get("GVS_IMAGE_API_KEY", "").strip()
+                     or os.environ.get("GVS_SUB2API_IMAGE_KEY", "").strip()
+                     or os.environ.get("GVS_SUB2API_KEY", "").strip())
+        video_key = (os.environ.get("GVS_VIDEO_API_KEY", "").strip()
+                     or os.environ.get("GVS_SUB2API_VIDEO_KEY", "").strip()
+                     or os.environ.get("GVS_SUB2API_KEY", "").strip())
+        new_video_key = (os.environ.get("GVS_NEWAPI_VIDEO_KEY", "").strip()
+                         or os.environ.get("GVS_NEWAPI_KEY", "").strip())
+        if not image_key:
+            image_key = getpass.getpass("Image provider API key (optional): ").strip()
+        if not video_key:
+            video_key = getpass.getpass("Sub2Api video API key (optional): ").strip()
+        if not new_video_key:
+            new_video_key = getpass.getpass("NewApi video API key (optional): ").strip()
+        sub2api_key = image_key or video_key
+        newapi_key = new_video_key
         credential_source = "environment-or-interactive"
-    if not quickai_image_key and not quickai_video_key and not quickainew_video_key:
+    if not image_key and not video_key and not new_video_key:
         raise SkillError("at least one provider key is required")
+    image_base_url = (args.image_base_url or os.environ.get("GVS_IMAGE_API_URL", "").strip())
+    sub2api_video_base_url = (args.sub2api_video_base_url or os.environ.get("GVS_VIDEO_API_URL", "").strip()
+                              or os.environ.get("GVS_SUB2API_VIDEO_URL", "").strip())
+    newapi_video_base_url = (args.newapi_video_base_url or os.environ.get("GVS_NEWAPI_VIDEO_URL", "").strip())
+    if image_key and not image_base_url:
+        raise SkillError("--image-base-url is required when an image API key is configured")
+    if video_key and not sub2api_video_base_url:
+        raise SkillError("--sub2api-video-base-url is required when a Sub2Api video key is configured")
+    if new_video_key and not newapi_video_base_url:
+        raise SkillError("--newapi-video-base-url is required when a NewApi video key is configured")
     config = {
-        "quickai_base_url": normalize_base_url(args.quickai_base_url),
-        "quickainew_base_url": normalize_base_url(args.quickainew_base_url),
+        "image_base_url": normalize_base_url(image_base_url) if image_base_url else "",
+        "sub2api_video_base_url": normalize_base_url(sub2api_video_base_url) if sub2api_video_base_url else "",
+        "newapi_video_base_url": normalize_base_url(newapi_video_base_url) if newapi_video_base_url else "",
         "image_model": args.image_model.strip(),
         "video_model": args.video_model.strip(),
-        "default_video_provider": (
-            args.video_provider
-            or ("quickai" if quickai_video_key else "quickainew" if quickainew_video_key else "quickai")
-        ),
+        "default_video_provider": args.video_provider or ("newapi" if new_video_key and not video_key else "sub2api"),
     }
     connection: dict[str, Any] = {
-        "quickai_image": "not_tested",
-        "quickai_video": "not_tested",
-        "quickainew_video": "not_tested",
+        "sub2api_image": "not_tested",
+        "sub2api_video": "not_tested",
+        "newapi_video": "not_tested",
     }
     if not args.skip_test:
-        connection = {"quickai_image": "not_configured", "quickai_video": "not_configured", "quickainew_video": "not_configured"}
-        if quickai_image_key:
-            image_models = QuickAIImageClient(config["quickai_base_url"], quickai_image_key, config["image_model"]).list_models()
+        connection = {"sub2api_image": "not_configured", "sub2api_video": "not_configured", "newapi_video": "not_configured"}
+        if image_key:
+            image_models = Sub2ApiImageClient(config["image_base_url"], image_key, config["image_model"]).list_models()
             if config["image_model"] not in image_models:
-                raise SkillError(f"configured image model is not advertised by QuickAI: {config['image_model']}")
-            connection["quickai_image"] = "ok"
-        if quickai_video_key:
-            video_models = QuickAIVideoClient(config["quickai_base_url"], quickai_video_key, config["video_model"]).list_models()
+                raise SkillError(f"configured image model is not advertised by Sub2Api: {config['image_model']}")
+            connection["sub2api_image"] = "ok"
+        if video_key:
+            video_models = Sub2ApiVideoClient(config["sub2api_video_base_url"], video_key, config["video_model"]).list_models()
             if config["video_model"] not in video_models:
-                raise SkillError(f"configured video model is not advertised by QuickAI: {config['video_model']}")
-            connection["quickai_video"] = "ok"
-        if quickainew_video_key:
-            video_models = QuickAINewVideoClient(config["quickainew_base_url"], quickainew_video_key, config["video_model"]).list_models()
+                raise SkillError(f"configured video model is not advertised by Sub2Api: {config['video_model']}")
+            connection["sub2api_video"] = "ok"
+        if new_video_key:
+            video_models = NewApiVideoClient(config["newapi_video_base_url"], new_video_key, config["video_model"]).list_models()
             if config["video_model"] not in video_models:
-                raise SkillError(f"configured video model is not advertised by QuickAI New: {config['video_model']}")
-            connection["quickainew_video"] = "ok"
+                raise SkillError(f"configured video model is not advertised by NewApi: {config['video_model']}")
+            connection["newapi_video"] = "ok"
     save_settings(
         config,
-        quickai_image_key,
-        quickai_video_key,
-        quickainew_video_key,
+        sub2api_key,
+        newapi_key,
         store_secrets=not args.environment_only,
+        sub2api_image_key=image_key,
+        sub2api_video_key=video_key,
+        newapi_video_key=new_video_key,
     )
     return {
         "configured": str(config_path()),
@@ -3629,7 +3651,7 @@ def resolve_project_audio_options(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Create resumable QuickAI and Grok video projects.")
+    parser = argparse.ArgumentParser(description="Create resumable Sub2Api and Grok video projects.")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("version", help="Print the installed Skill version.")
@@ -3642,11 +3664,12 @@ def build_parser() -> argparse.ArgumentParser:
     workflow_validate.add_argument("path", type=Path)
 
     setup = commands.add_parser("configure", help="Securely configure direct provider credentials.")
-    setup.add_argument("--quickai-base-url", default=DEFAULT_QUICKAI_URL)
-    setup.add_argument("--quickainew-base-url", default=DEFAULT_QUICKAINEW_URL)
+    setup.add_argument("--image-base-url", "--sub2api-base-url", dest="image_base_url")
+    setup.add_argument("--video-base-url", "--sub2api-video-base-url", dest="sub2api_video_base_url")
+    setup.add_argument("--newapi-video-base-url", "--newapi-base-url", dest="newapi_video_base_url")
     setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
-    setup.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    setup.add_argument("--video-provider", choices=("sub2api", "newapi"))
     setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
     setup.add_argument(
         "--credentials-stdin",
@@ -3706,7 +3729,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--target-seconds", type=int)
     init.add_argument("--video-size", default="1280x720")
     init.add_argument("--mode", choices=("text-to-video", "image-to-video"))
-    init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
@@ -3733,7 +3756,7 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--workflow", default="character-consistent-story")
     series_init.add_argument("--video-size", default="1280x720")
     series_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="image-to-video")
-    series_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    series_init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     series_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
@@ -3793,7 +3816,7 @@ def build_parser() -> argparse.ArgumentParser:
     news_init.add_argument("--clip-seconds", type=int)
     news_init.add_argument("--video-size", default="1280x720")
     news_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="text-to-video")
-    news_init.add_argument("--video-provider", choices=("quickai", "quickainew"))
+    news_init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     news_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
     news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
     news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
@@ -4082,9 +4105,9 @@ def main() -> int:
                 provider_settings = load_settings(require_secrets=False)
             except SkillError:
                 provider_settings = {
-                    "quickai_image_key": "",
-                    "quickai_video_key": "",
-                    "quickainew_video_key": "",
+                    "sub2api_image_key": "",
+                    "sub2api_video_key": "",
+                    "newapi_video_key": "",
                 }
             print_json(
                 {
@@ -4107,9 +4130,9 @@ def main() -> int:
                     },
                     "video_provider_default": configured_default_video_provider(),
                     "video_provider_selection": {
-                        "unspecified": "quickai with safe quickainew fallback",
-                        "explicit_quickai": "fixed quickai when --video-provider quickai is supplied",
-                        "explicit_quickainew": "fixed quickainew when --video-provider quickainew is supplied",
+                        "unspecified": "sub2api with safe newapi fallback",
+                        "explicit_sub2api": "fixed sub2api when --video-provider sub2api is supplied",
+                        "explicit_newapi": "fixed newapi when --video-provider newapi is supplied",
                     },
                     "providers": provider_capability_report(provider_settings),
                     "product_routes": [

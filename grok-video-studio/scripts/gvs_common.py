@@ -22,8 +22,6 @@ from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 CONFIG_VERSION = 3
 USER_AGENT = "GrokVideoStudioSkill/2.4.0"
-DEFAULT_QUICKAI_URL = "https://quickai.hn.takin.cc"
-DEFAULT_QUICKAINEW_URL = "https://quickainew.hn.takin.cc"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "grok-imagine-video-1.5"
 MAX_JSON_BYTES = 48 * 1024 * 1024
@@ -142,12 +140,13 @@ def normalize_base_url(value: str) -> str:
     loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
         raise SkillError("provider base URL must use HTTPS; HTTP is allowed only for loopback tests")
+    hostname = parsed.hostname.lower().rstrip(".")
+    if hostname in {"quickai.hn.takin.cc", "quickainew.hn.takin.cc"}:
+        raise SkillError("the retired QuickAI upstream is no longer supported; enter your own provider URL")
     path = parsed.path.rstrip("/")
-    if path == "/v1":
-        path = ""
-    if path:
-        raise SkillError("provider base URL must be an origin, without an API path")
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    if path.lower().endswith("/v1"):
+        path = path[:-3].rstrip("/")
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def api_url(base_url: str, path: str) -> str:
@@ -253,35 +252,50 @@ def dpapi_unprotect(data: bytes) -> bytes:
 
 def save_settings(
     config: dict[str, Any],
-    quickai_image_key: str,
-    quickai_video_key: str,
-    quickainew_video_key: str,
+    sub2api_key: str,
+    newapi_key: str,
     *,
     store_secrets: bool,
+    sub2api_image_key: str | None = None,
+    sub2api_video_key: str | None = None,
+    newapi_video_key: str | None = None,
 ) -> None:
+    image_base_url = str(config.get("image_base_url", config.get("sub2api_base_url", ""))).strip()
+    sub2api_video_base_url = str(config.get("sub2api_video_base_url", config.get("sub2api_base_url", ""))).strip()
+    newapi_video_base_url = str(config.get("newapi_video_base_url", config.get("newapi_base_url", ""))).strip()
     normalized = {
         "version": CONFIG_VERSION,
-        "quickai_base_url": normalize_base_url(str(config["quickai_base_url"])),
-        "quickainew_base_url": normalize_base_url(str(config["quickainew_base_url"])),
+        "image_base_url": normalize_base_url(image_base_url) if image_base_url else "",
+        "sub2api_video_base_url": normalize_base_url(sub2api_video_base_url) if sub2api_video_base_url else "",
+        "newapi_video_base_url": normalize_base_url(newapi_video_base_url) if newapi_video_base_url else "",
         "image_model": str(config["image_model"]).strip(),
         "video_model": str(config["video_model"]).strip(),
-        "default_video_provider": str(config.get("default_video_provider", "quickai")).strip() or "quickai",
+        "default_video_provider": str(config.get("default_video_provider", "sub2api")).strip() or "sub2api",
         "secret_provider": "windows-dpapi" if store_secrets else "environment",
     }
     if not normalized["image_model"] or not normalized["video_model"]:
         raise SkillError("image and video models are required")
-    if normalized["default_video_provider"] not in {"quickai", "quickainew"}:
-        raise SkillError("default_video_provider must be quickai or quickainew")
+    if normalized["default_video_provider"] not in {"sub2api", "newapi"}:
+        raise SkillError("default_video_provider must be sub2api or newapi")
+    image_key = (sub2api_image_key if sub2api_image_key is not None else sub2api_key).strip()
+    video_key = (sub2api_video_key if sub2api_video_key is not None else sub2api_key).strip()
+    new_video_key = (newapi_video_key if newapi_video_key is not None else newapi_key).strip()
+    if image_key and not normalized["image_base_url"]:
+        raise SkillError("image_base_url is required when an image key is configured")
+    if video_key and not normalized["sub2api_video_base_url"]:
+        raise SkillError("sub2api_video_base_url is required when a Sub2Api video key is configured")
+    if new_video_key and not normalized["newapi_video_base_url"]:
+        raise SkillError("newapi_video_base_url is required when a NewApi video key is configured")
     atomic_write_json(config_path(), normalized)
     if store_secrets:
-        if not quickai_image_key.strip() and not quickai_video_key.strip() and not quickainew_video_key.strip():
+        if not image_key and not video_key and not new_video_key:
             raise SkillError("at least one provider key is required")
         secret_payload = json.dumps(
             {
                 "version": 2,
-                "quickai_image_key": quickai_image_key.strip(),
-                "quickai_video_key": quickai_video_key.strip(),
-                "quickainew_video_key": quickainew_video_key.strip(),
+                "sub2api_image_key": image_key,
+                "sub2api_video_key": video_key,
+                "newapi_video_key": new_video_key,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -297,15 +311,58 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     config = read_json(path)
     if config.get("version") not in {1, 2, CONFIG_VERSION}:
         raise SkillError("unsupported configuration version")
+    legacy_config_fields = {
+        "quickai_base_url",
+        "quickainew_base_url",
+        "quickai_key",
+        "quickainew_key",
+        "quickai_image_key",
+        "quickai_video_key",
+        "quickainew_video_key",
+    }
+    allow_legacy_config_migration = config.get("version") != CONFIG_VERSION or any(
+        field in config for field in legacy_config_fields
+    )
+
+    def configured_url(current_name: str, *legacy_names: str) -> str:
+        names = (current_name, *legacy_names) if allow_legacy_config_migration else (current_name,)
+        for name in names:
+            value = str(config.get(name, "")).strip()
+            if value:
+                try:
+                    return normalize_base_url(value)
+                except SkillError:
+                    # A retired legacy URL must not prevent the skill from
+                    # starting. Ignore it and require a current user URL.
+                    if name != current_name:
+                        continue
+                    raise
+        return ""
+
+    # The first names are the current schema. The remaining URL aliases below
+    # are read only to migrate older local config files; save_settings never writes them.
     result = {
         "version": CONFIG_VERSION,
-        "quickai_base_url": normalize_base_url(str(config.get("quickai_base_url", ""))),
-        "quickainew_base_url": normalize_base_url(str(config.get("quickainew_base_url", ""))),
+        "image_base_url": configured_url("image_base_url", "image_api_url", "sub2api_base_url", "quickai_base_url"),
+        "sub2api_video_base_url": configured_url("sub2api_video_base_url", "video_base_url", "sub2api_base_url", "quickai_base_url"),
+        "newapi_video_base_url": configured_url("newapi_video_base_url", "newapi_base_url", "quickainew_base_url"),
         "image_model": str(config.get("image_model", "")).strip(),
         "video_model": str(config.get("video_model", "")).strip(),
-        "default_video_provider": str(config.get("default_video_provider", "quickai")).strip() or "quickai",
+        "default_video_provider": str(config.get("default_video_provider", "sub2api")).strip() or "sub2api",
         "secret_provider": str(config.get("secret_provider", "")),
     }
+    for key, environment_name in (
+        ("image_base_url", "GVS_IMAGE_API_URL"),
+        ("sub2api_video_base_url", "GVS_VIDEO_API_URL"),
+        ("newapi_video_base_url", "GVS_NEWAPI_VIDEO_URL"),
+    ):
+        override = os.environ.get(environment_name, "").strip()
+        if override:
+            result[key] = normalize_base_url(override)
+    if result["default_video_provider"] == "quickai":
+        result["default_video_provider"] = "sub2api"
+    elif result["default_video_provider"] == "quickainew":
+        result["default_video_provider"] = "newapi"
     stored: dict[str, Any] = {}
     if secrets_path().is_file():
         try:
@@ -314,34 +371,56 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
                 stored = stored_value
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
             raise SkillError("encrypted secret file is invalid") from error
-    legacy_quickai = os.environ.get("GVS_QUICKAI_KEY", "").strip() or str(stored.get("quickai_key", "")).strip()
-    legacy_quickainew = os.environ.get("GVS_QUICKAINEW_KEY", "").strip() or str(stored.get("quickainew_key", "")).strip()
-    result["quickai_image_key"] = (
-        os.environ.get("GVS_QUICKAI_IMAGE_KEY", "").strip()
-        or os.environ.get("QUICKAI_IMAGE_API_KEY", "").strip()
-        or str(stored.get("quickai_image_key", "")).strip()
-        or legacy_quickai
+    # Read legacy secrets only when the encrypted payload has no current role
+    # fields. New configuration never writes or advertises these names.
+    current_secret_fields = {"sub2api_image_key", "sub2api_video_key", "newapi_video_key"}
+    allow_legacy_secret_migration = not any(field in stored for field in current_secret_fields)
+    legacy_sub2api = str(stored.get("quickai_key", "")).strip() if allow_legacy_secret_migration else ""
+    legacy_newapi = str(stored.get("quickainew_key", "")).strip() if allow_legacy_secret_migration else ""
+    result["sub2api_image_key"] = (
+        os.environ.get("GVS_IMAGE_API_KEY", "").strip()
+        or os.environ.get("GVS_SUB2API_IMAGE_KEY", "").strip()
+        or str(stored.get("sub2api_image_key", "")).strip()
+        or (str(stored.get("quickai_image_key", "")).strip() if allow_legacy_secret_migration else "")
     )
-    result["quickai_video_key"] = (
-        os.environ.get("GVS_QUICKAI_VIDEO_KEY", "").strip()
-        or os.environ.get("QUICKAI_VIDEO_API_KEY", "").strip()
-        or str(stored.get("quickai_video_key", "")).strip()
-        or legacy_quickai
+    result["sub2api_video_key"] = (
+        os.environ.get("GVS_VIDEO_API_KEY", "").strip()
+        or os.environ.get("GVS_SUB2API_VIDEO_KEY", "").strip()
+        or str(stored.get("sub2api_video_key", "")).strip()
+        or (str(stored.get("quickai_video_key", "")).strip() if allow_legacy_secret_migration else "")
     )
-    result["quickainew_video_key"] = (
-        os.environ.get("GVS_QUICKAINEW_VIDEO_KEY", "").strip()
-        or os.environ.get("QUICKAI_NEW_VIDEO_API_KEY", "").strip()
-        or str(stored.get("quickainew_video_key", "")).strip()
-        or legacy_quickainew
+    result["newapi_video_key"] = (
+        os.environ.get("GVS_NEWAPI_VIDEO_KEY", "").strip()
+        or str(stored.get("newapi_video_key", "")).strip()
+        or (str(stored.get("quickainew_video_key", "")).strip() if allow_legacy_secret_migration else "")
     )
-    # Deprecated aliases keep older callers and installations compatible.
-    result["quickai_key"] = result["quickai_image_key"]
-    result["quickainew_key"] = result["quickainew_video_key"]
-    if require_secrets and not any(
-        result[name] for name in ("quickai_image_key", "quickai_video_key", "quickainew_video_key")
-    ):
+    sub2api_key = (
+        os.environ.get("GVS_SUB2API_KEY", "").strip()
+        or str(stored.get("sub2api_key", "")).strip()
+        or legacy_sub2api
+    )
+    newapi_key = (
+        os.environ.get("GVS_NEWAPI_KEY", "").strip()
+        or str(stored.get("newapi_key", "")).strip()
+        or legacy_newapi
+    )
+    if not result["sub2api_image_key"]:
+        result["sub2api_image_key"] = sub2api_key
+    if not result["sub2api_video_key"]:
+        result["sub2api_video_key"] = sub2api_key
+    if not result["newapi_video_key"]:
+        result["newapi_video_key"] = newapi_key
+    required_urls = (
+        ("sub2api_image_key", "image_base_url", "image_base_url"),
+        ("sub2api_video_key", "sub2api_video_base_url", "sub2api_video_base_url"),
+        ("newapi_video_key", "newapi_video_base_url", "newapi_video_base_url"),
+    )
+    for key_name, url_name, label in required_urls:
+        if result[key_name] and not result[url_name]:
+            raise SkillError(f"{label} is required when {key_name} is configured")
+    if require_secrets and not any(result[name] for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")):
         raise SkillError(
-            "provider keys are unavailable; run configure or set a GVS_QUICKAI_*_KEY or GVS_QUICKAINEW_VIDEO_KEY"
+            "provider keys are unavailable; run configure or set GVS_IMAGE_API_KEY, GVS_VIDEO_API_KEY, or GVS_NEWAPI_VIDEO_KEY"
         )
     return result
 

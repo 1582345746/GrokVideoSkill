@@ -9,7 +9,7 @@ Product route is separate from workflow. The four routes are text-to-video, imag
 | ID | Title | Primary input |
 | --- | --- | --- |
 | `general-video` | 通用视频项目 | Goal, optional references |
-| `text-to-video` | 文生视频 | Text; defaults to QuickAI JSON with no reference images |
+| `text-to-video` | 文生视频 | Text; defaults to Sub2Api JSON with no reference images |
 | `single-image-animation` | 单图动画 | One image |
 | `character-consistent-story` | 角色一致性故事 | One single-sheet character master |
 | `dance-performance` | 人物跳舞与表演 | One person image |
@@ -21,7 +21,7 @@ Product route is separate from workflow. The four routes are text-to-video, imag
 
 For character workflows, create one master sheet image containing the same character's front, side, and back or full-body views. Use that sheet only to derive per-shot keyframes. Send the current shot keyframe, not the multi-view sheet, to image-to-video.
 
-`single-image-animation` is an internal I2V preset. It defaults to `generate_image=false`: put the supplied file in `video_references`. It does not need the QuickAI image credential. `character-consistent-story` derives keyframes and therefore needs the image credential. A series can reuse one master per character across all episodes; see `series-schema.md`.
+`single-image-animation` is an internal I2V preset. It defaults to `generate_image=false`: put the supplied file in `video_references`. It does not need the Sub2Api image credential. `character-consistent-story` derives keyframes and therefore needs the image credential. A series can reuse one master per character across all episodes; see `series-schema.md`.
 
 `news-video` is initialized with `news-init`, not plain `init`. Codex must browse current sources and complete `news.json`; generation is blocked until `news-validate` passes. See `news-schema.md`.
 

@@ -69,6 +69,24 @@ from provider_contracts import (  # noqa: E402
 
 
 class ProviderContractTests(unittest.TestCase):
+    def test_credential_payload_keeps_roles_separate_and_preserves_disabled_roles(self) -> None:
+        for image_field, video_field, new_field, shared_field in (
+            ("sub2api_image_key", "sub2api_video_key", "newapi_video_key", "sub2api_key"),
+            ("image_api_key", "video_api_key", "newapi_video_key", "sub2api_key"),
+            ("quickai_image_key", "quickai_video_key", "quickainew_video_key", "quickai_key"),
+        ):
+            cases = (
+                ({image_field: "image-only"}, ("image-only", "", "", "")),
+                ({video_field: "video-only"}, ("", "video-only", "", "")),
+                ({new_field: "new-only"}, ("", "", "new-only", "")),
+                ({shared_field: "shared", image_field: ""}, ("", "shared", "", "shared")),
+                ({shared_field: "shared", video_field: ""}, ("shared", "", "", "shared")),
+            )
+            for payload, expected in cases:
+                with self.subTest(fields=list(payload)):
+                    with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload) + "\n")):
+                        self.assertEqual(gvs.read_credentials_payload(), expected)
+
     def test_dialogue_and_subtitle_outputs_force_standard_audio_format(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -156,17 +174,17 @@ class ProviderContractTests(unittest.TestCase):
                     self.assertTrue(is_completed(payload))
 
     def test_provider_capabilities_and_failover_classification(self) -> None:
-        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].text_to_image)
-        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].text_to_video)
-        self.assertTrue(PROVIDER_CAPABILITIES["quickai"].image_to_video)
-        self.assertFalse(PROVIDER_CAPABILITIES["quickainew"].text_to_image)
-        self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].text_to_video)
-        self.assertTrue(PROVIDER_CAPABILITIES["quickainew"].image_to_video)
-        self.assertFalse(PROVIDER_CAPABILITIES["quickai"].video_reference)
-        self.assertFalse(PROVIDER_CAPABILITIES["quickainew"].video_reference)
-        self.assertEqual(PROVIDER_CAPABILITIES["quickai"].audio_generation, "model_default")
-        self.assertEqual(PROVIDER_CAPABILITIES["quickainew"].audio_generation, "explicit_generate_audio")
-        self.assertLess(PROVIDER_CAPABILITIES["quickai"].priority, PROVIDER_CAPABILITIES["quickainew"].priority)
+        self.assertTrue(PROVIDER_CAPABILITIES["sub2api"].text_to_image)
+        self.assertTrue(PROVIDER_CAPABILITIES["sub2api"].text_to_video)
+        self.assertTrue(PROVIDER_CAPABILITIES["sub2api"].image_to_video)
+        self.assertFalse(PROVIDER_CAPABILITIES["newapi"].text_to_image)
+        self.assertTrue(PROVIDER_CAPABILITIES["newapi"].text_to_video)
+        self.assertTrue(PROVIDER_CAPABILITIES["newapi"].image_to_video)
+        self.assertFalse(PROVIDER_CAPABILITIES["sub2api"].video_reference)
+        self.assertFalse(PROVIDER_CAPABILITIES["newapi"].video_reference)
+        self.assertEqual(PROVIDER_CAPABILITIES["sub2api"].audio_generation, "model_default")
+        self.assertEqual(PROVIDER_CAPABILITIES["newapi"].audio_generation, "explicit_generate_audio")
+        self.assertLess(PROVIDER_CAPABILITIES["sub2api"].priority, PROVIDER_CAPABILITIES["newapi"].priority)
 
         unsupported = APIError(404, "unsupported endpoint")
         ambiguous = APIError(502, "gateway timed out")
@@ -502,8 +520,9 @@ class SkillIntegrationTests(unittest.TestCase):
             json.dumps(
                 {
                     "version": 1,
-                    "quickai_base_url": self.base_url,
-                    "quickainew_base_url": self.base_url,
+                    "image_base_url": self.base_url,
+                    "sub2api_video_base_url": self.base_url,
+                    "newapi_video_base_url": self.base_url,
                     "image_model": "gpt-image-2",
                     "video_model": "grok-imagine-video-1.5",
                     "secret_provider": "environment",
@@ -512,7 +531,13 @@ class SkillIntegrationTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.env = os.environ.copy()
-        self.env.update({"GVS_CONFIG_DIR": str(self.config_dir), "GVS_QUICKAI_KEY": "test-image-key", "GVS_QUICKAINEW_KEY": "test-video-key", "PYTHONUTF8": "1"})
+        self.env.update({
+            "GVS_CONFIG_DIR": str(self.config_dir),
+            "GVS_IMAGE_API_KEY": "test-image-key",
+            "GVS_VIDEO_API_KEY": "test-video-key",
+            "GVS_NEWAPI_VIDEO_KEY": "test-newapi-video-key",
+            "PYTHONUTF8": "1",
+        })
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -588,13 +613,13 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5（按次）"]
         doctor = self.run_cli("doctor")
         self.assertTrue(doctor["ok"])
-        self.assertEqual(doctor["providers"]["quickainew_video"]["matched_model"], "grok-imagine-video-1.5（按次）")
+        self.assertEqual(doctor["providers"]["newapi_video"]["matched_model"], "grok-imagine-video-1.5（按次）")
 
         FakeProviderHandler.model_ids = ["gpt-image-2", "prefix-grok-imagine-video-1.5-other"]
         blocked = self.run_cli("doctor", expected=1)
-        self.assertFalse(blocked["providers"]["quickainew_video"]["model_present"])
+        self.assertFalse(blocked["providers"]["newapi_video"]["model_present"])
 
-    def test_multiple_video_references_use_quickai_reference_array(self) -> None:
+    def test_multiple_video_references_use_sub2api_reference_array(self) -> None:
         project = self.root / "multi"
         refs = []
         for index in (1, 2):
@@ -610,8 +635,8 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(len(references), 2)
         self.assertTrue(all(str(item["url"]).startswith("data:image/png;base64,") for item in references))
 
-    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for QuickAI I2V image normalization")
-    def test_quickai_valid_png_reference_is_normalized_to_jpeg(self) -> None:
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required for Sub2Api I2V image normalization")
+    def test_sub2api_valid_png_reference_is_normalized_to_jpeg(self) -> None:
         project = self.root / "valid-reference"
         project = self.create_project("valid-reference", generate_image=False, references=["assets/references/reference.png"])
         reference = project / "assets" / "references" / "reference.png"
@@ -1477,7 +1502,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue((project / video["path"]).is_file())
 
     def test_terminal_failed_task_requires_explicit_retry_authorization(self) -> None:
-        self.env.update({"GVS_QUICKAINEW_KEY": "", "GVS_QUICKAINEW_VIDEO_KEY": ""})
+        self.env.update({"GVS_NEWAPI_VIDEO_KEY": ""})
         project = self.create_project("terminal-failure", generate_image=False)
         FakeProviderHandler.video_status = "failed"
 
@@ -1515,24 +1540,24 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(video["previous_task_id"], "task-1")
         self.assertEqual(video["history"][-1]["reason"], "terminal provider failure confirmed")
 
-    def test_quickai_terminal_failure_fails_over_to_quickainew(self) -> None:
+    def test_sub2api_terminal_failure_fails_over_to_newapi(self) -> None:
         project = self.create_project("provider-failover", generate_image=False)
         FakeProviderHandler.json_video_status = "failed"
         FakeProviderHandler.multipart_video_status = "completed"
         result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
-        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "newapi"})
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         video = state["shots"]["shot-001"]["video"]
         attempts = video["provider_attempts"]
-        self.assertEqual([item["provider"] for item in attempts], ["quickai", "quickainew"])
+        self.assertEqual([item["provider"] for item in attempts], ["sub2api", "newapi"])
         self.assertEqual(attempts[0]["error_category"], "provider_task_failed")
         self.assertEqual(attempts[1]["status"], "completed")
         self.assertEqual(len({item["request_id"] for item in attempts}), 1)
         self.assertEqual(len({item["attempt_id"] for item in attempts}), 2)
-        self.assertEqual(video["final_provider"], "quickainew")
+        self.assertEqual(video["final_provider"], "newapi")
         self.assertEqual(state["budget_usage"]["video_attempts"], 2)
 
     def test_content_rejection_does_not_fail_over(self) -> None:
@@ -1550,7 +1575,7 @@ class SkillIntegrationTests(unittest.TestCase):
         project = self.create_project("rate-limit-failover", generate_image=False)
         FakeProviderHandler.json_video_create_status = 429
         result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5")
-        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(result["videos"]["final_providers"], {"shot-001": "newapi"})
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
@@ -1832,11 +1857,11 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertIn('health_by_provider[selected_provider] = tts.health()', source)
         self.assertIn("is unavailable and dialogue line", source)
 
-    def test_native_dialogue_adds_exact_prompt_without_nonstandard_quickai_flag(self) -> None:
+    def test_native_dialogue_adds_exact_prompt_without_nonstandard_sub2api_flag(self) -> None:
         project = self.create_project("native-dialogue", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         value["video_mode"] = "text-to-video"
-        value["video_provider"] = "quickai"
+        value["video_provider"] = "sub2api"
         value["characters"] = [{"id": "lead", "name": "Lead", "identity": "An original AI person.", "references": []}]
         value["shots"][0]["character_ids"] = ["lead"]
         value["shots"][0]["dialogue"] = [
@@ -1857,7 +1882,7 @@ class SkillIntegrationTests(unittest.TestCase):
         text_video_secret = "private-text-video-value"
         image_video_secret = "private-image-video-value"
         environment = self.env.copy()
-        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
+        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_IMAGE_API_KEY": "", "GVS_VIDEO_API_KEY": "", "GVS_NEWAPI_VIDEO_KEY": ""})
         result = subprocess.run(
             [
                 sys.executable,
@@ -1865,16 +1890,18 @@ class SkillIntegrationTests(unittest.TestCase):
                 "configure",
                 "--credentials-stdin",
                 "--skip-test",
-                "--quickai-base-url",
+                "--image-base-url",
                 self.base_url,
-                "--quickainew-base-url",
+                "--sub2api-video-base-url",
+                self.base_url,
+                "--newapi-video-base-url",
                 self.base_url,
             ],
             input=json.dumps(
                 {
-                    "quickai_image_key": image_secret,
-                    "quickai_video_key": text_video_secret,
-                    "quickainew_video_key": image_video_secret,
+                    "sub2api_image_key": image_secret,
+                    "sub2api_video_key": text_video_secret,
+                    "newapi_video_key": image_video_secret,
                 }
             ) + "\n",
             env=environment,
@@ -1894,17 +1921,51 @@ class SkillIntegrationTests(unittest.TestCase):
             self.assertNotIn(text_video_secret.encode(), config_bytes + secret_bytes)
             self.assertNotIn(image_video_secret.encode(), config_bytes + secret_bytes)
             loaded = load_settings()
-            self.assertEqual(loaded["quickai_image_key"], image_secret)
-            self.assertEqual(loaded["quickai_video_key"], text_video_secret)
-            self.assertEqual(loaded["quickainew_video_key"], image_video_secret)
+            self.assertEqual(loaded["sub2api_image_key"], image_secret)
+            self.assertEqual(loaded["sub2api_video_key"], text_video_secret)
+            self.assertEqual(loaded["newapi_video_key"], image_video_secret)
+
+    @unittest.skipUnless(os.name == "nt", "Windows DPAPI test")
+    def test_single_role_configuration_needs_only_its_own_url(self) -> None:
+        roles = (
+            ("sub2api_image_key", "--image-base-url", "image_base_url", "sub2api"),
+            ("sub2api_video_key", "--sub2api-video-base-url", "sub2api_video_base_url", "sub2api"),
+            ("newapi_video_key", "--newapi-video-base-url", "newapi_video_base_url", "newapi"),
+        )
+        for role, option, url_field, provider in roles:
+            with self.subTest(role=role):
+                environment = {"GVS_CONFIG_DIR": str(self.root / role)}
+                args = gvs.build_parser().parse_args([
+                    "configure", "--credentials-stdin", "--skip-test", option, self.base_url,
+                ])
+                with (
+                    mock.patch.dict(os.environ, environment, clear=True),
+                    mock.patch.object(sys, "stdin", io.StringIO(json.dumps({role: "isolated-role-key"}) + "\n")),
+                ):
+                    gvs.configure(args)
+                    loaded = load_settings()
+                self.assertEqual(loaded["default_video_provider"], provider)
+                for other_role, _, other_url, _ in roles:
+                    self.assertEqual(loaded[other_role], "isolated-role-key" if other_role == role else "")
+                    self.assertEqual(loaded[other_url], self.base_url if other_url == url_field else "")
 
     def test_credentials_stdin_accepts_single_provider_key(self) -> None:
         secure_dir = self.root / "invalid-config"
         environment = self.env.copy()
-        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_QUICKAI_KEY": "", "GVS_QUICKAINEW_KEY": ""})
+        environment.update({"GVS_CONFIG_DIR": str(secure_dir), "GVS_IMAGE_API_KEY": "", "GVS_VIDEO_API_KEY": "", "GVS_NEWAPI_VIDEO_KEY": ""})
         result = subprocess.run(
-            [sys.executable, str(CLI), "configure", "--credentials-stdin", "--skip-test"],
-            input='{"quickai_key":"only-one-key"}\n',
+            [
+                sys.executable,
+                str(CLI),
+                "configure",
+                "--credentials-stdin",
+                "--skip-test",
+                "--image-base-url",
+                self.base_url,
+                "--sub2api-video-base-url",
+                self.base_url,
+            ],
+            input='{"sub2api_key":"only-one-key"}\n',
             env=environment,
             capture_output=True,
             text=True,
@@ -1918,7 +1979,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((secure_dir / "config.json").exists())
 
-    def test_text_to_video_uses_quickai_json_without_references(self) -> None:
+    def test_text_to_video_uses_sub2api_json_without_references(self) -> None:
         project = self.root / "t2v"
         self.run_cli(
             "init", str(project), "--title", "T2V", "--topic", "Text", "--workflow", "text-to-video",
@@ -1942,14 +2003,14 @@ class SkillIntegrationTests(unittest.TestCase):
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         video_state = state["shots"]["shot-001"]["video"]
         self.assertEqual(video_state["mode"], "text-to-video")
-        self.assertEqual(video_state["provider"], "quickai")
+        self.assertEqual(video_state["provider"], "sub2api")
         self.assertEqual(video_state["resolution"], "480p")
 
-    def test_quickainew_text_to_video_has_no_input_reference(self) -> None:
+    def test_newapi_text_to_video_has_no_input_reference(self) -> None:
         project = self.create_project("new-t2v", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))
         value["video_mode"] = "text-to-video"
-        value["video_provider"] = "quickainew"
+        value["video_provider"] = "newapi"
         value["shots"][0]["video_resolution"] = "720p"
         value["shots"][0]["video_aspect_ratio"] = "16:9"
         (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
@@ -2032,28 +2093,28 @@ class SkillIntegrationTests(unittest.TestCase):
             "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
         )
         default_value = json.loads((default_project / "project.json").read_text(encoding="utf-8"))
-        self.assertEqual(default_value["video_provider"], "quickai")
+        self.assertEqual(default_value["video_provider"], "sub2api")
         self.assertEqual(default_value["video_provider_policy"], "automatic")
 
         explicit_new = self.root / "explicit-new"
         self.run_cli(
             "init", str(explicit_new), "--title", "New", "--topic", "Provider",
             "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
-            "--video-provider", "quickainew",
+            "--video-provider", "newapi",
         )
         new_value = json.loads((explicit_new / "project.json").read_text(encoding="utf-8"))
-        self.assertEqual(new_value["video_provider"], "quickainew")
+        self.assertEqual(new_value["video_provider"], "newapi")
         self.assertEqual(new_value["video_provider_policy"], "fixed")
-        new_value["story"] = "The user explicitly selected QuickAI New."
+        new_value["story"] = "The user explicitly selected NewApi."
         new_value["shots"][0]["video_prompt"] = "A white paper plane crosses a clear blue sky."
         (explicit_new / "project.json").write_text(json.dumps(new_value), encoding="utf-8")
         generated = self.run_cli("generate-videos", str(explicit_new), "--poll-timeout", "5")
-        self.assertEqual(generated["videos"]["final_providers"], {"shot-001": "quickainew"})
+        self.assertEqual(generated["videos"]["final_providers"], {"shot-001": "newapi"})
         self.assertEqual(FakeProviderHandler.json_video_creates, 0)
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
         config = json.loads((self.config_dir / "config.json").read_text(encoding="utf-8"))
-        config["default_video_provider"] = "quickainew"
+        config["default_video_provider"] = "newapi"
         (self.config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
         saved_default = self.root / "saved-new-default"
         self.run_cli(
@@ -2061,18 +2122,18 @@ class SkillIntegrationTests(unittest.TestCase):
             "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
         )
         saved_value = json.loads((saved_default / "project.json").read_text(encoding="utf-8"))
-        self.assertEqual(saved_value["video_provider"], "quickainew")
+        self.assertEqual(saved_value["video_provider"], "newapi")
         self.assertEqual(saved_value["video_provider_policy"], "fixed")
 
-        explicit_quickai = self.root / "explicit-quickai"
+        explicit_sub2api = self.root / "explicit-sub2api"
         self.run_cli(
-            "init", str(explicit_quickai), "--title", "QuickAI", "--topic", "Provider",
+            "init", str(explicit_sub2api), "--title", "Sub2Api", "--topic", "Provider",
             "--workflow", "text-to-video", "--shots", "1", "--seconds", "1",
-            "--video-provider", "quickai",
+            "--video-provider", "sub2api",
         )
-        quickai_value = json.loads((explicit_quickai / "project.json").read_text(encoding="utf-8"))
-        self.assertEqual(quickai_value["video_provider"], "quickai")
-        self.assertEqual(quickai_value["video_provider_policy"], "fixed")
+        sub2api_value = json.loads((explicit_sub2api / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(sub2api_value["video_provider"], "sub2api")
+        self.assertEqual(sub2api_value["video_provider_policy"], "fixed")
 
     def test_init_can_inherit_user_facing_install_profile(self) -> None:
         project = self.root / "profile-contract"
@@ -2704,9 +2765,9 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_role_specific_credentials_do_not_cross_generation_routes(self) -> None:
         self.env.update(
             {
-                "GVS_QUICKAI_IMAGE_KEY": "image-role-key",
-                "GVS_QUICKAI_VIDEO_KEY": "text-video-role-key",
-                "GVS_QUICKAINEW_VIDEO_KEY": "image-video-role-key",
+                "GVS_IMAGE_API_KEY": "image-role-key",
+                "GVS_VIDEO_API_KEY": "text-video-role-key",
+                "GVS_NEWAPI_VIDEO_KEY": "image-video-role-key",
             }
         )
         image_project = self.create_project("role-image")
@@ -2741,7 +2802,7 @@ class SkillIntegrationTests(unittest.TestCase):
 
         new_project = self.create_project("role-explicit-new", generate_image=False)
         new_value = json.loads((new_project / "project.json").read_text(encoding="utf-8"))
-        new_value["video_provider"] = "quickainew"
+        new_value["video_provider"] = "newapi"
         (new_project / "project.json").write_text(json.dumps(new_value), encoding="utf-8")
         self.run_cli("generate-videos", str(new_project), "--poll-timeout", "5")
         self.assertEqual(FakeProviderHandler.multipart_video_authorization, "Bearer image-video-role-key")
@@ -2750,11 +2811,9 @@ class SkillIntegrationTests(unittest.TestCase):
     def test_supplied_image_animation_does_not_require_an_image_key(self) -> None:
         self.env.update(
             {
-                "GVS_QUICKAI_KEY": "",
-                "GVS_QUICKAI_IMAGE_KEY": "",
-                "GVS_QUICKAI_VIDEO_KEY": "",
-                "GVS_QUICKAINEW_KEY": "",
-                "GVS_QUICKAINEW_VIDEO_KEY": "only-image-to-video-key",
+                "GVS_IMAGE_API_KEY": "",
+                "GVS_VIDEO_API_KEY": "",
+                "GVS_NEWAPI_VIDEO_KEY": "only-image-to-video-key",
             }
         )
         project = self.root / "supplied-image"

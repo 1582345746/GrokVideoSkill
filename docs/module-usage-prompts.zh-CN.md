@@ -8,7 +8,7 @@
 
 ## 先说清楚四个产品路线
 
-| 需求 | 使用入口 | 是否需要 QuickAI 生图 Key |
+| 需求 | 使用入口 | 是否需要 Sub2Api 生图 Key |
 | --- | --- | --- |
 | 没有参考图，直接描述画面 | `init --mode text-to-video` | 否 |
 | 已有一张图片，直接让图片动起来 | `init --mode image-to-video` + `single-image-animation` | 否 |
@@ -36,30 +36,30 @@
 
 ## 上游选择话术
 
-### 默认 QuickAI
+### 默认 Sub2Api
 
 ```text
-使用 $grok-video-studio 制作 <主题>。生视频上游不特别指定，按默认规则优先 QuickAI；只有明确属于安全失败的情况才允许在总尝试次数内使用 QuickAI New。先展示路线、分镜、最终提示词、请求数量、预算和预检结果，不要立即创建任务。
+使用 $grok-video-studio 制作 <主题>。生视频上游不特别指定，按默认规则优先 Sub2Api；只有明确属于安全失败的情况才允许在总尝试次数内使用 NewApi。先展示路线、分镜、最终提示词、请求数量、预算和预检结果，不要立即创建任务。
 ```
 
-### 固定 QuickAI New
+### 固定 NewApi
 
 ```text
-使用 $grok-video-studio 制作 <主题>，生视频选择 QuickAI New。
-文生视频和图生视频都必须固定直连 QuickAI New，不先调用 QuickAI，也不自动切换其他视频上游。项目中保存 video_provider=quickainew、video_provider_policy=fixed。先预检并等待我批准，再创建任务。
+使用 $grok-video-studio 制作 <主题>，生视频选择 NewApi。
+文生视频和图生视频都必须固定直连 NewApi，不先调用 Sub2Api，也不自动切换其他视频上游。项目中保存 video_provider=newapi、video_provider_policy=fixed。先预检并等待我批准，再创建任务。
 ```
 
-### 固定 QuickAI
+### 固定 Sub2Api
 
 ```text
-使用 $grok-video-studio 制作 <主题>，生视频固定选择 QuickAI。
-文生视频和图生视频都不要回退到 QuickAI New。失败时保留 state.json、错误分类和任务状态，除非我明确批准新的重试，否则不要创建替代任务。
+使用 $grok-video-studio 制作 <主题>，生视频固定选择 Sub2Api。
+文生视频和图生视频都不要回退到 NewApi。失败时保留 state.json、错误分类和任务状态，除非我明确批准新的重试，否则不要创建替代任务。
 ```
 
 ### 明确要求自动备用
 
 ```text
-使用 $grok-video-studio 制作 <主题>，允许 QuickAI 优先、QuickAI New 安全备用。
+使用 $grok-video-studio 制作 <主题>，允许 Sub2Api 优先、NewApi 安全备用。
 只有在上游明确拒绝且没有任务 ID、或已知任务进入终态失败时才允许切换；网络超时、5xx、提交结果不明和轮询超时都不能自动创建第二个任务。备用调用计入总尝试次数。
 ```
 
@@ -71,7 +71,7 @@
 请从 main 分支安装 Grok Video Studio：
 仓库：https://github.com/1582345746/GrokVideoSkill.git
 
-请使用 upstream-dialogue 档位。通过受管进程标准输入配置 QuickAI 生图 Key、QuickAI 视频 Key（T2V/I2V）、QuickAI New 视频 Key；Windows 使用 DPAPI 保存。Key 不得出现在命令行、项目文件、日志、源码或终端输出中。
+请使用 upstream-dialogue 档位。通过受管进程标准输入配置 Sub2Api 生图 Key、Sub2Api 视频 Key（T2V/I2V）、NewApi 视频 Key；Windows 使用 DPAPI 保存。Key 不得出现在命令行、项目文件、日志、源码或终端输出中。
 安装后运行 version、install.ps1 -Check、doctor、capabilities、chatcut-capabilities 和 install-plan --profile upstream-dialogue。不要发起付费生成，不要下载或启动 Voicebox、CosyVoice、MuseTalk、Docker 镜像或模型。
 ```
 
@@ -92,7 +92,7 @@
 ### 只读诊断
 
 ```text
-对当前 Grok Video Studio 做只读诊断：运行 version、capabilities、install-plan --profile upstream-dialogue、doctor 和 install.ps1 -Check。报告版本、默认视频上游、QuickAI/QuickAI New 的 T2V/I2V 能力、三个凭据职责、FFmpeg、可选组件状态和缺失依赖。不要输出 Key，不创建项目，不发起生成请求。
+对当前 Grok Video Studio 做只读诊断：运行 version、capabilities、install-plan --profile upstream-dialogue、doctor 和 install.ps1 -Check。报告版本、默认视频上游、Sub2Api/NewApi 的 T2V/I2V 能力、三个凭据职责、FFmpeg、可选组件状态和缺失依赖。不要输出 Key，不创建项目，不发起生成请求。
 ```
 
 ## 产品路线话术
@@ -115,7 +115,7 @@
 
 ```text
 使用 $grok-video-studio 为 <主题> 做 <镜头数> 个图生视频镜头。
-先用 QuickAI 生图，每个镜头单独生成关键帧；不要把多视图角色母版直接发送给视频模型。每张关键帧生成后暂停，展示图片、哈希、提示词版本和费用，等我接受后锁定。全部关键帧接受后，再按 <QuickAI/QuickAI New/自动备用> 逐镜头生成视频。每个视频请求只发送当前镜头关键帧。
+先用 Sub2Api 生图，每个镜头单独生成关键帧；不要把多视图角色母版直接发送给视频模型。每张关键帧生成后暂停，展示图片、哈希、提示词版本和费用，等我接受后锁定。全部关键帧接受后，再按 <Sub2Api/NewApi/自动备用> 逐镜头生成视频。每个视频请求只发送当前镜头关键帧。
 ```
 
 ### 角色母版
