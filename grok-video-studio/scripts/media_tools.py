@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -277,6 +278,118 @@ def detect_repeated_panel_layout(
     return {"detected": detected, "panel_count": panel_count if detected else 0, "samples": samples}
 
 
+def detect_tail_motion(
+    path: Path,
+    *,
+    scan_end: float | None = None,
+    tail_seconds: float = 0.8,
+    threshold: float = 0.012,
+) -> dict[str, Any]:
+    """Estimate whether the selected tail is visually settling into a pose.
+
+    This is intentionally a conservative signal for edit suggestions, not an
+    identity or acting classifier. A human review still decides whether the
+    proposed cut is musically and narratively correct.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or tail_seconds <= 0:
+        return {"available": False, "static": False, "motion_score": None, "tail_seconds": tail_seconds}
+    media = probe_media(path)
+    end = min(media["duration"], float(scan_end) if scan_end is not None else media["duration"])
+    start = max(0.0, end - float(tail_seconds))
+    if end <= start:
+        return {"available": False, "static": False, "motion_score": None, "tail_seconds": tail_seconds}
+    width, height = 32, 32
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-ss",
+            f"{start:.3f}",
+            "-t",
+            f"{end - start:.3f}",
+            "-i",
+            str(path),
+            "-vf",
+            f"fps=5,scale={width}:{height}:flags=area,format=gray",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "pipe:1",
+        ],
+        capture_output=True,
+        timeout=120,
+    )
+    frame_size = width * height
+    if result.returncode != 0 or len(result.stdout) < frame_size * 2:
+        return {"available": False, "static": False, "motion_score": None, "tail_seconds": tail_seconds}
+    frames = [result.stdout[index : index + frame_size] for index in range(0, len(result.stdout) - frame_size + 1, frame_size)]
+    differences = []
+    for previous, current in zip(frames, frames[1:]):
+        differences.append(sum(abs(int(a) - int(b)) for a, b in zip(previous, current)) / (frame_size * 255.0))
+    score = sum(differences) / len(differences) if differences else 0.0
+    return {
+        "available": True,
+        "static": score < float(threshold),
+        "motion_score": round(score, 5),
+        "tail_seconds": round(end - start, 3),
+        "threshold": float(threshold),
+        "sample_count": len(frames),
+    }
+
+
+def detect_text_overlay(
+    path: Path,
+    *,
+    scan_start: float = 0.0,
+    scan_end: float | None = None,
+    sample_count: int = 3,
+) -> dict[str, Any]:
+    """Use an installed Tesseract binary as a best-effort text signal.
+
+    OCR is optional because the base skill must remain usable without a local
+    OCR runtime. When unavailable, the report explicitly retains a human pixel
+    review requirement instead of claiming that the frame is clean.
+    """
+    tesseract = shutil.which("tesseract")
+    ffmpeg = shutil.which("ffmpeg")
+    if not tesseract or not ffmpeg:
+        return {"available": False, "detected": False, "samples": [], "reason": "tesseract_or_ffmpeg_not_found"}
+    media = probe_media(path)
+    start = max(0.0, float(scan_start))
+    end = min(media["duration"], float(scan_end) if scan_end is not None else media["duration"])
+    if end <= start:
+        return {"available": False, "detected": False, "samples": [], "reason": "invalid_scan_window"}
+    count = max(1, min(int(sample_count), 5))
+    positions = [start + (end - start) * fraction for fraction in ([0.2, 0.5, 0.8] if count == 3 else [index / max(1, count - 1) for index in range(count)])]
+    samples: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix=".gvs-ocr-") as temp_name:
+        root = Path(temp_name)
+        for index, at in enumerate(positions, 1):
+            image = root / f"frame-{index:02d}.png"
+            frame = subprocess.run(
+                [ffmpeg, "-y", "-hide_banner", "-loglevel", "error", "-ss", f"{at:.3f}", "-i", str(path), "-frames:v", "1", str(image)],
+                capture_output=True,
+                timeout=120,
+            )
+            if frame.returncode != 0 or not image.is_file():
+                continue
+            ocr = subprocess.run(
+                [tesseract, str(image), "stdout", "--psm", "11"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+            )
+            text = " ".join(line.strip() for line in (ocr.stdout or "").splitlines() if line.strip())
+            samples.append({"at_seconds": round(at, 3), "text": text[:300], "detected": len(re.sub(r"\s+", "", text)) >= 2})
+    return {"available": True, "detected": any(item["detected"] for item in samples), "samples": samples}
+
+
 def _atempo_chain(speed: float) -> str:
     if speed <= 0:
         raise SkillError("audio speed must be positive")
@@ -439,21 +552,53 @@ def quality_report(
     layout_is_error: bool = False,
     scan_start: float = 0.0,
     scan_end: float | None = None,
+    resolution_policy: str = "warn",
+    minimum_resolution_ratio: float = 0.75,
+    caption_detection: str = "off",
+    tail_guard_seconds: float = 0.0,
+    tail_motion_policy: str = "warn",
+    tail_motion_threshold: float = 0.012,
 ) -> dict[str, Any]:
     media = probe_media(path)
     errors: list[str] = []
     warnings: list[str] = []
+    if resolution_policy not in {"allow", "warn", "block"}:
+        raise SkillError("resolution_policy must be allow, warn, or block")
+    if caption_detection not in {"off", "warn", "block"}:
+        raise SkillError("caption_detection must be off, warn, or block")
+    if tail_motion_policy not in {"allow", "warn", "block"}:
+        raise SkillError("tail_motion_policy must be allow, warn, or block")
+    resolution_signal: dict[str, Any] = {"policy": resolution_policy, "minimum_ratio": minimum_resolution_ratio}
     if expected_size != "auto":
         if not SIZE_RE.fullmatch(expected_size):
             raise SkillError("expected size must be WIDTHxHEIGHT or auto")
         width, height = (int(value) for value in expected_size.split("x", 1))
-        if (media["width"], media["height"]) != (width, height):
-            expected_ratio = width / height
-            actual_ratio = media["width"] / media["height"]
+        actual_width = int(media["width"])
+        actual_height = int(media["height"])
+        expected_ratio = width / height
+        actual_ratio = actual_width / actual_height
+        scale_ratio = min(actual_width / width, actual_height / height)
+        resolution_signal.update(
+            {
+                "requested": {"width": width, "height": height},
+                "actual": {"width": actual_width, "height": actual_height},
+                "scale_ratio": round(scale_ratio, 4),
+                "degraded": scale_ratio < float(minimum_resolution_ratio),
+            }
+        )
+        if (actual_width, actual_height) != (width, height):
             if abs(expected_ratio - actual_ratio) / expected_ratio > 0.08:
-                errors.append(f"orientation or dimensions mismatch: expected {width}x{height}, got {media['width']}x{media['height']}")
+                errors.append(f"orientation or dimensions mismatch: expected {width}x{height}, got {actual_width}x{actual_height}")
             else:
-                warnings.append(f"provider scaled the requested frame: expected {width}x{height}, got {media['width']}x{media['height']}")
+                message = f"provider scaled the requested frame: expected {width}x{height}, got {actual_width}x{actual_height}"
+                if scale_ratio < float(minimum_resolution_ratio):
+                    message += f"; source resolution is below the {minimum_resolution_ratio:.0%} quality floor"
+                    if resolution_policy == "block":
+                        errors.append(message)
+                    elif resolution_policy == "warn":
+                        warnings.append(message)
+                elif resolution_policy != "allow":
+                    warnings.append(message)
     if expected_duration is not None and abs(media["duration"] - expected_duration) > max(1.5, expected_duration * 0.25):
         warnings.append(f"duration differs from request: expected about {expected_duration}s, got {media['duration']}s")
     if media["codec"] != "h264" or media["pixel_format"] != "yuv420p":
@@ -464,6 +609,8 @@ def quality_report(
     freeze_events: list[str] = []
     audio_signals: dict[str, Any] = {}
     repeated_panel_layout: dict[str, Any] = {"detected": False, "panel_count": 0, "samples": []}
+    tail_motion: dict[str, Any] = {"available": False, "static": False, "motion_score": None}
+    text_overlay: dict[str, Any] = {"available": False, "detected": False, "samples": []}
     if ffmpeg:
         scan_start = max(0.0, float(scan_start))
         scan_command = [ffmpeg, "-hide_banner", "-nostats"]
@@ -512,6 +659,29 @@ def quality_report(
                     (errors if layout_is_error else warnings).append(message)
             except SkillError as error:
                 warnings.append(f"frame layout analysis failed: {error}")
+        if tail_guard_seconds > 0:
+            tail_motion = detect_tail_motion(
+                path,
+                scan_end=scan_end,
+                tail_seconds=tail_guard_seconds,
+                threshold=tail_motion_threshold,
+            )
+            if tail_motion.get("static"):
+                suggestion = max(scan_start, (float(scan_end) if scan_end is not None else media["duration"]) - float(tail_guard_seconds))
+                message = f"tail motion settles below threshold; consider edit_out={suggestion:.3f}s"
+                if tail_motion_policy == "block":
+                    errors.append(message)
+                elif tail_motion_policy == "warn":
+                    warnings.append(message)
+                tail_motion["suggested_edit_out"] = round(suggestion, 3)
+        if caption_detection != "off":
+            text_overlay = detect_text_overlay(path, scan_start=scan_start, scan_end=scan_end)
+            if text_overlay.get("detected"):
+                message = "OCR detected visible text in the clean-frame scan; review for captions, logos, or watermarks"
+                if caption_detection == "block":
+                    errors.append(message)
+                else:
+                    warnings.append(message)
         if media["has_audio"]:
             try:
                 audio_signals = analyze_audio(path)
@@ -538,6 +708,9 @@ def quality_report(
             "black_events": black_events[:20],
             "freeze_events": freeze_events[:20],
             "repeated_panel_layout": repeated_panel_layout,
+            "resolution": resolution_signal,
+            "tail_motion": tail_motion,
+            "text_overlay": text_overlay,
             "audio": audio_signals,
         },
         "manual_review_required": [

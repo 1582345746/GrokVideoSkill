@@ -1,4 +1,4 @@
-# Error Matrix (v2.4.0 chatcut-adapter)
+# Error Matrix (v2.5.0 quality-continuity)
 
 | Symptom | Layer | Action |
 | --- | --- | --- |
@@ -30,6 +30,9 @@
 | User asks for a three-panel or split-screen shot | Project contract | Set `frame_layout` on the project or shot and `allow_multi_panel=true` only for that deliberate shot. Other shots remain `single-full-frame`; a multi-panel request is never a global default. |
 | QA orientation or dimensions mismatch | Provider output contract | Regenerate the affected shot or deliberately normalize it during assembly; review cropping before delivery. |
 | Resolution downgraded by upstream | Provider output contract | Record requested and observed resolution in state/QA; do not report it as an exact match. |
+| Quality policy blocks a low-resolution clip | Quality contract | Set `quality.resolution_policy=warn` only when an explicit downgrade is acceptable; otherwise regenerate at a supported upstream tier. |
+| Tail motion settles into a generic pose | Director/edit contract | Inspect `signals.tail_motion.suggested_edit_out`, update the shot edit window, and review the preceding action before delivery. |
+| OCR detects visible text in a clean frame | Visual QA | Inspect the cited samples for captions, logos, or watermarks; use `quality.caption_detection=block` for a hard gate. |
 | Final assembly has no audio | Local assembly policy | Keep `defaults.audio_policy=preserve`; assembly retains source audio and adds silent AAC to clips without audio. Use `mute` only intentionally. |
 | App controls, likes, comments, captions, or watermarks appear | Generative visual artifact | Keep `allow_ui_elements=false`, regenerate the affected shot, and inspect every exported QA review frame before delivery. Do not crop blindly when overlays cover story content. |
 | Character appearance changes between T2V shots | Model continuity limit | Use concise identity locks for best effort. For strict continuity, switch to image-to-video with one character master and a per-shot keyframe. |

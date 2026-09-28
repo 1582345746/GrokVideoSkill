@@ -1,0 +1,11 @@
+{
+  "id": "rural-market-conflict",
+  "title": "乡村交易冲突短剧",
+  "visual": "specific seasonal agriculture, tactile produce handling, clear village geography, stable vehicles and containers, and visible weather progression",
+  "performance": "price disagreement, persuasive public speech, divided witnesses, hesitation before an irreversible choice, consequence-driven anger, evidence reveal, and action that continues after the confrontation",
+  "camera": "establish the market space, alternate speaker and listener coverage, use price/produce/weather inserts as evidence, track the crowd's decision, then reveal the consequence and accountability",
+  "audio": "distinct village ambience, produce handling, vehicle movement, crowd overlap kept below the active speaker, restrained tension build, storm escalation, and a clean sound bridge across motivated cuts",
+  "story_structure": "price trigger -> higher bid -> wrong choice -> risk becomes visible -> transaction collapses -> evidence reveal -> group accountability -> continuing-action hook",
+  "asset_state": "Track vehicle color, crate count, produce condition, cash/deposit status, sky state, rain intensity, and each character's side of the negotiation across adjacent shots.",
+  "avoid": "generic shouting, unexplained price changes, crowd teleportation, changing vehicles or produce condition, weather arriving without a visible cause, instant moral resolution, and a final pose after the reveal"
+}

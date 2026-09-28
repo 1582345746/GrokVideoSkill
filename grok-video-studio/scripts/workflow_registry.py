@@ -34,6 +34,7 @@ GENRE_PACKS = {
     "comedy",
     "disaster",
     "rural",
+    "rural-market-conflict",
     "suspense",
 }
 

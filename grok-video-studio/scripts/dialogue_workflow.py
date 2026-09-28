@@ -18,6 +18,7 @@ from voice_contracts import canonical_voice_contract, duplicate_voice_errors, fi
 
 DIALOGUE_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
+SUBTITLE_DELIVERIES = {"none", "sidecar", "burn", "both"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -25,11 +26,16 @@ def audio_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("audio") if isinstance(project.get("audio"), dict) else {}
     mode = str(value.get("mode", "native-dialogue")).strip().lower()
     subtitle_source = str(value.get("subtitle_source", "none")).strip().lower() or "none"
+    subtitle_delivery = str(value.get("subtitle_delivery", "sidecar" if subtitle_source == "project" else "none")).strip().lower() or "none"
     return {
         "mode": mode,
         "subtitle_source": subtitle_source,
         "language": str(value.get("language", "zh-CN")).strip() or "zh-CN",
         "generate_audio": bool(value.get("generate_audio", mode == "native-dialogue")),
+        "generate_speech": bool(value.get("generate_speech", value.get("generate_audio", mode == "native-dialogue"))),
+        "subtitle_delivery": subtitle_delivery,
+        "burn_subtitles": bool(value.get("burn_subtitles", False)),
+        "allow_upstream_captions": bool(value.get("allow_upstream_captions", subtitle_source == "upstream")),
         "preserve_source_audio": bool(value.get("preserve_source_audio", True)),
         "duck_source_audio": bool(value.get("duck_source_audio", True)),
         "tts_provider": str(value.get("tts_provider", "cosyvoice")).strip().lower() or "cosyvoice",
@@ -63,16 +69,29 @@ def _seconds(project: dict[str, Any], shot: dict[str, Any]) -> float:
 def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     config = audio_config(project)
-    if project.get("audio") is not None and not isinstance(project.get("audio"), dict):
+    raw_audio = project.get("audio")
+    if raw_audio is not None and not isinstance(raw_audio, dict):
         errors.append("project.audio must be an object")
+        raw_audio = {}
+    for field in ("generate_speech", "burn_subtitles", "allow_upstream_captions"):
+        if field in raw_audio and not isinstance(raw_audio[field], bool):
+            errors.append(f"audio.{field} must be a boolean")
     if config["mode"] not in DIALOGUE_MODES:
         errors.append("audio.mode must be preserve, mute, native-dialogue, local-voice, or local-lipsync")
     if config["subtitle_source"] not in SUBTITLE_SOURCES:
         errors.append("audio.subtitle_source must be upstream, project, or none")
+    if config["subtitle_delivery"] not in SUBTITLE_DELIVERIES:
+        errors.append("audio.subtitle_delivery must be none, sidecar, burn, or both")
+    if config["subtitle_delivery"] in {"burn", "both"} and config["subtitle_source"] != "project":
+        errors.append("audio.subtitle_delivery burn/both requires audio.subtitle_source=project")
+    if config["subtitle_source"] == "none" and config["allow_upstream_captions"]:
+        errors.append("audio.allow_upstream_captions must be false when subtitle_source=none")
     if config["tts_provider"] not in {"cosyvoice", "voicebox", "voxcpm"}:
         errors.append("audio.tts_provider must be cosyvoice, voicebox, or voxcpm")
     if config["mode"] == "native-dialogue" and not config["generate_audio"]:
         errors.append("audio.generate_audio must be true for native-dialogue")
+    if config["mode"] == "native-dialogue" and not config["generate_speech"]:
+        errors.append("audio.generate_speech must be true for native-dialogue")
     if config["mode"] in {"mute", "local-voice", "local-lipsync"} and config["generate_audio"]:
         errors.append(f"audio.generate_audio must be false for {config['mode']}")
     characters = {
@@ -297,7 +316,26 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
                 "characters_per_second": round(density, 2),
             }
         )
-    return {"mode": audio_config(project)["mode"], "line_count": len(lines), "lines": items, "warnings": warnings}
+    config = audio_config(project)
+    return {
+        "mode": config["mode"],
+        "line_count": len(lines),
+        "lines": items,
+        "warnings": warnings,
+        "contract": {
+            "generate_speech": config["generate_speech"],
+            "subtitle_source": config["subtitle_source"],
+            "subtitle_delivery": config["subtitle_delivery"],
+            "burn_subtitles": config["burn_subtitles"],
+            "allow_upstream_captions": config["allow_upstream_captions"],
+        },
+        "manual_checks": [
+            "verify intended wording and intelligibility",
+            "verify the visible speaker matches the voice",
+            "verify mouth timing and natural pauses",
+            "verify background sound does not mask dialogue",
+        ] if lines else [],
+    }
 
 
 def _load_state(root: Path) -> dict[str, Any]:

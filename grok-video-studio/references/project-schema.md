@@ -59,9 +59,29 @@
     "mode": "native-dialogue",
     "language": "zh-CN",
     "generate_audio": true,
+    "generate_speech": true,
     "preserve_source_audio": true,
     "duck_source_audio": true,
-    "subtitle_source": "none"
+    "subtitle_source": "none",
+    "subtitle_delivery": "none",
+    "burn_subtitles": false,
+    "allow_upstream_captions": false
+  },
+  "quality": {
+    "resolution_policy": "warn",
+    "minimum_resolution_ratio": 0.75,
+    "scale_mode": "fill",
+    "caption_detection": "warn",
+    "tail_guard_seconds": 0.8,
+    "tail_motion_policy": "warn",
+    "tail_motion_threshold": 0.012,
+    "continuity_enabled": true,
+    "previous_keyframe_reference": true
+  },
+  "continuity": {
+    "enabled": true,
+    "strict": true,
+    "world_state": {}
   },
   "character_master": {
     "enabled": true,
@@ -106,6 +126,10 @@
     "summary": "What happens",
     "shot_role": "medium",
     "scene_id": "office",
+    "scene_state": {"weather": "clear", "lighting": "soft window light"},
+    "asset_state": {"phone": "on desk", "vehicle": "none"},
+    "continuity_in": "The phone remains on the desk from the previous shot.",
+    "continuity_out": "The character reaches for the phone while the camera continues moving.",
     "location": "Office",
     "time": "late afternoon",
     "weather": "clear",
@@ -179,6 +203,12 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 `audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
 
 `audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. New projects default to `none`; older projects without this field retain `project` for backwards compatibility. This setting is independent from `audio.mode`.
+
+`audio.generate_speech`, `audio.subtitle_delivery`, `audio.burn_subtitles`, and `audio.allow_upstream_captions` keep speech generation, sidecar SRT, burned subtitles, and provider-baked captions as separate contracts. `subtitle_delivery` accepts `none`, `sidecar`, `burn`, or `both`; burning requires `subtitle_source=project` and always creates a derivative instead of replacing the clean master.
+
+`quality` records the delivery policy. `resolution_policy=warn|block|allow` compares the requested frame with the actual downloaded frame and stores both values in QA. `scale_mode=fill` crops to cover the target canvas; `pad` is available for intentional letterboxing. `caption_detection=off|warn|block` optionally runs local Tesseract when installed and keeps manual pixel review when it is unavailable. `tail_guard_seconds` and `tail_motion_policy` produce an `edit_out` suggestion when the final motion settles into a generic pose.
+
+`continuity` enables previous-keyframe handoff. Each shot may declare `scene_state`, `asset_state`, `continuity_in`, and `continuity_out`; the previous generated keyframe is added as a lower-priority image reference when the reference budget allows. Video generation still receives only the current shot keyframe.
 
 `retry_policy.max_total_attempts` defaults to three total billable attempts (initial request plus two retries). `max_retries` must not imply more attempts than this total; configure four total attempts explicitly when three retries are required. Provider failover consumes one of the same attempts. `submission_unknown` is never recreated automatically.
 

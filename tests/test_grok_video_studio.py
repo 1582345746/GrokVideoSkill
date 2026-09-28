@@ -1279,6 +1279,44 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(selected_report["ok"])
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
+    def test_quality_report_records_low_source_resolution(self) -> None:
+        path = self.root / "low-resolution.mp4"
+        subprocess.run(
+            [
+                shutil.which("ffmpeg"),
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=blue:s=400x736:r=24",
+                "-t",
+                "1",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        report = media_tools.quality_report(
+            path,
+            expected_size="720x1280",
+            resolution_policy="block",
+            minimum_resolution_ratio=0.75,
+        )
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["signals"]["resolution"]["degraded"])
+        self.assertTrue(any("source resolution is below" in error for error in report["errors"]))
+        exact_report = media_tools.quality_report(path, expected_size="400x736")
+        self.assertTrue(exact_report["ok"])
+        self.assertEqual(exact_report["signals"]["resolution"]["requested"], {"width": 400, "height": 736})
+        self.assertEqual(exact_report["signals"]["resolution"]["actual"], {"width": 400, "height": 736})
+        self.assertEqual(exact_report["signals"]["resolution"]["scale_ratio"], 1.0)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_single_full_frame_qa_blocks_repeated_horizontal_panels(self) -> None:
         path = self.root / "repeated-panels.mp4"
         subprocess.run(
@@ -2239,6 +2277,22 @@ class SkillIntegrationTests(unittest.TestCase):
         blocked = self.run_cli("subtitles", str(project), "--burn", expected=1)
         self.assertIn("has no local SRT", blocked["error"])
 
+    def test_dialogue_contract_rejects_string_boolean_flags(self) -> None:
+        project = self.create_project("dialogue-boolean-contract", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["audio"].update(
+            {
+                "generate_speech": "false",
+                "burn_subtitles": "false",
+                "allow_upstream_captions": "false",
+            }
+        )
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("audio.generate_speech must be a boolean" in error for error in result["errors"]))
+        self.assertTrue(any("audio.burn_subtitles must be a boolean" in error for error in result["errors"]))
+        self.assertTrue(any("audio.allow_upstream_captions must be a boolean" in error for error in result["errors"]))
+
     def test_component_docker_output_is_decoded_as_utf8_with_replacement(self) -> None:
         completed = subprocess.CompletedProcess(["docker", "version"], 0, stdout="ok", stderr="")
         with mock.patch("component_manager.subprocess.run", return_value=completed) as run:
@@ -3003,6 +3057,71 @@ class SkillIntegrationTests(unittest.TestCase):
         (series_root / "series.json").write_text(json.dumps(series), encoding="utf-8")
         status = self.run_cli("series-status", str(series_root))
         self.assertTrue(status["ok"])
+
+    def test_quality_and_continuity_contracts_are_initialized(self) -> None:
+        project = self.root / "quality-continuity"
+        self.run_cli(
+            "init",
+            str(project),
+            "--title",
+            "Quality",
+            "--topic",
+            "Continuity",
+            "--workflow",
+            "short-drama",
+            "--genre",
+            "rural-market-conflict",
+            "--shots",
+            "2",
+            "--seconds",
+            "1",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(value["quality"]["scale_mode"], "fill")
+        self.assertTrue(value["continuity"]["enabled"])
+        self.assertEqual(value["audio"]["subtitle_delivery"], "none")
+        self.assertIn("rural-market-conflict", value["director"]["genre_packs"])
+        value["story"] = "A village negotiation continues across two shots."
+        value["character_master"]["prompt"] = (
+            "One consistent adult peach buyer in a blue work jacket, shown as a clean single character sheet "
+            "on a plain background, no text."
+        )
+        value["story_beats"] = [
+            {"id": "beat-001", "visible_event": "The buyer passes a crate while the village watches."},
+            {"id": "beat-002", "visible_event": "A skeptical villager reacts and pulls the crate back."},
+        ]
+        value["shots"][0].update(
+            {
+                "image_prompt": "A village market establishes the negotiation.",
+                "video_prompt": "A hand passes a crate while the negotiation continues.",
+                "scene_state": {"weather": "cloudy"},
+                "asset_state": {"crate_count": 1},
+                "continuity_out": "The crate remains in the buyer's hands.",
+            }
+        )
+        value["shots"][1].update(
+            {
+                "shot_role": "reaction",
+                "image_prompt": "The same village market one moment later.",
+                "video_prompt": "The buyer pulls the same crate toward the truck.",
+                "continuity_in": "The crate remains in the buyer's hands.",
+                "scene_state": {"weather": "cloudy"},
+                "asset_state": {"crate_count": 1},
+            }
+        )
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        report = self.run_cli("preflight", str(project))
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["preflight"]["quality"]["scale_mode"], "fill")
+        self.assertIn("Story structure", composed_video_prompt(value, value["shots"][0]))
+
+    def test_quality_policy_rejects_invalid_contract(self) -> None:
+        project = self.create_project("invalid-quality", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["quality"]["scale_mode"] = "stretch"
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("quality.scale_mode" in error for error in result["errors"]))
 
 
 if __name__ == "__main__":

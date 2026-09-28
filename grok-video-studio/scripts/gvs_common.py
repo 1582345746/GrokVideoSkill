@@ -21,7 +21,7 @@ from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 
 CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/2.4.0"
+USER_AGENT = "GrokVideoStudioSkill/2.5.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "grok-imagine-video-1.5"
 MAX_JSON_BYTES = 48 * 1024 * 1024

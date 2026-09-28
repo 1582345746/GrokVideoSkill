@@ -150,7 +150,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.4.0"
+SKILL_VERSION = "2.5.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -167,6 +167,9 @@ VIDEO_AUDIO_POLICIES = {"preserve", "mute"}
 FRAME_LAYOUTS = {"single-full-frame", "split-screen", "triptych", "comic-panel"}
 LAYOUT_RISK_POLICIES = {"block", "warn", "allow"}
 PROMPT_VERSIONS = {"auto", "full", "compact", "minimal"}
+QUALITY_POLICIES = {"allow", "warn", "block"}
+CAPTION_POLICIES = {"off", "warn", "block"}
+SCALE_MODES = {"fill", "pad"}
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 SHOT_ROLES = {
     "establishing",
@@ -263,6 +266,22 @@ def migrate_project(root: Path) -> dict[str, Any]:
     if "prompt_version" not in project:
         project["prompt_version"] = "auto"
         changes.append("prompt_version")
+    if "quality" not in project:
+        project["quality"] = {
+            "resolution_policy": "warn",
+            "minimum_resolution_ratio": 0.75,
+            "scale_mode": "fill",
+            "caption_detection": "warn",
+            "tail_guard_seconds": 0.8,
+            "tail_motion_policy": "warn",
+            "tail_motion_threshold": 0.012,
+            "continuity_enabled": True,
+            "previous_keyframe_reference": True,
+        }
+        changes.append("quality")
+    if "continuity" not in project:
+        project["continuity"] = {"enabled": True, "strict": True, "world_state": {}}
+        changes.append("continuity")
     backup = root / "project.pre-v2.2.json"
     if changes:
         if not backup.exists():
@@ -550,6 +569,67 @@ def audio_policy(project: dict[str, Any]) -> str:
     return str(defaults.get("audio_policy", "preserve")).strip().lower()
 
 
+def quality_config(project: dict[str, Any]) -> dict[str, Any]:
+    value = project.get("quality") if isinstance(project.get("quality"), dict) else {}
+    try:
+        minimum_ratio = float(value.get("minimum_resolution_ratio", 0.75))
+    except (TypeError, ValueError):
+        minimum_ratio = 0.75
+    try:
+        tail_guard = float(value.get("tail_guard_seconds", 0.8))
+    except (TypeError, ValueError):
+        tail_guard = 0.8
+    try:
+        tail_threshold = float(value.get("tail_motion_threshold", 0.012))
+    except (TypeError, ValueError):
+        tail_threshold = 0.012
+    return {
+        "resolution_policy": str(value.get("resolution_policy", "warn")).strip().lower() or "warn",
+        "minimum_resolution_ratio": minimum_ratio,
+        "scale_mode": str(value.get("scale_mode", "fill")).strip().lower() or "fill",
+        "caption_detection": str(value.get("caption_detection", "warn")).strip().lower() or "warn",
+        "tail_guard_seconds": tail_guard,
+        "tail_motion_policy": str(value.get("tail_motion_policy", "warn")).strip().lower() or "warn",
+        "tail_motion_threshold": tail_threshold,
+        "continuity_enabled": bool(value.get("continuity_enabled", True)),
+        "previous_keyframe_reference": bool(value.get("previous_keyframe_reference", True)),
+    }
+
+
+def validate_quality_config(project: dict[str, Any]) -> list[str]:
+    value = project.get("quality")
+    if value is not None and not isinstance(value, dict):
+        return ["project.quality must be an object"]
+    config = quality_config(project)
+    errors: list[str] = []
+    if config["resolution_policy"] not in QUALITY_POLICIES:
+        errors.append("quality.resolution_policy must be allow, warn, or block")
+    if config["scale_mode"] not in SCALE_MODES:
+        errors.append("quality.scale_mode must be fill or pad")
+    if config["caption_detection"] not in CAPTION_POLICIES:
+        errors.append("quality.caption_detection must be off, warn, or block")
+    if config["tail_motion_policy"] not in QUALITY_POLICIES:
+        errors.append("quality.tail_motion_policy must be allow, warn, or block")
+    if not 0.0 < float(config["minimum_resolution_ratio"]) <= 1.0:
+        errors.append("quality.minimum_resolution_ratio must be greater than 0 and no more than 1")
+    if float(config["tail_guard_seconds"]) < 0 or float(config["tail_guard_seconds"]) > 5:
+        errors.append("quality.tail_guard_seconds must be from 0 to 5 seconds")
+    if not 0.0 < float(config["tail_motion_threshold"]) < 1.0:
+        errors.append("quality.tail_motion_threshold must be greater than 0 and less than 1")
+    if not isinstance(config["continuity_enabled"], bool) or not isinstance(config["previous_keyframe_reference"], bool):
+        errors.append("quality continuity flags must be booleans")
+    return errors
+
+
+def continuity_config(project: dict[str, Any]) -> dict[str, Any]:
+    value = project.get("continuity") if isinstance(project.get("continuity"), dict) else {}
+    return {
+        "enabled": bool(value.get("enabled", quality_config(project)["continuity_enabled"])),
+        "strict": bool(value.get("strict", True)),
+        "world_state": value.get("world_state", {}) if isinstance(value.get("world_state", {}), dict) else {},
+    }
+
+
 def character_master_config(project: dict[str, Any]) -> dict[str, Any]:
     value = project.get("character_master")
     return value if isinstance(value, dict) else {}
@@ -770,6 +850,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     errors.extend(validate_dialogue(root, project))
     errors.extend(validate_director(project))
     errors.extend(validate_visual_profile(project))
+    errors.extend(validate_quality_config(project))
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -943,6 +1024,13 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             errors.append(f"{prefix}.environment_sound must be a string or array")
         if raw_shot.get("sound_effects") is not None and not isinstance(raw_shot.get("sound_effects"), (str, list)):
             errors.append(f"{prefix}.sound_effects must be a string or array")
+        for state_name in ("scene_state", "asset_state"):
+            state_value = raw_shot.get(state_name)
+            if state_value is not None and not isinstance(state_value, (dict, list, str)):
+                errors.append(f"{prefix}.{state_name} must be an object, array, or string")
+        for field in ("continuity_in", "continuity_out"):
+            if raw_shot.get(field) is not None and not isinstance(raw_shot.get(field), str):
+                errors.append(f"{prefix}.{field} must be a string")
         subtitle_items = raw_shot.get("subtitles")
         if subtitle_items is not None:
             if raw_shot.get("subtitle"):
@@ -1145,6 +1233,13 @@ def structured_shot_context(project: dict[str, Any], shot: dict[str, Any]) -> st
             lines.append(f"{label}: {str(value).strip()}")
     if continuity:
         lines.append(f"Continuity: {continuity}")
+    if continuity_config(project)["enabled"]:
+        for key, label in (("scene_state", "Scene state"), ("asset_state", "Asset state"), ("continuity_in", "Continuity in"), ("continuity_out", "Continuity out")):
+            value = shot.get(key)
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            if str(value or "").strip():
+                lines.append(f"{label}: {str(value).strip()}")
     performance = shot.get("performance") if isinstance(shot.get("performance"), dict) else {}
     performance_parts = []
     for key, label in (
@@ -1187,6 +1282,8 @@ def genre_direction(project: dict[str, Any], *, image_only: bool = False) -> str
         ("visual", "Visual"),
         ("performance", "Performance"),
         ("audio", "Audio"),
+        ("story_structure", "Story structure"),
+        ("asset_state", "Asset state"),
         ("avoid", "Avoid"),
     )
     for pack_id in selected:
@@ -1194,7 +1291,7 @@ def genre_direction(project: dict[str, Any], *, image_only: bool = False) -> str
         if not pack:
             continue
         lines.append(f"{pack['title']} ({pack_id})")
-        lines.extend(f"{label}: {pack[field]}" for field, label in fields)
+        lines.extend(f"{label}: {pack[field]}" for field, label in fields if str(pack.get(field, "")).strip())
     raw_director = project.get("director") if isinstance(project.get("director"), dict) else {}
     custom = str(raw_director.get("custom_direction", "")).strip()
     if custom:
@@ -1234,6 +1331,8 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     if not allow_ui_elements(project, shot):
         sections.append("[CLEAN FRAME POLICY]\n" + clean_frame_direction(project))
     sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
+    if continuity_config(project)["enabled"] and str(shot.get("continuity_in", "")).strip():
+        sections.append("[CONTINUITY HANDOFF]\nPreserve the reviewed previous-shot state at the start of this keyframe: " + str(shot["continuity_in"]).strip())
     return "\n\n".join(sections)
 
 
@@ -1290,6 +1389,10 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     elif exit_behavior == "hold-reaction":
         sections.append("[EDIT EXIT]\nHold only the motivated listener reaction; avoid a theatrical final pose or sigh.")
     sections.append("[SHOT MOTION]\n" + str(shot["video_prompt"]).strip())
+    if continuity_config(project)["enabled"]:
+        continuity_out = str(shot.get("continuity_out", "")).strip()
+        if continuity_out:
+            sections.append("[CONTINUITY HANDOFF]\nEnd in the declared continuing state without resetting props, vehicles, weather, screen direction, or eyeline: " + continuity_out)
     return "\n\n".join(sections)
 
 
@@ -1644,6 +1747,8 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         cost = {"error": str(error), "within_budget": False}
     return {
         "visual_profile": resolved_visual_profile,
+        "quality": quality_config(project),
+        "continuity": continuity_config(project),
         "workflow": project.get("workflow", "general-video"),
         "requests": {
             "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
@@ -1706,6 +1811,15 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
             shared_characters = set(previous.get("character_ids", [])) & set(character_ids)
             if (same_scene or shared_characters) and not str(shot.get("continuity_notes", "")).strip():
                 warnings.append(f"{shot_id}: adjacent scene/character continuity has no continuity_notes")
+            if continuity_config(project)["enabled"] and (same_scene or shared_characters):
+                if not str(shot.get("continuity_in", "")).strip():
+                    warnings.append(f"{shot_id}: continuity is enabled but continuity_in is empty")
+                if not str(previous.get("continuity_out", "")).strip():
+                    warnings.append(f"{previous.get('id', 'previous')}: continuity is enabled but continuity_out is empty before {shot_id}")
+                previous_state = previous.get("scene_state") or previous.get("asset_state")
+                current_state = shot.get("scene_state") or shot.get("asset_state")
+                if previous_state and not current_state:
+                    warnings.append(f"{shot_id}: previous shot declares scene or asset state but this shot does not")
         previous = shot
     cinematic_workflow = director_config(project)["mode"] != "single-shot" or bool(project.get("series_context"))
     if cinematic_workflow:
@@ -1746,6 +1860,25 @@ def shot_state(state: dict[str, Any], shot_id: str) -> dict[str, Any]:
     value.setdefault("image", {"status": "pending", "attempts": 0})
     value.setdefault("video", {"status": "pending", "attempts": 0})
     return value
+
+
+def previous_shot_keyframe(root: Path, project: dict[str, Any], state: dict[str, Any], shot_id: str) -> Path | None:
+    """Return the immediately preceding approved/generated keyframe when usable."""
+    if not quality_config(project)["previous_keyframe_reference"] or not continuity_config(project)["enabled"]:
+        return None
+    shots = [item for item in project.get("shots", []) if isinstance(item, dict)]
+    for index, shot in enumerate(shots):
+        if str(shot.get("id", "")) != shot_id or index == 0:
+            continue
+        previous_id = str(shots[index - 1].get("id", ""))
+        previous_runtime = state.get("shots", {}).get(previous_id, {}) if isinstance(state.get("shots"), dict) else {}
+        runtime = previous_runtime.get("image", {}) if isinstance(previous_runtime, dict) else {}
+        path = str(runtime.get("path", "")).strip()
+        if runtime.get("status") == "completed" and path:
+            candidate = resolve_project_path(root, path, must_exist=False)
+            if candidate.is_file():
+                return candidate
+    return None
 
 
 def write_event(root: Path, event: dict[str, Any]) -> None:
@@ -1930,6 +2063,9 @@ def generate_images(
             master_path = resolved_character_master(root, project, state)
             if master_path not in references:
                 references.insert(0, master_path)
+        handoff = previous_shot_keyframe(root, project, state, shot_id)
+        if handoff and handoff not in references and len(references) < int(project.get("limits", {}).get("max_reference_images", 9)):
+            references.append(handoff)
         runtime = shot_state(state, shot_id)["image"]
         prompt_variants_value = prompt_variants(project, shot, kind="image")
         prompt_version, prompt = select_prompt_variant(
@@ -1969,6 +2105,7 @@ def generate_images(
                 "prompt_utf8_bytes": prompt_bytes(prompt),
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 "reference_sha256": [file_digest(path) for path in references],
+                "continuity_reference": handoff.relative_to(root).as_posix() if handoff else "",
                 "error": "",
                 "review_status": "pending",
                 "review_notes": "",
@@ -2157,7 +2294,18 @@ def generate_videos(
                     raise SkillError(f"lost-task content verification was inconclusive for {shot_id}: {error}") from error
             else:
                 try:
-                    qa = quality_report(recovery_output, expected_size=size, expected_duration=seconds)
+                    qconfig = quality_config(project)
+                    qa = quality_report(
+                        recovery_output,
+                        expected_size=size,
+                        expected_duration=seconds,
+                        resolution_policy=qconfig["resolution_policy"],
+                        minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+                        caption_detection=qconfig["caption_detection"],
+                        tail_guard_seconds=qconfig["tail_guard_seconds"],
+                        tail_motion_policy=qconfig["tail_motion_policy"],
+                        tail_motion_threshold=qconfig["tail_motion_threshold"],
+                    )
                 except SkillError as error:
                     qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
                 video.update(
@@ -2394,7 +2542,18 @@ def generate_videos(
                 output = root / "clips" / f"{shot_id}.mp4"
                 video_client.download(task_id, status_payload, output)
                 try:
-                    qa = quality_report(output, expected_size=size, expected_duration=seconds)
+                    qconfig = quality_config(project)
+                    qa = quality_report(
+                        output,
+                        expected_size=size,
+                        expected_duration=seconds,
+                        resolution_policy=qconfig["resolution_policy"],
+                        minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+                        caption_detection=qconfig["caption_detection"],
+                        tail_guard_seconds=qconfig["tail_guard_seconds"],
+                        tail_motion_policy=qconfig["tail_motion_policy"],
+                        tail_motion_threshold=qconfig["tail_motion_threshold"],
+                    )
                 except SkillError as error:
                     qa = {"ok": False, "errors": [str(error)], "warnings": [], "manual_review_required": []}
                 video.update({"status": "completed", "path": output.relative_to(root).as_posix(), "bytes": output.stat().st_size, "sha256": file_digest(output), "media": qa.get("media", {}), "progress": 100.0, "qa": portable_qa(qa), "final_provider": active_provider, "error": "", "error_category": ""})
@@ -2555,11 +2714,14 @@ def assemble_clips(
     audio_policy: str = "preserve",
     edit_windows: list[dict[str, float]] | None = None,
     require_audio: bool = False,
+    scale_mode: str = "fill",
 ) -> dict[str, Any]:
     if not clips:
         raise SkillError("at least one clip is required")
     if audio_policy not in {"preserve", "mute"}:
         raise SkillError("audio policy must be preserve or mute")
+    if scale_mode not in SCALE_MODES:
+        raise SkillError("scale_mode must be fill or pad")
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise SkillError("ffmpeg is required to assemble clips")
@@ -2612,10 +2774,13 @@ def assemble_clips(
     with tempfile.TemporaryDirectory(prefix=".gvs-assemble-", dir=str(output.parent)) as temp_name:
         temp_root = Path(temp_name)
         normalized: list[Path] = []
-        filter_value = (
-            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30"
-        )
+        if scale_mode == "fill":
+            filter_value = f"scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},fps=30"
+        else:
+            filter_value = (
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=30"
+            )
         for index, clip in enumerate(clips, 1):
             segment = temp_root / f"segment-{index:03d}.mp4"
             window = selected_windows[index - 1]
@@ -2672,6 +2837,7 @@ def assemble_clips(
         "clip_count": len(clips),
         "audio_policy": audio_policy,
         "require_audio": require_audio,
+        "scale_mode": scale_mode,
         "edit_windows": selected_windows,
     }
 
@@ -2697,6 +2863,11 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
         windows.append({"edit_in": edit_in, "edit_out": edit_out, "timeline_duration": timeline})
     output = root / "deliverables" / "final.mp4"
     target_size = str(project.get("defaults", {}).get("video_size") or "auto")
+    qconfig = quality_config(project)
+    for shot in project["shots"]:
+        runtime = shot_state(state, str(shot["id"]))["video"]
+        if qconfig["resolution_policy"] == "block" and isinstance(runtime.get("qa"), dict) and not runtime["qa"].get("ok", True):
+            raise SkillError(f"quality contract blocks assembly for {shot['id']}: " + "; ".join(runtime["qa"].get("errors", [])))
     native_audio_required = audio_config(project)["mode"] == "native-dialogue"
     media = assemble_clips(
         clips,
@@ -2705,8 +2876,17 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
         audio_policy=audio_policy(project),
         edit_windows=windows,
         require_audio=native_audio_required,
+        scale_mode=qconfig["scale_mode"],
     )
-    qa = quality_report(output, expected_size=target_size, expected_duration=sum(item["timeline_duration"] for item in windows))
+    qa = quality_report(
+        output,
+        expected_size=target_size,
+        expected_duration=sum(item["timeline_duration"] for item in windows),
+        resolution_policy=qconfig["resolution_policy"],
+        minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+        caption_detection=qconfig["caption_detection"],
+        tail_guard_seconds=0.0,
+    )
     state.setdefault("deliverables", {})["final"] = {
         "path": output.relative_to(root).as_posix(),
         "bytes": output.stat().st_size,
@@ -2722,6 +2902,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
 def qa_project(root: Path) -> dict[str, Any]:
     project = require_valid_project(root)
     dialogue = dialogue_preflight(project)
+    qconfig = quality_config(project)
     visual_profile = resolve_visual_profile(project)
     subject_nature_checks = {
         "real-person": [
@@ -2787,6 +2968,12 @@ def qa_project(root: Path) -> dict[str, Any]:
             layout_is_error=frame_layout(project, shot) == "single-full-frame",
             scan_start=qa_edit_in,
             scan_end=qa_edit_out,
+            resolution_policy=qconfig["resolution_policy"],
+            minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+            caption_detection=qconfig["caption_detection"],
+            tail_guard_seconds=qconfig["tail_guard_seconds"],
+            tail_motion_policy=qconfig["tail_motion_policy"],
+            tail_motion_threshold=qconfig["tail_motion_threshold"],
         )
         report["visual_profile_review"] = {
             "status": review_status if review_status in {"approved", "rejected"} else "human-review-required",
@@ -2884,6 +3071,9 @@ def qa_project(root: Path) -> dict[str, Any]:
                 for shot in project["shots"]
                 if isinstance(shot, dict)
             ),
+            resolution_policy=qconfig["resolution_policy"],
+            minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+            caption_detection=qconfig["caption_detection"],
         )
         report["visual_profile_review"] = {
             "status": "human-review-required",
@@ -2964,6 +3154,16 @@ def qa_project(root: Path) -> dict[str, Any]:
         "reports": reports,
         "project_audit": audit_project(root, project),
         "dialogue_review": dialogue_review,
+        "quality_contract": qconfig,
+        "tail_suggestions": [
+            {
+                "shot_id": item.get("id"),
+                "suggested_edit_out": item.get("signals", {}).get("tail_motion", {}).get("suggested_edit_out"),
+            }
+            for item in reports
+            if item.get("kind") == "clip"
+            and item.get("signals", {}).get("tail_motion", {}).get("suggested_edit_out") is not None
+        ],
         "visual_profile_review": {"profile": visual_profile, "blocking_checks": visual_checks},
         "visual_review_required": True,
         "manual_review_complete": manual_review_complete,
@@ -3051,6 +3251,10 @@ def init_project(
             "scene_id": "",
             "character_ids": [],
             "continuity_notes": "",
+            "scene_state": {},
+            "asset_state": {},
+            "continuity_in": "",
+            "continuity_out": "",
             "lens": "",
             "camera": "",
             "camera_motion": "",
@@ -3129,6 +3333,10 @@ def init_project(
             "preserve_source_audio": True,
             "duck_source_audio": True,
             "subtitle_source": subtitle_source_value,
+            "generate_speech": audio_mode_value == "native-dialogue",
+            "subtitle_delivery": "sidecar" if subtitle_source_value == "project" else "none",
+            "burn_subtitles": False,
+            "allow_upstream_captions": subtitle_source_value == "upstream",
         },
         "character_master": {
             "enabled": uses_master,
@@ -3150,6 +3358,18 @@ def init_project(
             "audio_policy": "preserve",
         },
         "allow_ui_elements": False,
+        "quality": {
+            "resolution_policy": "warn",
+            "minimum_resolution_ratio": 0.75,
+            "scale_mode": "fill",
+            "caption_detection": "warn",
+            "tail_guard_seconds": 0.8,
+            "tail_motion_policy": "warn",
+            "tail_motion_threshold": 0.012,
+            "continuity_enabled": True,
+            "previous_keyframe_reference": True,
+        },
+        "continuity": {"enabled": True, "strict": True, "world_state": {}},
         "frame_layout": frame_layout_value,
         "allow_multi_panel": frame_layout_value != "single-full-frame",
         "layout_risk_policy": "block",
@@ -3993,6 +4213,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble_files.add_argument("clips", type=Path, nargs="+")
     assemble_files.add_argument("--target-size", default="auto")
     assemble_files.add_argument("--audio-policy", choices=("preserve", "mute"), default="preserve")
+    assemble_files.add_argument("--scale-mode", choices=tuple(sorted(SCALE_MODES)), default="fill")
 
     postprocess = commands.add_parser("postprocess", help="Add optional music, voice, burned subtitles, and fades to an MP4.")
     postprocess.add_argument("input", type=Path)
@@ -4125,6 +4346,8 @@ def main() -> int:
                         "frame_layout": "single-full-frame",
                         "layout_risk_policy": "block vertical multi-character T2V until I2V or explicit risk acceptance",
                         "prompt_version": "auto (compact for vertical multi-character single-frame shots)",
+                        "quality_contract": "records requested vs actual resolution, uses fill scaling, checks tail motion, and keeps OCR/manual clean-frame review",
+                        "continuity": "previous keyframe handoff plus scene_state and asset_state fields",
                         "third_party_modules": "disabled unless explicitly selected",
                         "visual_profile": "auto text/reference-name classification with explicit review when confidence is low",
                     },
@@ -4192,7 +4415,13 @@ def main() -> int:
                     "custom_workflow_directory": str(default_custom_workflow_root()),
                     "workflows": workflow_catalog(),
                     "genre_packs": [
-                        {"id": pack_id, "title": pack["title"], "avoid": pack["avoid"]}
+                        {
+                            "id": pack_id,
+                            "title": pack["title"],
+                            "avoid": pack["avoid"],
+                            "story_structure": pack.get("story_structure", ""),
+                            "asset_state": pack.get("asset_state", ""),
+                        }
                         for pack_id, pack in load_genre_packs(GENRE_PACK_ROOT).items()
                     ],
                     "audio_routes": [
@@ -4946,7 +5175,13 @@ def main() -> int:
             for clip in clips:
                 if not clip.is_file():
                     raise SkillError(f"clip does not exist: {clip}")
-            media = assemble_clips(clips, args.output.resolve(), target_size=args.target_size, audio_policy=args.audio_policy)
+            media = assemble_clips(
+                clips,
+                args.output.resolve(),
+                target_size=args.target_size,
+                audio_policy=args.audio_policy,
+                scale_mode=args.scale_mode,
+            )
             print_json({"ok": True, "output": str(args.output.resolve()), "media": media})
             return 0
         if args.command == "postprocess":

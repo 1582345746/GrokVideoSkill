@@ -1,8 +1,10 @@
-# Workflow Catalog (v2.4.0 chatcut-adapter)
+# Workflow Catalog (v2.5.0 quality-continuity)
 
 Workflow definitions live in `assets/workflow-templates/*.json`. Edit those JSON files to improve titles, questions, and prompt guidance without changing the Python client.
 
 The catalog is intentionally general. Short drama is supported but is not the default or highest-priority workflow.
+
+For agriculture, village negotiation, price disputes, weather risk, and public accountability, compose `short-drama` or `dialogue-scene` with `rural`, `disaster`, `suspense`, and the optional `rural-market-conflict` pack. The pack adds story and asset-state guidance; it does not create a separate generation route.
 
 Product route is separate from workflow. The four routes are text-to-video, image-to-video, episodic series, and sourced news video. A supplied-image animation is an I2V variant, not a fifth route. Use `series-init` only when ordered episodes share canon and continuity; every series episode still selects one internal workflow from this catalog. The director layer is shared by all four routes, so camera coverage, story beats, performance, edit windows, native audio QA, and clean-frame review are not series-only features.
 

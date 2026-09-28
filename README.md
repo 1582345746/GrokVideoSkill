@@ -2,11 +2,11 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.4.0 chatcut-adapter`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.5.0 quality-continuity`，发布分支为 `main`。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
 
-v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装与 MCP 配置，明确区分“已安装”与“当前任务工具已授权”，把 edit-plan v2 映射为可编辑时间线操作，并要求远端项目/时间线、结构与视觉复核、下载文件 SHA-256 和未映射功能清单组成可验证回执。工具不可见或回执不完整时继续使用原生 FFmpeg，不伪造 ChatCut 成功；剪映只提供显式实验交接包。
+v2.5 在 v2.4 的基础上加入质量与连续性合同：记录请求/实际分辨率，默认使用裁切填充，检查尾部静止并给出 `edit_out` 建议，支持可选 OCR 清洁帧检测，拆分对白/字幕交付字段，并将上一镜关键帧、`scene_state` 和 `asset_state` 接入多镜头项目。新增 `rural-market-conflict` 乡村交易冲突题材包，仍复用既有短剧和对白流程。
 
 ## 产品路线
 
@@ -52,7 +52,7 @@ v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装
 | 连续剧 | `short-drama`、`character-consistent-story` | 多集共享系列圣经、角色母版、逐集审批和实际结尾连续性 |
 | 新闻视频 | `news-video` | 先联网建立来源/事实合同，再生成带明确示意标识的画面 |
 
-导演核心会在以上路线中统一执行：剧情节拍、shot_role、景别与机位、表演节拍、环境声音、可剪辑出口、有效片段入出点、原生音频 QA 和人工画面审核。它不是第五条产品路线，也不会把所有视频强制做成连续剧。
+导演核心会在以上路线中统一执行：剧情节拍、shot_role、景别与机位、表演节拍、环境声音、可剪辑出口、有效片段入出点、原生音频 QA、连续性状态和人工画面审核。它不是第五条产品路线，也不会把所有视频强制做成连续剧。
 
 | 模块 | 当前效果 | 边界 |
 | --- | --- | --- |
@@ -72,7 +72,7 @@ v2.4 在 v2.3 的基础上加入 ChatCut 适配合同：自动探测插件安装
 
 内置可编辑预设包括 `general-video`、`text-to-video`、`single-image-animation`、`character-consistent-story`、`short-drama`、`product-ad`、`dance-performance`、`comedy-action`、`scene-animation` 和 `news-video`。运行 `capabilities` 查看清单，运行 `describe <id>` 查看该预设的提问和提示词指导。预设只改变规划方式，不会虚构新的上游能力。
 
-导演化预设还包括 `cinematic-short`、`dialogue-scene`、`silent-cinema`、`action-scene`、`comedy-scene`。题材包包括 `historical`、`wuxia`、`sci-fi`、`family`、`romance`、`comedy`、`disaster`、`rural`、`suspense`，可以组合使用。题材包只提供视觉、表演、镜头和声音约束，不改变上游接口能力。
+导演化预设还包括 `cinematic-short`、`dialogue-scene`、`silent-cinema`、`action-scene`、`comedy-scene`。题材包包括 `historical`、`wuxia`、`sci-fi`、`family`、`romance`、`comedy`、`disaster`、`rural`、`rural-market-conflict`、`suspense`，可以组合使用。题材包只提供视觉、表演、镜头、声音和连续性规则，不改变上游接口能力。
 
 ## 推荐安装方式
 
@@ -213,6 +213,7 @@ Sub2Api 网关当前拒绝 PNG data-URI 图生视频请求；技能会在预检�
 
 - [v2.3 像素证据与剪辑 v2 发布说明](docs/v2.3-evidence-editor-release.zh-CN.md)
 - [v2.4 ChatCut 适配器发布说明](docs/v2.4-chatcut-adapter-release.zh-CN.md)
+- [v2.5 质量与连续性发布说明](docs/v2.5-quality-continuity-release.zh-CN.md)
 - [v2.3 发布验收报告](docs/v2.3-acceptance-report.zh-CN.md)
 - [v2.2 视觉类型与原生剪辑发布说明](docs/v2.2-visual-editing-release.zh-CN.md)
 - [v2.2 发布验收报告](docs/v2.2-acceptance-report.zh-CN.md)
