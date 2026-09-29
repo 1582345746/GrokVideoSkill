@@ -3041,7 +3041,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         if report["media"].get("has_subtitles") and audio_config(project).get("subtitle_source") == "none":
             report["errors"].append("clean delivery contains an embedded subtitle stream while audio.subtitle_source is none")
             report["ok"] = False
-        if dialogue["mode"] == "native-dialogue":
+        if dialogue["mode"] in {"native-dialogue", "narration"}:
             intent = shot_audio_intent(shot)
             report["expected_audio_intent"] = intent
             audio_signals = report.get("signals", {}).get("audio", {})
@@ -3067,6 +3067,13 @@ def qa_project(root: Path) -> dict[str, Any]:
                 checks.append("listen for intelligible, naturally paced narration that stays consistent with the visible sourced claim")
             else:
                 checks.append("verify audible scene-appropriate ambience, effects, or restrained music and no unintended speech")
+            if dialogue["mode"] == "narration":
+                checks.extend(
+                    [
+                        "verify narration remains off-screen and visible characters keep mouths closed",
+                        "verify narration pacing explains the visible causal beat without masking physical sound",
+                    ]
+                )
             if audio_config(project).get("subtitle_source") == "none":
                 checks.append("reject any model-baked captions or dialogue text visible in rendered pixels")
             else:
@@ -4492,9 +4499,11 @@ def main() -> int:
                     ],
                     "audio_routes": [
                         {"id": "preserve", "requires": [], "use_for": "keep provider or supplied source audio"},
-                        {"id": "native-dialogue", "default": True, "requires": [], "use_for": "provider-native dialogue, ambience, effects, or score for every generated shot"},
+                        {"id": "native-dialogue", "default": True, "requires": [], "use_for": "provider-native character dialogue, ambience, effects, or score"},
+                        {"id": "narration", "default": False, "requires": [], "use_for": "provider-native off-screen narration with closed-mouth visible characters"},
                         {"id": "local-voice", "default": False, "maintenance_mode": True, "requires": ["approved-tts-provider"], "use_for": "explicit legacy deterministic TTS and mixing"},
                         {"id": "local-lipsync", "default": False, "maintenance_mode": True, "requires": ["approved-tts-provider", "musetalk"], "use_for": "explicit legacy local TTS plus mouth synchronization"},
+                        {"id": "local-narration", "default": False, "maintenance_mode": True, "requires": ["approved-tts-provider"], "use_for": "local off-screen narration with silent visible performance"},
                     ],
                     "tts_providers": [
                         {"id": "voicebox", "status": "supported", "voices": ["Qwen CustomVoice", "Kokoro"]},

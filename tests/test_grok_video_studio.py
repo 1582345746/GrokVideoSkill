@@ -971,6 +971,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue(report["ok"])
         self.assertEqual(report["preflight"]["dialogue"]["mode"], "narration")
         self.assertEqual(report["preflight"]["dialogue"]["narration_count"], 2)
+        self.assertIn("verify no visible character lip movement; narration remains off-screen", report["preflight"]["dialogue"]["manual_checks"])
         self.assertGreaterEqual(report["preflight"]["story"]["score"], 70)
         prompt = composed_video_prompt(value, value["shots"][0])
         self.assertIn("mouths closed and no lip movement", prompt)

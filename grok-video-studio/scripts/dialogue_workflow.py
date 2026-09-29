@@ -393,7 +393,11 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
             "verify the visible speaker matches the voice",
             "verify mouth timing and natural pauses",
             "verify background sound does not mask dialogue",
-        ] if lines else (["verify no visible character lip movement; narration remains off-screen", "verify narrator pacing bridges each causal beat"] if config["mode"] in {"narration", "local-narration"} else []),
+        ] if config["mode"] not in {"narration", "local-narration"} and lines else ([
+            "verify no visible character lip movement; narration remains off-screen",
+            "verify narrator pacing bridges each causal beat",
+            "verify narration audio is understandable over environment sound",
+        ] if config["mode"] in {"narration", "local-narration"} else []),
     }
 
 
