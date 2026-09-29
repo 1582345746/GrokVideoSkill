@@ -1,4 +1,4 @@
-# Project Contract (v2.4.0 chatcut-adapter)
+# Project Contract (v2.6.0 narrative-clarity-boundary-qa)
 
 `project.json` is the creative input. `state.json` is script-owned runtime state. Never put credentials in either file.
 
@@ -28,6 +28,14 @@
   ],
   "target_duration_seconds": 18,
   "story": "Short screenplay",
+  "story_contract": {
+    "required": false,
+    "goal": "",
+    "obstacle": "",
+    "decision": "",
+    "consequence": "",
+    "payoff": ""
+  },
   "character_bible": "Concise stable identity, clothing, and props",
   "style_bible": "Concise stable visual language",
   "visual_profile": {
@@ -75,6 +83,7 @@
     "tail_guard_seconds": 0.8,
     "tail_motion_policy": "warn",
     "tail_motion_threshold": 0.012,
+    "tail_auto_trim": true,
     "continuity_enabled": true,
     "previous_keyframe_reference": true
   },
@@ -200,7 +209,7 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 `defaults.audio_policy` is `preserve` by default. Assembly preserves source audio and inserts silent AAC audio for clips that have no audio, keeping the final timeline stream-compatible. Set it to `mute` only when a silent delivery is intentional. `allow_ui_elements` defaults to `false`; a shot may set it to `true` only when the script explicitly shows an app or social-video interface. The clean-frame rule is a prompt constraint and still requires visual QA because an upstream model can hallucinate overlays.
 
-`audio.mode` is `preserve`, `mute`, `native-dialogue`, `local-voice`, or `local-lipsync`. Native dialogue requires `generate_audio=true`; local modes require it to be false. Local modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
+`audio.mode` is `preserve`, `mute`, `native-dialogue`, `narration`, `local-voice`, `local-lipsync`, or `local-narration`. Native dialogue and upstream narration require `generate_audio=true`; local modes require it to be false. Local character modes require a character voice with either `voice_id` or a consented project-relative `reference_audio`. `local-narration` uses the same contract under `audio.narrator_voice`. Reference audio also requires its exact `reference_text` and `consent=synthetic|owned|licensed`.
 
 `audio.subtitle_source` is `upstream`, `project`, or `none`. `upstream` preserves provider/source caption pixels and does not create local SRT; `project` uses the dialogue/cue contract for deterministic SRT and optional FFmpeg burn; `none` suppresses subtitle delivery. New projects default to `none`; older projects without this field retain `project` for backwards compatibility. This setting is independent from `audio.mode`.
 
@@ -209,6 +218,8 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 `quality` records the delivery policy. `resolution_policy=warn|block|allow` compares the requested frame with the actual downloaded frame and stores both values in QA. `scale_mode=fill` crops to cover the target canvas; `pad` is available for intentional letterboxing. `caption_detection=off|warn|block` optionally runs local Tesseract when installed and keeps manual pixel review when it is unavailable. `tail_guard_seconds` and `tail_motion_policy` produce an `edit_out` suggestion when the final motion settles into a generic pose.
 
 `continuity` enables previous-keyframe handoff. Each shot may declare `scene_state`, `asset_state`, `continuity_in`, and `continuity_out`; the previous generated keyframe is added as a lower-priority image reference when the reference budget allows. Video generation still receives only the current shot keyframe.
+
+For multi-shot narrative projects, `story_contract` describes the causal chain and `story_beats[].why_next` explains why the following shot must happen. Preflight reports the `story` clarity score. `quality.tail_auto_trim` trims settled tails from non-final shots during assembly and records the applied window in `state.json.deliverables.final.boundary_qa`.
 
 `retry_policy.max_total_attempts` defaults to three total billable attempts (initial request plus two retries). `max_retries` must not imply more attempts than this total; configure four total attempts explicitly when three retries are required. Provider failover consumes one of the same attempts. `submission_unknown` is never recreated automatically.
 

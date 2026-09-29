@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from gvs_common import SkillError, atomic_write_json, project_state_lock, read_json
-from media_tools import export_review_frames, postprocess_video, probe_media, quality_report
+from media_tools import detect_tail_motion, export_review_frames, postprocess_video, probe_media, quality_report
 from chatcut_adapter import build_chatcut_contract, chatcut_capability_report
 
 
@@ -187,13 +187,47 @@ def create_edit_plan(
     elif transition_seconds <= 0 or transition_seconds > 2.0:
         raise SkillError("non-cut transition seconds must be greater than zero and no more than 2")
     shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    shot_by_id = {str(shot.get("id", "")): shot for shot in shots}
+    quality = project.get("quality") if isinstance(project.get("quality"), dict) else {}
+    tail_auto_trim = bool(quality.get("tail_auto_trim", False))
+    try:
+        tail_guard_seconds = float(quality.get("tail_guard_seconds", 0.8))
+        tail_motion_threshold = float(quality.get("tail_motion_threshold", 0.012))
+    except (TypeError, ValueError):
+        tail_guard_seconds, tail_motion_threshold = 0.8, 0.012
     inputs: list[dict[str, Any]] = []
-    for shot in shots:
+    for index, shot in enumerate(shots):
         seconds = float(shot.get("seconds", 6))
         edit_in = float(shot.get("edit_in") or 0.0)
         raw_edit_out = shot.get("edit_out")
         edit_out = float(raw_edit_out) if raw_edit_out not in (None, "") else None
         shot_id = str(shot.get("id", ""))
+        tail_trim: dict[str, Any] = {"applied": False}
+        source_path = _project_path(root, _runtime_clip(state, shot_id), must_exist=False)
+        if (
+            index < len(shots) - 1
+            and tail_auto_trim
+            and tail_guard_seconds > 0
+            and str(shot.get("exit_behavior", "continue-action")) in {"continue-action", "cut-on-action"}
+            and source_path.is_file()
+        ):
+            source_end = edit_out if edit_out is not None else float(probe_media(source_path)["duration"])
+            signal = detect_tail_motion(
+                source_path,
+                scan_end=source_end,
+                tail_seconds=tail_guard_seconds,
+                threshold=tail_motion_threshold,
+            )
+            suggestion = signal.get("suggested_edit_out")
+            if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
+                edit_out = float(suggestion)
+                tail_trim = {
+                    "applied": True,
+                    "reason": "tail_motion_settled",
+                    "from": round(source_end, 3),
+                    "to": round(edit_out, 3),
+                    "motion": signal.get("motion_score"),
+                }
         inputs.append(
             {
                 "id": shot_id,
@@ -203,6 +237,7 @@ def create_edit_plan(
                 "generation_seconds": round(seconds, 3),
                 "speed": round(float(shot_speeds.get(shot_id, 1.0)), 4),
                 "filters": [] if shot_id not in shot_filters else [shot_filters[shot_id]],
+                "tail_trim": tail_trim,
             }
         )
     known_ids = {str(item["id"]) for item in inputs}

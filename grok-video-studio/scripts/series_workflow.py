@@ -26,7 +26,7 @@ SAFE_PROMPT_BYTES = 3800
 # Compatibility aliases for v1 callers; v2 enforcement is UTF-8 bytes.
 MAX_PROMPT_CHARS = HARD_PROMPT_BYTES
 SAFE_PROMPT_CHARS = SAFE_PROMPT_BYTES
-AUDIO_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
+AUDIO_MODES = {"preserve", "mute", "native-dialogue", "narration", "local-voice", "local-lipsync", "local-narration"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
 
 
@@ -194,7 +194,7 @@ def create_series_contract(
         "audio": {
             "mode": audio_mode,
             "language": "zh-CN",
-            "generate_audio": audio_mode == "native-dialogue",
+            "generate_audio": audio_mode in {"native-dialogue", "narration"},
             "preserve_source_audio": True,
             "duck_source_audio": True,
             "subtitle_source": subtitle_source,
@@ -267,9 +267,9 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
     if audio_mode not in AUDIO_MODES:
         errors.append("series.audio.mode is invalid")
     generate_audio = bool(audio.get("generate_audio", audio_mode == "native-dialogue"))
-    if audio_mode == "native-dialogue" and not generate_audio:
-        errors.append("series.audio.generate_audio must be true for native-dialogue")
-    if audio_mode in {"mute", "local-voice", "local-lipsync"} and generate_audio:
+    if audio_mode in {"native-dialogue", "narration"} and not generate_audio:
+        errors.append(f"series.audio.generate_audio must be true for {audio_mode}")
+    if audio_mode in {"mute", "local-voice", "local-lipsync", "local-narration"} and generate_audio:
         errors.append(f"series.audio.generate_audio must be false for {audio_mode}")
     if subtitle_source not in SUBTITLE_SOURCES:
         errors.append("series.audio.subtitle_source must be upstream, project, or none")

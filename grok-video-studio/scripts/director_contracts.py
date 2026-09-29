@@ -8,6 +8,7 @@ from workflow_registry import DIRECTOR_MODES, GENRE_PACKS, PROJECT_TYPES
 
 AUDIO_INTENTS = {"dialogue", "narration", "score-ambience", "effects-ambience", "intentional-silence"}
 EXIT_BEHAVIORS = {"continue-action", "cut-on-action", "hold-reaction", "ending-hook"}
+STORY_CONTRACT_FIELDS = ("goal", "obstacle", "decision", "consequence", "payoff")
 STRICT_DIRECTOR_MODES = {
     "cinematic-short",
     "dialogue-scene",
@@ -29,6 +30,48 @@ def director_config(project: dict[str, Any]) -> dict[str, Any]:
         "strict": bool(value.get("strict", mode in STRICT_DIRECTOR_MODES)),
         "default_exit_behavior": str(value.get("default_exit_behavior", "continue-action")).strip()
         or "continue-action",
+        "boundary_policy": str(value.get("boundary_policy", "warn")).strip().lower() or "warn",
+    }
+
+
+def story_contract(project: dict[str, Any]) -> dict[str, Any]:
+    value = project.get("story_contract") if isinstance(project.get("story_contract"), dict) else {}
+    return {
+        "required": bool(value.get("required", False)),
+        **{field: str(value.get(field, "")).strip() for field in STORY_CONTRACT_FIELDS},
+    }
+
+
+def story_clarity_score(project: dict[str, Any]) -> dict[str, Any]:
+    """Score whether a viewer can follow the causal chain before generation."""
+    contract = story_contract(project)
+    present = [field for field in STORY_CONTRACT_FIELDS if contract[field]]
+    beats = [beat for beat in project.get("story_beats", []) if isinstance(beat, dict)]
+    beat_fields = ("visible_event", "audience_effect", "consequence", "why_next")
+    beat_points = sum(sum(bool(str(beat.get(field, "")).strip()) for field in beat_fields) for beat in beats)
+    beat_max = max(1, len(beats) * len(beat_fields))
+    shot_items = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    event_shots = sum(bool(str(shot.get("summary", "")).strip()) for shot in shot_items)
+    causal_shots = sum(
+        bool(str(shot.get("continuity_out", "")).strip()) and bool(str(shot.get("continuity_in", "")).strip())
+        for shot in shot_items[1:]
+    )
+    score = round(
+        (len(present) / len(STORY_CONTRACT_FIELDS)) * 50
+        + (beat_points / beat_max) * 30
+        + (event_shots / max(1, len(shot_items))) * 10
+        + (causal_shots / max(1, len(shot_items) - 1)) * 10,
+        1,
+    )
+    missing = [field for field in STORY_CONTRACT_FIELDS if not contract[field]]
+    return {
+        "score": score,
+        "threshold": 70.0,
+        "required": contract["required"],
+        "missing_contract_fields": missing,
+        "story_beat_count": len(beats),
+        "shot_event_coverage": round(event_shots / max(1, len(shot_items)), 3),
+        "causal_handoff_coverage": round(causal_shots / max(1, len(shot_items) - 1), 3) if len(shot_items) > 1 else 1.0,
     }
 
 
@@ -68,6 +111,17 @@ def validate_director(project: dict[str, Any]) -> list[str]:
         errors.append("director.genre_packs contains an unsupported id")
     if config["default_exit_behavior"] not in EXIT_BEHAVIORS:
         errors.append("director.default_exit_behavior is unsupported")
+    if config["boundary_policy"] not in {"warn", "block"}:
+        errors.append("director.boundary_policy must be warn or block")
+    raw_story = project.get("story_contract")
+    if raw_story is not None and not isinstance(raw_story, dict):
+        errors.append("project.story_contract must be an object")
+    elif isinstance(raw_story, dict):
+        if raw_story.get("required") is not None and not isinstance(raw_story.get("required"), bool):
+            errors.append("story_contract.required must be a boolean")
+        for field in STORY_CONTRACT_FIELDS:
+            if raw_story.get(field) is not None and not isinstance(raw_story.get(field), str):
+                errors.append(f"story_contract.{field} must be a string")
     raw_director = project.get("director") if isinstance(project.get("director"), dict) else {}
     if raw_director.get("custom_direction") is not None and not isinstance(raw_director.get("custom_direction"), str):
         errors.append("director.custom_direction must be a string")
@@ -131,6 +185,15 @@ def director_gate(project: dict[str, Any]) -> dict[str, list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
     shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    clarity = story_clarity_score(project)
+    narrative_project = bool(story_contract(project)["required"]) or config["mode"] != "single-shot" or len(shots) >= 2
+    if narrative_project and clarity["score"] < clarity["threshold"]:
+        missing = ", ".join(clarity["missing_contract_fields"]) or "shot-level causal handoffs"
+        message = f"story clarity score {clarity['score']:.1f}/100 is below {clarity['threshold']:.0f}; fill {missing}"
+        if clarity["required"]:
+            errors.append(message)
+        else:
+            warnings.append(message)
     if not config["strict"] or len(shots) < 2:
         return {"errors": errors, "warnings": warnings}
     roles = [str(shot.get("shot_role", "")).strip() for shot in shots]
@@ -154,4 +217,20 @@ def director_gate(project: dict[str, Any]) -> dict[str, list[str]]:
         exit_behavior = str(shot.get("exit_behavior", config["default_exit_behavior"])).strip()
         if ending and exit_behavior != "ending-hook":
             warnings.append(f"shots[{index}] has ending_pose before the final shot; prefer a cuttable continuing action")
+        next_shot = shots[index + 1]
+        boundary_missing = []
+        if not str(shot.get("exit_action", "")).strip():
+            boundary_missing.append("exit_action")
+        if not str(shot.get("continuity_out", "")).strip():
+            boundary_missing.append("continuity_out")
+        if not str(next_shot.get("entry_action", "")).strip():
+            boundary_missing.append("next.entry_action")
+        if not str(next_shot.get("continuity_in", "")).strip():
+            boundary_missing.append("next.continuity_in")
+        if boundary_missing:
+            message = f"boundary after {shot.get('id', index)} lacks {', '.join(boundary_missing)}"
+            if config["boundary_policy"] == "block":
+                errors.append(message)
+            else:
+                warnings.append(message)
     return {"errors": errors, "warnings": warnings}

@@ -55,7 +55,15 @@ from dialogue_workflow import (
     render_local_dialogue,
     validate_dialogue,
 )
-from director_contracts import director_config, director_gate, edit_window, shot_audio_intent, validate_director
+from director_contracts import (
+    director_config,
+    director_gate,
+    edit_window,
+    shot_audio_intent,
+    story_clarity_score,
+    story_contract,
+    validate_director,
+)
 from media_client import (
     Sub2ApiImageClient,
     NewApiVideoClient,
@@ -64,7 +72,7 @@ from media_client import (
     image_reference_report,
     save_image_bytes,
 )
-from media_tools import SUBTITLE_STYLES, export_review_frames, extract_cover, postprocess_video, quality_report
+from media_tools import SUBTITLE_STYLES, detect_tail_motion, export_review_frames, extract_cover, postprocess_video, quality_report
 from news_workflow import apply_news_script, create_news_contract, load_news_contract, news_context, validate_news_contract
 from provider_contracts import (
     PROVIDER_CAPABILITIES,
@@ -150,7 +158,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.5.0"
+SKILL_VERSION = "2.6.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -591,6 +599,7 @@ def quality_config(project: dict[str, Any]) -> dict[str, Any]:
         "tail_guard_seconds": tail_guard,
         "tail_motion_policy": str(value.get("tail_motion_policy", "warn")).strip().lower() or "warn",
         "tail_motion_threshold": tail_threshold,
+        "tail_auto_trim": bool(value.get("tail_auto_trim", False)),
         "continuity_enabled": bool(value.get("continuity_enabled", True)),
         "previous_keyframe_reference": bool(value.get("previous_keyframe_reference", True)),
     }
@@ -618,6 +627,8 @@ def validate_quality_config(project: dict[str, Any]) -> list[str]:
         errors.append("quality.tail_motion_threshold must be greater than 0 and less than 1")
     if not isinstance(config["continuity_enabled"], bool) or not isinstance(config["previous_keyframe_reference"], bool):
         errors.append("quality continuity flags must be booleans")
+    if not isinstance(config["tail_auto_trim"], bool):
+        errors.append("quality.tail_auto_trim must be a boolean")
     return errors
 
 
@@ -1359,6 +1370,18 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     genre = genre_direction(project)
     if genre:
         sections.append("[GENRE DIRECTION]\n" + genre)
+    contract = story_contract(project)
+    causal_parts = [f"{field}: {contract[field]}" for field in ("goal", "obstacle", "decision", "consequence", "payoff") if contract[field]]
+    beat_id = str(shot.get("beat_id", "")).strip()
+    beat = next((item for item in project.get("story_beats", []) if isinstance(item, dict) and str(item.get("id", "")) == beat_id), None)
+    if causal_parts or beat:
+        if beat:
+            causal_parts.append("current visible event: " + str(beat.get("visible_event", "")).strip())
+            if str(beat.get("audience_effect", "")).strip():
+                causal_parts.append("audience effect: " + str(beat["audience_effect"]).strip())
+            if str(beat.get("why_next", "")).strip():
+                causal_parts.append("why the next shot must happen: " + str(beat["why_next"]).strip())
+        sections.append("[STORY CAUSALITY]\n" + "; ".join(causal_parts))
     if structured:
         sections.append("[SHOT CONTINUITY]\n" + structured)
     episode_continuity = episode_continuity_context(project)
@@ -1378,7 +1401,7 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
             value = ", ".join(str(item) for item in value)
         if str(value or "").strip():
             sound_parts.append(f"{label}: {str(value).strip()}")
-    if sound_parts and audio_config(project)["mode"] == "native-dialogue":
+    if sound_parts and audio_config(project)["mode"] in {"native-dialogue", "narration"}:
         sections.append("[AUDIO DESIGN]\n" + "\n".join(sound_parts))
     exit_behavior = str(shot.get("exit_behavior", director_config(project)["default_exit_behavior"])).strip()
     if exit_behavior in {"continue-action", "cut-on-action"}:
@@ -1438,6 +1461,9 @@ def _compact_shot_facts(project: dict[str, Any], shot: dict[str, Any], *, kind: 
         ("exit_action", "Exit action"),
         ("exit_behavior", "Edit exit"),
         ("continuity_notes", "Continuity"),
+        ("entry_action", "Entry action"),
+        ("continuity_in", "Continuity in"),
+        ("continuity_out", "Continuity out"),
     ):
         value = shot.get(key)
         if isinstance(value, list):
@@ -1447,6 +1473,10 @@ def _compact_shot_facts(project: dict[str, Any], shot: dict[str, Any], *, kind: 
     source_key = "image_prompt" if kind == "image" else "video_prompt"
     if str(shot.get("summary", "")).strip():
         facts.append("Action: " + str(shot["summary"]).strip())
+    contract = story_contract(project)
+    if any(contract[field] for field in ("goal", "obstacle", "decision", "consequence", "payoff")):
+        facts.append("Story goal: " + contract["goal"])
+        facts.append("Story consequence: " + contract["consequence"])
     if str(shot.get(source_key, "")).strip():
         facts.append(("Keyframe: " if kind == "image" else "Motion: ") + str(shot[source_key]).strip())
     facts.append("Frame layout: " + frame_layout(project, shot))
@@ -1505,11 +1535,11 @@ def prompt_variants(project: dict[str, Any], shot: dict[str, Any] | None = None,
             if audio_config(project)["subtitle_source"] == "upstream"
             else clean_frame_direction(project)
         )
-        audio_rule = (
-            "Generate and preserve native scene audio."
-            if audio_config(project)["mode"] == "native-dialogue"
-            else "Preserve the selected explicit audio workflow."
-        )
+        audio_rule = {
+            "native-dialogue": "Generate and preserve native character speech and scene audio.",
+            "narration": "Generate and preserve off-screen narration; visible characters stay silent with mouths closed.",
+            "local-narration": "Keep visible characters silent with mouths closed; local post-production supplies off-screen narration.",
+        }.get(audio_config(project)["mode"], "Preserve the selected explicit audio workflow.")
         minimal += (
             " One continuous cuttable action. " + audio_rule + " End during natural continuing motion; "
             "no sigh, freeze, farewell gesture, or final pose. " + caption_rule
@@ -1749,6 +1779,8 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         "visual_profile": resolved_visual_profile,
         "quality": quality_config(project),
         "continuity": continuity_config(project),
+        "story": story_clarity_score(project),
+        "story_contract": story_contract(project),
         "workflow": project.get("workflow", "general-video"),
         "requests": {
             "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
@@ -1844,6 +1876,7 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
             "dialogue_ratio": round(dialogue_shots / len(shots), 3) if shots else 0.0,
         },
         "director": director_config(project),
+        "story": story_clarity_score(project),
         "manual_review_required": [
             "character identity and wardrobe across adjacent shots",
             "screen direction, eyeline, prop placement, and scene lighting",
@@ -2848,7 +2881,10 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
     state = load_state(root)
     clips: list[Path] = []
     windows: list[dict[str, float]] = []
-    for shot in project["shots"]:
+    boundary_qa: list[dict[str, Any]] = []
+    qconfig = quality_config(project)
+    shot_records = list(project["shots"])
+    for index, shot in enumerate(shot_records):
         video = shot_state(state, str(shot["id"]))["video"]
         if video.get("status") != "completed" or not video.get("path"):
             raise SkillError(f"video is not complete for {shot['id']}")
@@ -2860,15 +2896,33 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
             timeline = edit_out - edit_in
         else:
             edit_in, edit_out, timeline = edit_window(shot)
+        trim = {"shot": str(shot["id"]), "applied": False, "reason": ""}
+        if (
+            index < len(shot_records) - 1
+            and qconfig["tail_auto_trim"]
+            and qconfig["tail_guard_seconds"] > 0
+            and str(shot.get("exit_behavior", director_config(project)["default_exit_behavior"])) in {"continue-action", "cut-on-action"}
+        ):
+            signal = detect_tail_motion(
+                clip_path,
+                scan_end=edit_out,
+                tail_seconds=qconfig["tail_guard_seconds"],
+                threshold=qconfig["tail_motion_threshold"],
+            )
+            suggestion = signal.get("suggested_edit_out")
+            if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
+                trim.update({"applied": True, "reason": "tail_motion_settled", "from": edit_out, "to": float(suggestion), "motion": signal.get("motion_score")})
+                edit_out = float(suggestion)
+                timeline = edit_out - edit_in
+        boundary_qa.append(trim)
         windows.append({"edit_in": edit_in, "edit_out": edit_out, "timeline_duration": timeline})
     output = root / "deliverables" / "final.mp4"
     target_size = str(project.get("defaults", {}).get("video_size") or "auto")
-    qconfig = quality_config(project)
     for shot in project["shots"]:
         runtime = shot_state(state, str(shot["id"]))["video"]
         if qconfig["resolution_policy"] == "block" and isinstance(runtime.get("qa"), dict) and not runtime["qa"].get("ok", True):
             raise SkillError(f"quality contract blocks assembly for {shot['id']}: " + "; ".join(runtime["qa"].get("errors", [])))
-    native_audio_required = audio_config(project)["mode"] == "native-dialogue"
+    native_audio_required = audio_config(project)["mode"] in {"native-dialogue", "narration"}
     media = assemble_clips(
         clips,
         output,
@@ -2893,6 +2947,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
         "updated_at": int(time.time()),
         "media": {key: value for key, value in media.items() if key not in {"path", "bytes"}},
         "qa": portable_qa(qa),
+        "boundary_qa": boundary_qa,
     }
     save_state(root, state)
     return output, media
@@ -3315,12 +3370,21 @@ def init_project(
         "target_duration_seconds": sum(shot_durations),
         "story": "",
         "story_beats": [],
+        "story_contract": {
+            "required": False,
+            "goal": "",
+            "obstacle": "",
+            "decision": "",
+            "consequence": "",
+            "payoff": "",
+        },
         "director": {
             "project_type": str(workflow.get("project_type", "single-clip")),
             "mode": str(workflow.get("director_mode", "single-shot")),
             "genre_packs": list(genre_packs_value) if genre_packs_value is not None else list(workflow.get("genre_packs", [])),
             "strict": bool(workflow.get("strict_director", False)),
             "default_exit_behavior": str(workflow.get("default_exit_behavior", "continue-action")),
+            "boundary_policy": "warn",
         },
         "character_bible": "",
         "style_bible": "",
@@ -3329,11 +3393,11 @@ def init_project(
         "audio": {
             "mode": audio_mode_value,
             "language": "zh-CN",
-            "generate_audio": audio_mode_value == "native-dialogue",
+            "generate_audio": audio_mode_value in {"native-dialogue", "narration"},
             "preserve_source_audio": True,
             "duck_source_audio": True,
             "subtitle_source": subtitle_source_value,
-            "generate_speech": audio_mode_value == "native-dialogue",
+            "generate_speech": audio_mode_value in {"native-dialogue", "narration"},
             "subtitle_delivery": "sidecar" if subtitle_source_value == "project" else "none",
             "burn_subtitles": False,
             "allow_upstream_captions": subtitle_source_value == "upstream",
@@ -3366,6 +3430,7 @@ def init_project(
             "tail_guard_seconds": 0.8,
             "tail_motion_policy": "warn",
             "tail_motion_threshold": 0.012,
+            "tail_auto_trim": True,
             "continuity_enabled": True,
             "previous_keyframe_reference": True,
         },
@@ -4341,6 +4406,7 @@ def main() -> int:
                     },
                     "new_project_defaults": {
                         "audio_mode": "native-dialogue",
+                        "supported_performance_modes": ["dialogue", "narration", "local-narration"],
                         "generate_audio": True,
                         "subtitle_source": "none",
                         "frame_layout": "single-full-frame",

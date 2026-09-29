@@ -932,6 +932,60 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertNotIn("No app UI, controls, overlays, text", prompt)
         self.assertNotIn("says exactly", prompt)
 
+    def test_narration_mode_is_explicit_and_forbids_character_dialogue(self) -> None:
+        project = self.root / "narration-mode"
+        self.run_cli(
+            "init", str(project), "--title", "Narration", "--topic", "A clear narrated action",
+            "--workflow", "cinematic-short", "--mode", "text-to-video", "--audio-mode", "narration",
+            "--shots", "2", "--seconds", "2",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["director"]["strict"] = False
+        value["story"] = "A narrator explains why the pump fails and how the village fixes it."
+        value["story_contract"] = {
+            "required": True,
+            "goal": "Restore water before the village runs dry.",
+            "obstacle": "A wrong repair makes the pump spray water.",
+            "decision": "The villagers follow the narrator's clue and inspect the loose screw.",
+            "consequence": "The leak worsens until the screw is fixed.",
+            "payoff": "The pump works and reveals a strange signal.",
+        }
+        value["story_beats"] = [
+            {"id": "beat-001", "visible_event": "The pump stops and villagers point at the dry pipe.", "audience_effect": "The water problem is immediately clear.", "why_next": "The alien tries a repair."},
+            {"id": "beat-002", "visible_event": "The alien turns the pump into a fountain before the screw is tightened.", "audience_effect": "The mistake raises the stakes.", "why_next": "The villagers inspect the loose screw."},
+        ]
+        for index, shot in enumerate(value["shots"]):
+            shot.update({
+                "beat_id": f"beat-{index + 1:03d}",
+                "summary": "The narrator shows the next visible cause and effect.",
+                "narration": "旁白说明这一镜头发生的因果变化。",
+                "audio_intent": "narration",
+                "video_prompt": "One continuous physical action; visible characters keep their mouths closed.",
+                "exit_action": "The hand continues toward the pump.",
+                "continuity_out": "The pump handle remains tilted and wet.",
+            })
+        value["shots"][1]["entry_action"] = "The hand enters already reaching for the pump handle."
+        value["shots"][1]["continuity_in"] = "The pump handle remains tilted and wet."
+        (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+        report = self.run_cli("preflight", str(project))
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["preflight"]["dialogue"]["mode"], "narration")
+        self.assertEqual(report["preflight"]["dialogue"]["narration_count"], 2)
+        self.assertGreaterEqual(report["preflight"]["story"]["score"], 70)
+        prompt = composed_video_prompt(value, value["shots"][0])
+        self.assertIn("mouths closed and no lip movement", prompt)
+
+    def test_required_story_contract_blocks_unclear_multishot_project(self) -> None:
+        project = self.create_project("unclear-story", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["director"]["mode"] = "cinematic-short"
+        value["director"]["strict"] = False
+        value["story_contract"] = {"required": True}
+        value["shots"].append(dict(value["shots"][0], id="shot-002", seconds=1))
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        result = self.run_cli("validate", str(project), expected=1)
+        self.assertTrue(any("story clarity score" in error for error in result["errors"]))
+
     def test_workflow_route_contract_is_enforced_by_init_and_validate(self) -> None:
         failed = self.run_cli(
             "init",

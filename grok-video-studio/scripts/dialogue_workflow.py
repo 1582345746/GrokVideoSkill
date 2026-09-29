@@ -16,7 +16,7 @@ from tts_providers import create_tts_provider
 from voice_contracts import canonical_voice_contract, duplicate_voice_errors, file_digest, validate_voice_contract
 
 
-DIALOGUE_MODES = {"preserve", "mute", "native-dialogue", "local-voice", "local-lipsync"}
+DIALOGUE_MODES = {"preserve", "mute", "native-dialogue", "narration", "local-voice", "local-lipsync", "local-narration"}
 SUBTITLE_SOURCES = {"upstream", "project", "none"}
 SUBTITLE_DELIVERIES = {"none", "sidecar", "burn", "both"}
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -31,8 +31,8 @@ def audio_config(project: dict[str, Any]) -> dict[str, Any]:
         "mode": mode,
         "subtitle_source": subtitle_source,
         "language": str(value.get("language", "zh-CN")).strip() or "zh-CN",
-        "generate_audio": bool(value.get("generate_audio", mode == "native-dialogue")),
-        "generate_speech": bool(value.get("generate_speech", value.get("generate_audio", mode == "native-dialogue"))),
+        "generate_audio": bool(value.get("generate_audio", mode in {"native-dialogue", "narration"})),
+        "generate_speech": bool(value.get("generate_speech", value.get("generate_audio", mode in {"native-dialogue", "narration"}))),
         "subtitle_delivery": subtitle_delivery,
         "burn_subtitles": bool(value.get("burn_subtitles", False)),
         "allow_upstream_captions": bool(value.get("allow_upstream_captions", subtitle_source == "upstream")),
@@ -41,6 +41,7 @@ def audio_config(project: dict[str, Any]) -> dict[str, Any]:
         "tts_provider": str(value.get("tts_provider", "cosyvoice")).strip().lower() or "cosyvoice",
         "allow_temporary_voices": bool(value.get("allow_temporary_voices", False)),
         "allow_shared_voices": bool(value.get("allow_shared_voices", False)),
+        "narrator_voice": value.get("narrator_voice") if isinstance(value.get("narrator_voice"), dict) else {},
     }
 
 
@@ -77,7 +78,7 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
         if field in raw_audio and not isinstance(raw_audio[field], bool):
             errors.append(f"audio.{field} must be a boolean")
     if config["mode"] not in DIALOGUE_MODES:
-        errors.append("audio.mode must be preserve, mute, native-dialogue, local-voice, or local-lipsync")
+        errors.append("audio.mode must be preserve, mute, native-dialogue, narration, local-voice, local-lipsync, or local-narration")
     if config["subtitle_source"] not in SUBTITLE_SOURCES:
         errors.append("audio.subtitle_source must be upstream, project, or none")
     if config["subtitle_delivery"] not in SUBTITLE_DELIVERIES:
@@ -88,12 +89,29 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("audio.allow_upstream_captions must be false when subtitle_source=none")
     if config["tts_provider"] not in {"cosyvoice", "voicebox", "voxcpm"}:
         errors.append("audio.tts_provider must be cosyvoice, voicebox, or voxcpm")
-    if config["mode"] == "native-dialogue" and not config["generate_audio"]:
-        errors.append("audio.generate_audio must be true for native-dialogue")
-    if config["mode"] == "native-dialogue" and not config["generate_speech"]:
-        errors.append("audio.generate_speech must be true for native-dialogue")
-    if config["mode"] in {"mute", "local-voice", "local-lipsync"} and config["generate_audio"]:
+    if config["mode"] in {"native-dialogue", "narration"} and not config["generate_audio"]:
+        errors.append(f"audio.generate_audio must be true for {config['mode']}")
+    if config["mode"] in {"native-dialogue", "narration"} and not config["generate_speech"]:
+        errors.append(f"audio.generate_speech must be true for {config['mode']}")
+    if config["mode"] in {"mute", "local-voice", "local-lipsync", "local-narration"} and config["generate_audio"]:
         errors.append(f"audio.generate_audio must be false for {config['mode']}")
+    if config["mode"] in {"narration", "local-narration"}:
+        if any(isinstance(shot, dict) and shot.get("dialogue") for shot in project.get("shots", [])):
+            errors.append(f"audio.mode {config['mode']} requires narration-only shots; remove dialogue lines")
+        if not any(isinstance(shot, dict) and str(shot.get("narration", "")).strip() for shot in project.get("shots", [])):
+            errors.append(f"audio.mode {config['mode']} requires at least one shot.narration")
+    if config["mode"] == "local-narration":
+        errors.extend(
+            validate_voice_contract(
+                config["narrator_voice"],
+                prefix="audio.narrator_voice",
+                default_provider=config["tts_provider"],
+                resolve_path=lambda value: project_path(root, value),
+                require_identity=True,
+                require_approved=True,
+                allow_temporary=config["allow_temporary_voices"],
+            )
+        )
     characters = {
         str(item.get("id", "")): item
         for item in project.get("characters", [])
@@ -207,7 +225,34 @@ def dialogue_lines(project: dict[str, Any]) -> list[dict[str, Any]]:
     return lines
 
 
+def narration_lines(project: dict[str, Any]) -> list[dict[str, Any]]:
+    """Convert shot narration into deterministic global TTS cues."""
+    lines: list[dict[str, Any]] = []
+    offset = 0.0
+    for shot in project.get("shots", []):
+        if not isinstance(shot, dict):
+            continue
+        text = str(shot.get("narration", "")).strip()
+        seconds = _seconds(project, shot)
+        if text and seconds > 0:
+            cues = shot.get("narration_cues") if isinstance(shot.get("narration_cues"), list) else []
+            if cues:
+                for index, cue in enumerate(cues, 1):
+                    if not isinstance(cue, dict) or not str(cue.get("text", "")).strip():
+                        continue
+                    start = float(cue.get("start", 0.0))
+                    end = float(cue.get("end", seconds))
+                    lines.append({"id": f"narration-{shot.get('id', 'shot')}-{index:02d}", "speaker": "narrator", "text": str(cue["text"]).strip(), "start": start, "end": end, "shot_id": str(shot.get("id", "")), "global_start": offset + start, "global_end": offset + end, "emotion": str(cue.get("emotion", "natural"))})
+            else:
+                start = float(shot.get("narration_start", 0.15) or 0.15)
+                end = float(shot.get("narration_end", max(start + 0.5, seconds - 0.15)) or max(start + 0.5, seconds - 0.15))
+                lines.append({"id": f"narration-{shot.get('id', 'shot')}", "speaker": "narrator", "text": text, "start": start, "end": min(seconds, end), "shot_id": str(shot.get("id", "")), "global_start": offset + start, "global_end": offset + min(seconds, end), "emotion": "natural"})
+        offset += max(0.0, seconds)
+    return lines
+
+
 def dialogue_subtitle_cues(project: dict[str, Any]) -> list[dict[str, Any]]:
+    lines = dialogue_lines(project) if audio_config(project)["mode"] not in {"narration", "local-narration"} else narration_lines(project)
     return [
         {
             "shot_id": line["shot_id"],
@@ -217,7 +262,7 @@ def dialogue_subtitle_cues(project: dict[str, Any]) -> list[dict[str, Any]]:
             "end": line["global_end"],
             "text": str(line.get("text", "")).strip(),
         }
-        for line in dialogue_lines(project)
+        for line in lines
         if bool(line.get("subtitle", True)) and str(line.get("text", "")).strip()
     ]
 
@@ -255,8 +300,16 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any], *, visual_med
         if str(value or "").strip():
             sound_parts.append(f"{label}: {str(value).strip()}")
     sound_context = (" " + "; ".join(sound_parts) + ".") if sound_parts else ""
-    if config["mode"] == "native-dialogue":
-        if intent == "dialogue":
+    if config["mode"] in {"native-dialogue", "narration"}:
+        if config["mode"] == "narration":
+            narration = str(shot.get("narration", "")).strip()
+            policy = (
+                "Generate a clear off-screen Mandarin narrator over scene ambience. "
+                f"Narration script is audio-only: {narration}. "
+                "All visible characters remain silent with mouths closed and no lip movement; no character speaks. "
+                "Keep written words exclusively in the soundtrack and leave every frame free of text."
+            )
+        elif intent == "dialogue":
             policy = (
                 "Generate native synchronized character speech, room tone, and specified sound effects. "
                 "Prioritize believable acting, pauses, turn-taking, and intelligibility; do not rush the line into a rigid timestamp."
@@ -288,6 +341,11 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any], *, visual_med
             }.get(str(visual_medium or ""), "one uninterrupted composition in the declared visual medium")
             policy += f" Keep the picture as {visual_contract} while all speech remains audible only."
         policy += sound_context
+    elif config["mode"] == "local-narration":
+        return (
+            "Characters remain silent with mouths closed and no lip movement. "
+            "Use only physical actions, environmental sound, and clean frames; local post-production supplies the off-screen narrator."
+        )
     else:
         if not lines:
             return ""
@@ -296,7 +354,8 @@ def dialogue_prompt(project: dict[str, Any], shot: dict[str, Any], *, visual_med
 
 
 def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
-    lines = dialogue_lines(project)
+    config = audio_config(project)
+    lines = dialogue_lines(project) if config["mode"] not in {"narration", "local-narration"} else narration_lines(project)
     warnings = []
     items = []
     for line in lines:
@@ -316,10 +375,10 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
                 "characters_per_second": round(density, 2),
             }
         )
-    config = audio_config(project)
     return {
         "mode": config["mode"],
         "line_count": len(lines),
+        "narration_count": len(narration_lines(project)) if config["mode"] in {"narration", "local-narration"} else 0,
         "lines": items,
         "warnings": warnings,
         "contract": {
@@ -334,7 +393,7 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
             "verify the visible speaker matches the voice",
             "verify mouth timing and natural pauses",
             "verify background sound does not mask dialogue",
-        ] if lines else [],
+        ] if lines else (["verify no visible character lip movement; narration remains off-screen", "verify narrator pacing bridges each causal beat"] if config["mode"] in {"narration", "local-narration"} else []),
     }
 
 
@@ -367,8 +426,8 @@ def render_local_dialogue(
     if errors:
         raise SkillError("dialogue validation failed: " + "; ".join(errors))
     config = audio_config(project)
-    if config["mode"] not in {"local-voice", "local-lipsync"}:
-        raise SkillError("dialogue render requires audio.mode local-voice or local-lipsync")
+    if config["mode"] not in {"local-voice", "local-lipsync", "local-narration"}:
+        raise SkillError("dialogue render requires audio.mode local-voice, local-lipsync, or local-narration")
     if not source_video.is_file():
         raise SkillError(f"dialogue source video does not exist: {source_video}")
     settings = load_component_settings()
@@ -379,8 +438,11 @@ def render_local_dialogue(
     state = _load_state(root)
     state_path = root / "dialogue-state.json"
     characters = {str(item.get("id", "")): item for item in project.get("characters", []) if isinstance(item, dict)}
+    render_lines = dialogue_lines(project) if config["mode"] != "local-narration" else narration_lines(project)
+    if config["mode"] == "local-narration":
+        characters["narrator"] = {"id": "narrator", "name": "Narrator", "voice": config["narrator_voice"]}
     rendered: list[dict[str, Any]] = []
-    for line in dialogue_lines(project):
+    for line in render_lines:
         line_id = str(line["id"])
         character = characters[str(line["speaker"])]
         selected_provider = (str(character["voice"].get("provider", "")) or tts_provider or config["tts_provider"]).strip().lower()
