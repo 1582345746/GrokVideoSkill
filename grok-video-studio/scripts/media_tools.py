@@ -331,14 +331,18 @@ def detect_tail_motion(
     for previous, current in zip(frames, frames[1:]):
         differences.append(sum(abs(int(a) - int(b)) for a, b in zip(previous, current)) / (frame_size * 255.0))
     score = sum(differences) / len(differences) if differences else 0.0
-    return {
+    static = score < float(threshold)
+    result = {
         "available": True,
-        "static": score < float(threshold),
+        "static": static,
         "motion_score": round(score, 5),
         "tail_seconds": round(end - start, 3),
         "threshold": float(threshold),
         "sample_count": len(frames),
     }
+    if static:
+        result["suggested_edit_out"] = round(start, 3)
+    return result
 
 
 def detect_text_overlay(
