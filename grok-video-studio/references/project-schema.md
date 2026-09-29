@@ -1,4 +1,4 @@
-# Project Contract (v2.6.0 narrative-clarity-boundary-qa)
+# Project Contract (v2.7.0 narrative-contract-layered-delivery-qa)
 
 `project.json` is the creative input. `state.json` is script-owned runtime state. Never put credentials in either file.
 
@@ -35,6 +35,15 @@
     "decision": "",
     "consequence": "",
     "payoff": ""
+  },
+  "narrative_contract_v2": {
+    "required": false,
+    "protagonist_goal": "",
+    "audience_knows": "",
+    "character_knows": "",
+    "choice": "",
+    "visible_consequence": "",
+    "next_question": ""
   },
   "character_bible": "Concise stable identity, clothing, and props",
   "style_bible": "Concise stable visual language",
@@ -84,12 +93,16 @@
     "tail_motion_policy": "warn",
     "tail_motion_threshold": 0.012,
     "tail_auto_trim": true,
+    "duration_policy": "block",
+    "duration_tolerance_seconds": 0.5,
+    "duration_tolerance_ratio": 0.05,
     "continuity_enabled": true,
     "previous_keyframe_reference": true
   },
   "continuity": {
     "enabled": true,
     "strict": true,
+    "state_change_policy": "warn",
     "world_state": {}
   },
   "character_master": {
@@ -215,13 +228,15 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 
 `audio.generate_speech`, `audio.subtitle_delivery`, `audio.burn_subtitles`, and `audio.allow_upstream_captions` keep speech generation, sidecar SRT, burned subtitles, and provider-baked captions as separate contracts. `subtitle_delivery` accepts `none`, `sidecar`, `burn`, or `both`; burning requires `subtitle_source=project` and always creates a derivative instead of replacing the clean master.
 
-`quality` records the delivery policy. `resolution_policy=warn|block|allow` compares the requested frame with the actual downloaded frame and stores both values in QA. `scale_mode=fill` crops to cover the target canvas; `pad` is available for intentional letterboxing. `caption_detection=off|warn|block` optionally runs local Tesseract when installed and keeps manual pixel review when it is unavailable. `tail_guard_seconds` and `tail_motion_policy` produce an `edit_out` suggestion when the final motion settles into a generic pose.
+`quality` records the delivery policy. `resolution_policy=warn|block|allow` compares the requested frame with the actual downloaded frame and stores both values in QA. `scale_mode=fill` crops to cover the target canvas; `pad` is available for intentional letterboxing. `caption_detection=off|warn|block` optionally runs local Tesseract when installed and keeps manual pixel review when it is unavailable. `duration_policy` and its tolerance fields compare the final master with `target_duration_seconds`; a short final file can be blocked even when every individual clip is technically valid. `tail_guard_seconds` and `tail_motion_policy` produce an `edit_out` suggestion when the final motion settles into a generic pose.
 
-`continuity` enables previous-keyframe handoff. Each shot may declare `scene_state`, `asset_state`, `continuity_in`, and `continuity_out`; the previous generated keyframe is added as a lower-priority image reference when the reference budget allows. Video generation still receives only the current shot keyframe.
+`continuity` enables previous-keyframe handoff. Each shot may declare `scene_state`, `asset_state`, `continuity_in`, and `continuity_out`; the previous generated keyframe is added as a lower-priority image reference when the reference budget allows. Video generation still receives only the current shot keyframe. QA emits a structured state diff at every adjacent boundary. With `state_change_policy=block`, a changed vehicle, prop, weather, lighting, or character state requires `state_change_reason` (or an explicit `continuity_change=true`).
 
-For multi-shot narrative projects, `story_contract` describes the causal chain and `story_beats[].why_next` explains why the following shot must happen. Preflight reports the `story` clarity score. `quality.tail_auto_trim` trims settled tails from non-final shots during assembly and records the applied window in `state.json.deliverables.final.boundary_qa`.
+For multi-shot narrative projects, `story_contract` describes the causal chain and `story_beats[].why_next` explains why the following shot must happen. Strict product projects can use `narrative_contract_v2` to require audience knowledge, character knowledge, the choice, visible consequence, and the next question; each shot then needs `main_event`, `motivation`, `result`, and `next_reason`. Preflight reports the `story` clarity score and causal coverage. `quality.tail_auto_trim` trims settled tails from non-final shots during assembly and records the applied window in `state.json.deliverables.final.boundary_qa`.
 
 `retry_policy.max_total_attempts` defaults to three total billable attempts (initial request plus two retries). `max_retries` must not imply more attempts than this total; configure four total attempts explicitly when three retries are required. Provider failover consumes one of the same attempts. `submission_unknown` is never recreated automatically.
+
+`state.json` keeps the resumable phase machine and a derived asset registry. `stage-status` reports the phases `brief`, `preflight`, `character_master`, `keyframes`, `clips`, `assembly`, `qa`, `review`, and `delivery`; each registry entry records its kind, path, digest, generation status, and review status. This allows a rejected clip to be replaced without invalidating approved keyframes or unrelated shots.
 
 Video reference/edit/extend and audio reference are separate future capabilities. Current `image_references` and `video_references` accept still images only; MP4/WAV files are blocked during validation rather than silently ignored.
 

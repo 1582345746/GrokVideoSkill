@@ -551,6 +551,9 @@ def quality_report(
     *,
     expected_size: str = "auto",
     expected_duration: float | None = None,
+    duration_tolerance_seconds: float = 1.5,
+    duration_tolerance_ratio: float = 0.25,
+    duration_policy: str = "warn",
     black_is_error: bool = False,
     expected_frame_layout: str = "",
     layout_is_error: bool = False,
@@ -568,6 +571,8 @@ def quality_report(
     warnings: list[str] = []
     if resolution_policy not in {"allow", "warn", "block"}:
         raise SkillError("resolution_policy must be allow, warn, or block")
+    if duration_policy not in {"allow", "warn", "block"}:
+        raise SkillError("duration_policy must be allow, warn, or block")
     if caption_detection not in {"off", "warn", "block"}:
         raise SkillError("caption_detection must be off, warn, or block")
     if tail_motion_policy not in {"allow", "warn", "block"}:
@@ -603,8 +608,24 @@ def quality_report(
                         warnings.append(message)
                 elif resolution_policy != "allow":
                     warnings.append(message)
-    if expected_duration is not None and abs(media["duration"] - expected_duration) > max(1.5, expected_duration * 0.25):
-        warnings.append(f"duration differs from request: expected about {expected_duration}s, got {media['duration']}s")
+    if expected_duration is not None:
+        duration_delta = abs(media["duration"] - expected_duration)
+        duration_tolerance = max(float(duration_tolerance_seconds), expected_duration * float(duration_tolerance_ratio))
+        duration_signal = {
+            "requested": round(float(expected_duration), 3),
+            "actual": round(float(media["duration"]), 3),
+            "delta": round(duration_delta, 3),
+            "tolerance": round(duration_tolerance, 3),
+            "within_tolerance": duration_delta <= duration_tolerance,
+        }
+        if duration_delta > duration_tolerance:
+            message = (
+                f"duration differs from request: expected about {expected_duration}s, got {media['duration']}s "
+                f"(tolerance {duration_tolerance:.3f}s)"
+            )
+            (errors if duration_policy == "block" else warnings if duration_policy == "warn" else []).append(message)
+    else:
+        duration_signal = {}
     if media["codec"] != "h264" or media["pixel_format"] != "yuv420p":
         warnings.append("delivery compatibility is best with H.264 yuv420p")
 
@@ -680,7 +701,9 @@ def quality_report(
                 tail_motion["suggested_edit_out"] = round(suggestion, 3)
         if caption_detection != "off":
             text_overlay = detect_text_overlay(path, scan_start=scan_start, scan_end=scan_end)
-            if text_overlay.get("detected"):
+            if caption_detection == "block" and not text_overlay.get("available", False):
+                errors.append("OCR/text detection is unavailable; clean-frame delivery cannot be verified")
+            elif text_overlay.get("detected"):
                 message = "OCR detected visible text in the clean-frame scan; review for captions, logos, or watermarks"
                 if caption_detection == "block":
                     errors.append(message)
@@ -701,6 +724,8 @@ def quality_report(
                 warnings.append(f"audio analysis failed: {error}")
     else:
         warnings.append("ffmpeg not found; black/freeze scan was skipped")
+        if caption_detection == "block":
+            errors.append("OCR/text detection is unavailable; clean-frame delivery cannot be verified")
 
     return {
         "ok": not errors,
@@ -713,6 +738,7 @@ def quality_report(
             "freeze_events": freeze_events[:20],
             "repeated_panel_layout": repeated_panel_layout,
             "resolution": resolution_signal,
+            "duration": duration_signal,
             "tail_motion": tail_motion,
             "text_overlay": text_overlay,
             "audio": audio_signals,

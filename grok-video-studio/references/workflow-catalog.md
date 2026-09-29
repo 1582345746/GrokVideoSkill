@@ -1,4 +1,4 @@
-# Workflow Catalog (v2.6.0 narrative-clarity-boundary-qa)
+# Workflow Catalog (v2.7.0 narrative-contract-layered-delivery-qa)
 
 Workflow definitions live in `assets/workflow-templates/*.json`. Edit those JSON files to improve titles, questions, and prompt guidance without changing the Python client.
 

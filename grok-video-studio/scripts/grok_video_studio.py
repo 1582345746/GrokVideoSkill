@@ -58,7 +58,10 @@ from dialogue_workflow import (
 from director_contracts import (
     director_config,
     director_gate,
+    continuity_state_diff,
     edit_window,
+    narrative_contract,
+    narrative_contract_coverage,
     shot_audio_intent,
     story_clarity_score,
     story_contract,
@@ -158,7 +161,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.6.0"
+SKILL_VERSION = "2.7.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -313,6 +316,8 @@ def fresh_state() -> dict[str, Any]:
         "character_master": {"status": "pending", "attempts": 0},
         "shots": {},
         "deliverables": {},
+        "pipeline": {"current_phase": "brief", "history": []},
+        "asset_registry": {},
         "budget_usage": {"image_attempts": 0, "video_attempts": 0, "estimated_cost": 0.0},
     }
 
@@ -330,11 +335,14 @@ def load_state(root: Path) -> dict[str, Any]:
     value.setdefault("character_master", {"status": "pending", "attempts": 0})
     value.setdefault("deliverables", {})
     value.setdefault("budget_usage", {"image_attempts": 0, "video_attempts": 0, "estimated_cost": 0.0})
+    value.setdefault("pipeline", {"current_phase": "brief", "history": []})
+    value.setdefault("asset_registry", {})
     return value
 
 
 def save_state(root: Path, state: dict[str, Any]) -> None:
     state["updated_at"] = int(time.time())
+    state["asset_registry"] = asset_registry_from_state(state)
     atomic_write_json(state_file(root), state)
 
 
@@ -351,6 +359,83 @@ def resolve_project_path(root: Path, value: str, *, must_exist: bool = True) -> 
     if must_exist and not resolved.is_file():
         raise SkillError(f"reference file does not exist: {value}")
     return resolved
+
+
+PIPELINE_PHASES = ("brief", "preflight", "character_master", "keyframes", "clips", "assembly", "qa", "review", "delivery")
+
+
+def _stage_status(values: list[str]) -> str:
+    normalized = [value for value in values if value]
+    if not normalized:
+        return "pending"
+    if any(value in {"failed", "rejected", "blocked"} for value in normalized):
+        return "blocked"
+    if all(value in {"completed", "approved", "passed"} for value in normalized):
+        return "completed"
+    if any(value in {"running", "queued", "needs_review"} for value in normalized):
+        return "running"
+    return "pending"
+
+
+def asset_registry_from_state(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Build a stable asset index from resumable runtime state."""
+    registry: dict[str, dict[str, Any]] = {}
+    master = state.get("character_master") if isinstance(state.get("character_master"), dict) else {}
+    if master.get("path"):
+        registry["character-master"] = {
+            "kind": "character-master",
+            "status": master.get("status", "pending"),
+            "path": master.get("path", ""),
+            "sha256": master.get("sha256", ""),
+        }
+    shots = state.get("shots") if isinstance(state.get("shots"), dict) else {}
+    for shot_id, runtime in shots.items():
+        if not isinstance(runtime, dict):
+            continue
+        for kind in ("image", "video"):
+            item = runtime.get(kind) if isinstance(runtime.get(kind), dict) else {}
+            if item.get("path"):
+                registry[f"{shot_id}:{kind}"] = {
+                    "kind": kind,
+                    "shot_id": str(shot_id),
+                    "status": item.get("status", "pending"),
+                    "review_status": item.get("review_status", "pending"),
+                    "path": item.get("path", ""),
+                    "sha256": item.get("sha256", ""),
+                }
+    deliverables = state.get("deliverables") if isinstance(state.get("deliverables"), dict) else {}
+    final = deliverables.get("final") if isinstance(deliverables.get("final"), dict) else {}
+    if final.get("path"):
+        registry["deliverable:final"] = {
+            "kind": "deliverable",
+            "status": final.get("status", "completed"),
+            "path": final.get("path", ""),
+            "sha256": final.get("sha256", ""),
+            "delivery_pass": bool((final.get("qa") or {}).get("delivery_pass", False)),
+        }
+    return registry
+
+
+def pipeline_status(root: Path, project: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
+    runtimes = [shot_state(state, str(shot.get("id", ""))) for shot in shots]
+    master = state.get("character_master") if isinstance(state.get("character_master"), dict) else {}
+    final_value = (state.get("deliverables") or {}).get("final") if isinstance(state.get("deliverables"), dict) else {}
+    final = final_value if isinstance(final_value, dict) else {}
+    phases = {
+        "brief": "completed" if str(project.get("story", "")).strip() else "pending",
+        "preflight": "completed" if not validate_project(root, project) else "blocked",
+        "character_master": "completed" if not bool(character_master_config(project).get("enabled")) or master.get("status") == "completed" else str(master.get("status", "pending")),
+        "keyframes": _stage_status([str(item.get("image", {}).get("status", "pending")) for item in runtimes]),
+        "clips": _stage_status([str(item.get("video", {}).get("status", "pending")) for item in runtimes]),
+        "assembly": "completed" if final.get("path") else "pending",
+        "qa": "completed" if final.get("qa") else "pending",
+        "review": _stage_status([str(item.get("video", {}).get("review_status", "pending")) for item in runtimes]),
+        "delivery": "completed" if bool((final.get("qa") or {}).get("delivery_pass", False)) else "blocked" if final.get("qa") else "pending",
+    }
+    completed = [phase for phase in PIPELINE_PHASES if phases[phase] == "completed"]
+    current = next((phase for phase in PIPELINE_PHASES if phases[phase] != "completed"), PIPELINE_PHASES[-1])
+    return {"current_phase": current, "phases": phases, "completed_phases": completed, "phase_order": list(PIPELINE_PHASES)}
 
 
 def _known_secret_field(value: Any) -> bool:
@@ -591,6 +676,14 @@ def quality_config(project: dict[str, Any]) -> dict[str, Any]:
         tail_threshold = float(value.get("tail_motion_threshold", 0.012))
     except (TypeError, ValueError):
         tail_threshold = 0.012
+    try:
+        duration_tolerance_seconds = float(value.get("duration_tolerance_seconds", 0.5))
+    except (TypeError, ValueError):
+        duration_tolerance_seconds = 0.5
+    try:
+        duration_tolerance_ratio = float(value.get("duration_tolerance_ratio", 0.05))
+    except (TypeError, ValueError):
+        duration_tolerance_ratio = 0.05
     return {
         "resolution_policy": str(value.get("resolution_policy", "warn")).strip().lower() or "warn",
         "minimum_resolution_ratio": minimum_ratio,
@@ -600,6 +693,9 @@ def quality_config(project: dict[str, Any]) -> dict[str, Any]:
         "tail_motion_policy": str(value.get("tail_motion_policy", "warn")).strip().lower() or "warn",
         "tail_motion_threshold": tail_threshold,
         "tail_auto_trim": bool(value.get("tail_auto_trim", False)),
+        "duration_policy": str(value.get("duration_policy", "warn")).strip().lower() or "warn",
+        "duration_tolerance_seconds": duration_tolerance_seconds,
+        "duration_tolerance_ratio": duration_tolerance_ratio,
         "continuity_enabled": bool(value.get("continuity_enabled", True)),
         "previous_keyframe_reference": bool(value.get("previous_keyframe_reference", True)),
     }
@@ -619,16 +715,35 @@ def validate_quality_config(project: dict[str, Any]) -> list[str]:
         errors.append("quality.caption_detection must be off, warn, or block")
     if config["tail_motion_policy"] not in QUALITY_POLICIES:
         errors.append("quality.tail_motion_policy must be allow, warn, or block")
+    if config["duration_policy"] not in QUALITY_POLICIES:
+        errors.append("quality.duration_policy must be allow, warn, or block")
     if not 0.0 < float(config["minimum_resolution_ratio"]) <= 1.0:
         errors.append("quality.minimum_resolution_ratio must be greater than 0 and no more than 1")
     if float(config["tail_guard_seconds"]) < 0 or float(config["tail_guard_seconds"]) > 5:
         errors.append("quality.tail_guard_seconds must be from 0 to 5 seconds")
     if not 0.0 < float(config["tail_motion_threshold"]) < 1.0:
         errors.append("quality.tail_motion_threshold must be greater than 0 and less than 1")
+    if float(config["duration_tolerance_seconds"]) < 0 or float(config["duration_tolerance_seconds"]) > 10:
+        errors.append("quality.duration_tolerance_seconds must be from 0 to 10 seconds")
+    if not 0.0 <= float(config["duration_tolerance_ratio"]) <= 1.0:
+        errors.append("quality.duration_tolerance_ratio must be from 0 to 1")
     if not isinstance(config["continuity_enabled"], bool) or not isinstance(config["previous_keyframe_reference"], bool):
         errors.append("quality continuity flags must be booleans")
     if not isinstance(config["tail_auto_trim"], bool):
         errors.append("quality.tail_auto_trim must be a boolean")
+    return errors
+
+
+def validate_continuity_config(project: dict[str, Any]) -> list[str]:
+    value = project.get("continuity")
+    if value is not None and not isinstance(value, dict):
+        return ["project.continuity must be an object"]
+    config = continuity_config(project)
+    errors: list[str] = []
+    if config["state_change_policy"] not in QUALITY_POLICIES:
+        errors.append("continuity.state_change_policy must be allow, warn, or block")
+    if not isinstance(config["enabled"], bool) or not isinstance(config["strict"], bool):
+        errors.append("continuity.enabled and continuity.strict must be booleans")
     return errors
 
 
@@ -637,6 +752,7 @@ def continuity_config(project: dict[str, Any]) -> dict[str, Any]:
     return {
         "enabled": bool(value.get("enabled", quality_config(project)["continuity_enabled"])),
         "strict": bool(value.get("strict", True)),
+        "state_change_policy": str(value.get("state_change_policy", "warn")).strip().lower() or "warn",
         "world_state": value.get("world_state", {}) if isinstance(value.get("world_state", {}), dict) else {},
     }
 
@@ -862,6 +978,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     errors.extend(validate_director(project))
     errors.extend(validate_visual_profile(project))
     errors.extend(validate_quality_config(project))
+    errors.extend(validate_continuity_config(project))
     shots = project.get("shots")
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
@@ -1039,7 +1156,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             state_value = raw_shot.get(state_name)
             if state_value is not None and not isinstance(state_value, (dict, list, str)):
                 errors.append(f"{prefix}.{state_name} must be an object, array, or string")
-        for field in ("continuity_in", "continuity_out"):
+        for field in ("continuity_in", "continuity_out", "state_change_reason"):
             if raw_shot.get(field) is not None and not isinstance(raw_shot.get(field), str):
                 errors.append(f"{prefix}.{field} must be a string")
         subtitle_items = raw_shot.get("subtitles")
@@ -1216,6 +1333,19 @@ def structured_shot_context(project: dict[str, Any], shot: dict[str, Any]) -> st
         visible_event = str(beat.get("visible_event", "")).strip()
         if visible_event:
             lines.append(f"Story beat {beat_id}: {visible_event}")
+    if narrative_contract(project)["required"]:
+        narrative_fields = (
+            ("main_event", "Main visible event"),
+            ("motivation", "Why this happens now"),
+            ("result", "Visible result"),
+            ("next_reason", "Reason for the next shot"),
+        )
+        for field, label in narrative_fields:
+            value = shot.get(field)
+            if not str(value or "").strip() and field == "main_event":
+                value = shot.get("summary", "")
+            if str(value or "").strip():
+                lines.append(f"{label}: {str(value).strip()}")
     for key, label in (
         ("shot_role", "Shot role"),
         ("lens", "Lens and focal feel"),
@@ -1770,6 +1900,12 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         warnings.append(
             "multi-shot text-to-video identity continuity is prompt-only; use image-to-video with a character master and per-shot keyframes when strict identity is required"
         )
+    narrative = narrative_contract(project)
+    narrative_coverage = narrative_contract_coverage(project)
+    if narrative["required"] and narrative_coverage["complete_shots"] < narrative_coverage["shot_count"]:
+        warnings.append(
+            "narrative_contract_v2 is required but one or more shots lack a complete causal beat; paid generation is blocked"
+        )
     video_requests = len(shots)
     try:
         cost = estimated_project_cost(project, image_requests=image_requests, video_requests=video_requests)
@@ -1781,6 +1917,8 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         "continuity": continuity_config(project),
         "story": story_clarity_score(project),
         "story_contract": story_contract(project),
+        "narrative_contract_v2": narrative,
+        "narrative_coverage": narrative_coverage,
         "workflow": project.get("workflow", "general-video"),
         "requests": {
             "character_master_images": int(bool(master.get("enabled", False)) and bool(master.get("generate", False))),
@@ -1821,6 +1959,7 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
     action_shots = 0
     characters = {str(item.get("id")): item for item in project_characters(project)}
     previous: dict[str, Any] | None = None
+    continuity_diffs: list[dict[str, Any]] = []
     for shot in shots:
         shot_id = str(shot.get("id", ""))
         role = str(shot.get("shot_role", "")).strip().lower()
@@ -1852,6 +1991,17 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
                 current_state = shot.get("scene_state") or shot.get("asset_state")
                 if previous_state and not current_state:
                     warnings.append(f"{shot_id}: previous shot declares scene or asset state but this shot does not")
+                state_diff = continuity_state_diff(previous, shot)
+                if state_diff["has_diff"]:
+                    declared_reason = str(shot.get("state_change_reason", "")).strip() or bool(shot.get("continuity_change", False))
+                    diff_record = {"from": str(previous.get("id", "")), "to": shot_id, **state_diff, "declared_reason": bool(declared_reason)}
+                    continuity_diffs.append(diff_record)
+                    if not declared_reason and continuity_config(project)["state_change_policy"] != "allow":
+                        message = f"boundary {previous.get('id', 'previous')} -> {shot_id} changes locked scene/asset state without state_change_reason"
+                        if continuity_config(project)["state_change_policy"] == "block":
+                            errors.append(message)
+                        else:
+                            warnings.append(message)
         previous = shot
     cinematic_workflow = director_config(project)["mode"] != "single-shot" or bool(project.get("series_context"))
     if cinematic_workflow:
@@ -1877,6 +2027,7 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
         },
         "director": director_config(project),
         "story": story_clarity_score(project),
+        "continuity_diffs": continuity_diffs,
         "manual_review_required": [
             "character identity and wardrobe across adjacent shots",
             "screen direction, eyeline, prop placement, and scene lighting",
@@ -3025,6 +3176,9 @@ def qa_project(root: Path) -> dict[str, Any]:
             scan_end=qa_edit_out,
             resolution_policy=qconfig["resolution_policy"],
             minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+            duration_policy=qconfig["duration_policy"],
+            duration_tolerance_seconds=qconfig["duration_tolerance_seconds"],
+            duration_tolerance_ratio=qconfig["duration_tolerance_ratio"],
             caption_detection=qconfig["caption_detection"],
             tail_guard_seconds=qconfig["tail_guard_seconds"],
             tail_motion_policy=qconfig["tail_motion_policy"],
@@ -3038,6 +3192,34 @@ def qa_project(root: Path) -> dict[str, Any]:
             "blocking_checks": visual_checks,
         }
         report.setdefault("blocking_review_items", []).extend(visual_checks)
+        text_signal = report.get("signals", {}).get("text_overlay", {})
+        if audio_config(project).get("subtitle_source") == "none":
+            if not text_signal.get("available", False):
+                report["clean_frame_status"] = "unverified"
+                report.setdefault("blocking_review_items", []).append(
+                    "OCR is unavailable; a human or multimodal pixel review must confirm there is no text, logo, watermark, or sign"
+                )
+            elif text_signal.get("detected"):
+                report["clean_frame_status"] = "failed"
+            else:
+                report["clean_frame_status"] = "passed"
+        else:
+            report["clean_frame_status"] = "not_applicable"
+        declared_characters = shot.get("character_ids", []) if isinstance(shot.get("character_ids", []), list) else []
+        expected_character_count = shot.get("expected_character_count", len(declared_characters))
+        report["identity_expectation"] = {
+            "declared_character_ids": [str(value) for value in declared_characters],
+            "expected_character_count": int(expected_character_count) if str(expected_character_count).isdigit() else None,
+            "detected_character_count": report.get("signals", {}).get("detected_character_count"),
+            "extra_character_status": "manual-review-required",
+        }
+        detected_count = report["identity_expectation"]["detected_character_count"]
+        expected_count = report["identity_expectation"]["expected_character_count"]
+        if detected_count is not None and expected_count is not None and int(detected_count) > int(expected_count):
+            report["errors"].append(
+                f"detected {detected_count} visible characters but only {expected_count} are declared for {shot_id}"
+            )
+            report["ok"] = False
         if report["media"].get("has_subtitles") and audio_config(project).get("subtitle_source") == "none":
             report["errors"].append("clean delivery contains an embedded subtitle stream while audio.subtitle_source is none")
             report["ok"] = False
@@ -3121,7 +3303,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         report = quality_report(
             final_path,
             expected_size=str(project.get("defaults", {}).get("video_size") or "auto"),
-            expected_duration=sum(edit_window(shot)[2] for shot in project["shots"] if isinstance(shot, dict)),
+            expected_duration=float(project.get("target_duration_seconds") or sum(edit_window(shot)[2] for shot in project["shots"] if isinstance(shot, dict))),
             black_is_error=True,
             expected_frame_layout=(
                 "single-full-frame"
@@ -3135,6 +3317,9 @@ def qa_project(root: Path) -> dict[str, Any]:
             ),
             resolution_policy=qconfig["resolution_policy"],
             minimum_resolution_ratio=qconfig["minimum_resolution_ratio"],
+            duration_policy=qconfig["duration_policy"],
+            duration_tolerance_seconds=qconfig["duration_tolerance_seconds"],
+            duration_tolerance_ratio=qconfig["duration_tolerance_ratio"],
             caption_detection=qconfig["caption_detection"],
         )
         report["visual_profile_review"] = {
@@ -3145,6 +3330,19 @@ def qa_project(root: Path) -> dict[str, Any]:
             "blocking_checks": visual_checks,
         }
         report.setdefault("blocking_review_items", []).extend(visual_checks)
+        final_text_signal = report.get("signals", {}).get("text_overlay", {})
+        if audio_config(project).get("subtitle_source") == "none":
+            if not final_text_signal.get("available", False):
+                report["clean_frame_status"] = "unverified"
+                report.setdefault("blocking_review_items", []).append(
+                    "OCR is unavailable; a human or multimodal pixel review must confirm the final master is text-free"
+                )
+            elif final_text_signal.get("detected"):
+                report["clean_frame_status"] = "failed"
+            else:
+                report["clean_frame_status"] = "passed"
+        else:
+            report["clean_frame_status"] = "not_applicable"
         expected_audio_policy = audio_policy(project)
         if expected_audio_policy == "preserve" and not report["media"]["has_audio"]:
             report["errors"].append("final delivery has no audio track while defaults.audio_policy is preserve")
@@ -3206,15 +3404,81 @@ def qa_project(root: Path) -> dict[str, Any]:
                 "reject unintended model-baked captions when subtitle_source is none",
             ]
             if dialogue["mode"] == "native-dialogue" and dialogue["line_count"]
-            else []
+            else (
+                [
+                    "verify narration wording and timing against the declared shot event",
+                    "verify visible characters remain silent with closed mouths",
+                    "reject unintended model-baked captions when subtitle_source is none",
+                ]
+                if dialogue["mode"] in {"narration", "local-narration"} and dialogue["line_count"]
+                else []
+            )
         ),
     }
+    project_audit = audit_project(root, project)
+    narrative_required = bool(narrative_contract(project).get("required"))
+    narrative_pass = bool(project_audit.get("ok")) and (
+        not narrative_required or float(project_audit.get("story", {}).get("score", 0)) >= float(project_audit.get("story", {}).get("threshold", 70))
+    )
+    audio_requires_content_review = dialogue["mode"] in {
+        "native-dialogue",
+        "narration",
+        "local-voice",
+        "local-lipsync",
+        "local-narration",
+    } and bool(dialogue.get("line_count"))
+    audio_pass: bool | None = None if audio_requires_content_review else technical_ok
+    if audio_requires_content_review:
+        dialogue_review["status"] = "unverified-without-asr"
+        dialogue_review["blocking_reason"] = "audio content review is incomplete until ASR or human listening confirms wording, speaker, and timing"
+    else:
+        dialogue_review["status"] = "not-required"
+    continuity_warnings = [
+        warning
+        for warning in project_audit.get("warnings", [])
+        if any(token in str(warning).lower() for token in ("continuity", "scene state", "asset state", "screen direction", "eyeline"))
+    ]
+    continuity_pass: bool | None = None if visual_ok is None else not continuity_warnings
+    clip_clean_states = [
+        str(item.get("clean_frame_status", "unverified"))
+        for item in reports
+        if item.get("kind") == "clip"
+    ]
+    final_report = next((item for item in reports if item.get("kind") == "deliverable"), None)
+    clean_frame_status = str((final_report or {}).get("clean_frame_status", "unverified"))
+    clean_frame_pass = clean_frame_status in {"passed", "not_applicable"} and all(
+        value in {"passed", "not_applicable"} for value in clip_clean_states
+    )
+    duration_pass = all(
+        bool(item.get("signals", {}).get("duration", {}).get("within_tolerance", True))
+        for item in reports
+        if item.get("kind") in {"clip", "deliverable"} and item.get("signals", {}).get("duration")
+    )
+    delivery_pass = bool(
+        technical_ok
+        and narrative_pass
+        and duration_pass
+        and visual_ok is True
+        and audio_pass is True
+        and continuity_pass is True
+        and clean_frame_pass
+        and final_report is not None
+    )
     return {
-        "ok": technical_ok and visual_ok is True,
+        "ok": delivery_pass,
         "technical_ok": technical_ok,
+        "technical_pass": technical_ok,
+        "narrative_pass": narrative_pass,
+        "audio_pass": audio_pass,
+        "continuity_pass": continuity_pass,
+        "visual_pass": visual_ok,
+        "clean_frame_pass": clean_frame_pass,
+        "duration_pass": duration_pass,
+        "delivery_pass": delivery_pass,
+        "delivery_status": "passed" if delivery_pass else "blocked-pending-review-or-fix",
         "visual_ok": visual_ok,
         "reports": reports,
-        "project_audit": audit_project(root, project),
+        "project_audit": project_audit,
         "dialogue_review": dialogue_review,
         "quality_contract": qconfig,
         "tail_suggestions": [
@@ -3317,6 +3581,7 @@ def init_project(
             "asset_state": {},
             "continuity_in": "",
             "continuity_out": "",
+            "state_change_reason": "",
             "lens": "",
             "camera": "",
             "camera_motion": "",
@@ -3378,12 +3643,24 @@ def init_project(
         "story": "",
         "story_beats": [],
         "story_contract": {
+            # Keep the legacy contract opt-in.  Product presets can set this
+            # to true after the creative brief is filled, avoiding an
+            # unusable half-empty project immediately after init.
             "required": False,
             "goal": "",
             "obstacle": "",
             "decision": "",
             "consequence": "",
             "payoff": "",
+        },
+        "narrative_contract_v2": {
+            "required": False,
+            "protagonist_goal": "",
+            "audience_knows": "",
+            "character_knows": "",
+            "choice": "",
+            "visible_consequence": "",
+            "next_question": "",
         },
         "director": {
             "project_type": str(workflow.get("project_type", "single-clip")),
@@ -3438,10 +3715,13 @@ def init_project(
             "tail_motion_policy": "warn",
             "tail_motion_threshold": 0.012,
             "tail_auto_trim": True,
+            "duration_policy": "block",
+            "duration_tolerance_seconds": 0.5,
+            "duration_tolerance_ratio": 0.05,
             "continuity_enabled": True,
             "previous_keyframe_reference": True,
         },
-        "continuity": {"enabled": True, "strict": True, "world_state": {}},
+        "continuity": {"enabled": True, "strict": True, "state_change_policy": "warn", "world_state": {}},
         "frame_layout": frame_layout_value,
         "allow_multi_panel": frame_layout_value != "single-full-frame",
         "layout_risk_policy": "block",
@@ -3733,6 +4013,8 @@ def status_summary(root: Path) -> dict[str, Any]:
         "video_provider": str(project.get("video_provider", "")) or None,
         "video_provider_policy": video_provider_policy(project),
         "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
+        "pipeline": pipeline_status(root, project, state),
+        "asset_registry": asset_registry_from_state(state),
         "shots": shots,
         "deliverables": state.get("deliverables", {}),
         "budget_usage": state.get("budget_usage", {}),
@@ -4229,7 +4511,7 @@ def build_parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("project", type=Path)
 
-    for name in ("validate", "preflight", "status", "assemble", "audit"):
+    for name in ("validate", "preflight", "status", "stage-status", "assemble", "audit"):
         command = commands.add_parser(name)
         command.add_argument("project", type=Path)
 
@@ -5370,8 +5652,12 @@ def main() -> int:
                 }
             )
             return 0 if not errors else 1
-        if args.command == "status":
-            print_json({"ok": True, **status_summary(root)})
+        if args.command in {"status", "stage-status"}:
+            summary = status_summary(root)
+            if args.command == "stage-status":
+                print_json({"ok": True, "project": str(root), "pipeline": summary["pipeline"], "asset_registry": summary["asset_registry"]})
+                return 0
+            print_json({"ok": True, **summary})
             return 0
         if args.command == "review-shot":
             print_json(

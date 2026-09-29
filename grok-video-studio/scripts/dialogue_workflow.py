@@ -71,7 +71,9 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     config = audio_config(project)
     raw_audio = project.get("audio")
-    if raw_audio is not None and not isinstance(raw_audio, dict):
+    if raw_audio is None:
+        raw_audio = {}
+    elif not isinstance(raw_audio, dict):
         errors.append("project.audio must be an object")
         raw_audio = {}
     for field in ("generate_speech", "burn_subtitles", "allow_upstream_captions"):
@@ -112,6 +114,40 @@ def validate_dialogue(root: Path, project: dict[str, Any]) -> list[str]:
                 allow_temporary=config["allow_temporary_voices"],
             )
         )
+    if config["mode"] in {"narration", "local-narration"}:
+        for shot_index, shot in enumerate(project.get("shots", [])):
+            if not isinstance(shot, dict):
+                continue
+            seconds = _seconds(project, shot)
+            narration = str(shot.get("narration", "")).strip()
+            if not narration:
+                continue
+            try:
+                start = float(shot.get("narration_start", 0.15) or 0.15)
+                end = float(shot.get("narration_end", max(start + 0.5, seconds - 0.15)) or max(start + 0.5, seconds - 0.15))
+            except (TypeError, ValueError):
+                errors.append(f"shots[{shot_index}].narration_start and narration_end must be seconds")
+                continue
+            if start < 0 or end <= start or end > seconds:
+                errors.append(f"shots[{shot_index}] narration timing must satisfy 0 <= start < end <= shot seconds")
+            cues = shot.get("narration_cues") if isinstance(shot.get("narration_cues"), list) else []
+            previous_end = 0.0
+            for cue_index, cue in enumerate(cues):
+                prefix = f"shots[{shot_index}].narration_cues[{cue_index}]"
+                if not isinstance(cue, dict) or not str(cue.get("text", "")).strip():
+                    errors.append(f"{prefix}.text is required")
+                    continue
+                try:
+                    cue_start = float(cue.get("start"))
+                    cue_end = float(cue.get("end"))
+                except (TypeError, ValueError):
+                    errors.append(f"{prefix}.start and end must be seconds")
+                    continue
+                if cue_start < 0 or cue_end <= cue_start or cue_end > seconds:
+                    errors.append(f"{prefix} must satisfy 0 <= start < end <= shot seconds")
+                if cue_start < previous_end:
+                    errors.append(f"{prefix} overlaps the previous narration cue")
+                previous_end = max(previous_end, cue_end)
     characters = {
         str(item.get("id", "")): item
         for item in project.get("characters", [])
@@ -362,8 +398,9 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
         duration = float(line["global_end"]) - float(line["global_start"])
         compact_chars = len(re.sub(r"[\s\W_]+", "", str(line.get("text", "")), flags=re.UNICODE))
         density = compact_chars / duration if duration else 999.0
-        if density > 6.0:
-            warnings.append(f"{line.get('id')} may be too dense for natural speech ({density:.1f} chars/s)")
+        density_limit = 5.2 if config["mode"] in {"narration", "local-narration"} else 6.0
+        if density > density_limit:
+            warnings.append(f"{line.get('id')} may be too dense for natural speech ({density:.1f} chars/s; limit {density_limit:.1f})")
         items.append(
             {
                 "id": line.get("id"),
@@ -375,12 +412,31 @@ def dialogue_preflight(project: dict[str, Any]) -> dict[str, Any]:
                 "characters_per_second": round(density, 2),
             }
         )
+    narration_timing_ok = True
+    if config["mode"] in {"narration", "local-narration"}:
+        for shot in project.get("shots", []):
+            if not isinstance(shot, dict) or not str(shot.get("narration", "")).strip():
+                continue
+            seconds = _seconds(project, shot)
+            cues = shot.get("narration_cues") if isinstance(shot.get("narration_cues"), list) else []
+            for cue in cues or [{"start": shot.get("narration_start", 0.15), "end": shot.get("narration_end", max(0.5, seconds - 0.15)), "text": shot.get("narration", "")}]:
+                try:
+                    start = float(cue.get("start"))
+                    end = float(cue.get("end"))
+                    valid = 0 <= start < end <= seconds
+                except (TypeError, ValueError):
+                    valid = False
+                if not valid:
+                    narration_timing_ok = False
+        if not narration_timing_ok:
+            warnings.append("narration timing contains a cue outside its shot window")
     return {
         "mode": config["mode"],
         "line_count": len(lines),
         "narration_count": len(narration_lines(project)) if config["mode"] in {"narration", "local-narration"} else 0,
         "lines": items,
         "warnings": warnings,
+        "narration_timing_ok": narration_timing_ok,
         "contract": {
             "generate_speech": config["generate_speech"],
             "subtitle_source": config["subtitle_source"],
