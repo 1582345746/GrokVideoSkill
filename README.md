@@ -2,7 +2,9 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.5.0 quality-continuity`，发布分支为 `main`。
+面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.8.0 scoped-event-dialogue-content-review`，发布分支为 `main`。
+
+新增单事件快对白工作流、局部提示词编译、事件/节奏合同、实际参考图审核、内容回执闭环、参考视频本地分析和 Windows OCR 后备。详见 [2026-10-08 案例审查与开发清单](docs/20261008-reference-audit-and-development-plan.zh-CN.md)。结构分只代表字段覆盖；剧情、说话人和穿模必须依据实际画面与声音审核。
 
 它把创意合同、分镜、上游请求、断点恢复、连续性、可选音频和交付 QA 保存为项目文件。规划、预检、状态查询、下载、FFmpeg 和 QA 都不创建新的上游生成任务；只有批准后的生图/生视频/试听请求可能收费。
 

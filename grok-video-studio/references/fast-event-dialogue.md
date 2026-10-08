@@ -1,0 +1,52 @@
+# Fast continuous-event dialogue
+
+Use for brisk character exchanges about one unfolding event, not as a universal rhythm for silent film, music, ads, scenery or slow performance. A large cast can exist across an episode; one native-generation shot defaults to one clear speaker.
+
+First state the protagonist's goal, opposing purpose, stakes and deadline. Each advancing beat has a trigger, choice/action, result and reason for what follows. Ask an independent Codex critic to check motivations, physical plausibility, unexplained knowledge, unresolved goals and redundant dialogue before spending. Field completeness is not a semantic review. A beat can span several speaker/listener/object shots without a new event at every cut.
+
+For roughly one-minute episodes, 1.5–3 second edit shots are a useful reference, not a quota. Plan lengths from understandable speech and visible actions. Start with a meaningful exchange already underway. Replies must address the preceding turn. Establishing/object/reaction coverage may carry motivated off-screen character speech. Do not substitute a narrator without the user's choice.
+
+## Contract
+
+`init --workflow fast-continuous-event-dialogue` sets `prompt_compiler=scoped-v1`, `event_flow.required=true`, and disables blind tail trimming/previous-opening-frame references. Fill the scaffold before preflight.
+
+```json
+{
+  "event_flow": {
+    "required": true,
+    "event_id": "shipment-price",
+    "initial_state": {"price": 3, "load_allowed": false},
+    "pace": {"max_shot_seconds": 3.5, "max_silent_seconds": 0.6,
+      "max_dialogue_lead_seconds": 0.4, "max_dialogue_tail_seconds": 0.5,
+      "max_no_change_seconds": 6, "max_function_repeat": 2,
+      "max_visible_characters": 3, "max_speakers_per_shot": 1,
+      "max_speech_units_per_second": 8}
+  },
+  "shots": [{
+    "id": "shot-001", "seconds": 4, "edit_in": 0, "edit_out": 2.4,
+    "timeline_duration": 2.4, "character_ids": ["broker"],
+    "listener_position": "offscreen-left",
+    "event": {
+      "event_id": "shipment-price", "mode": "advance", "beat_id": "low-offer",
+      "function": "obstacle", "trigger": "The seller is about to load the shipment.",
+      "requires": {"price": 3}, "effects": {"price": 1},
+      "viewer_learns": "The broker changes the agreed price.",
+      "bridge_to_next": "The seller challenges the offer."
+    },
+    "dialogue": [{
+      "id": "line-001", "speaker": "broker", "listener": "seller",
+      "text": "一块一斤，现在就装车。", "start": 0.1, "end": 2.2,
+      "intent": "request", "new_information": "The offer is one yuan.",
+      "effect_key": "price", "on_screen": true
+    }]
+  }]
+}
+```
+
+State dictionaries have scalar values and flat keys (dotted names allowed). Later shots name the preceding `cause_shot_id`; `requires` is checked against accumulated state and `effects` changes it. Each `advance` changes state. `coverage` references the active advancing `beat_id`, has `coverage_role=speaker|listener|object|action` and may have no effects; its dialogue effect key can refer to that active beat. Coverage still has a configurable no-change time budget. This reducer checks declared contradictions, not whether the video realized them.
+
+Speech times are source-clip times and must fit the retained edit window. Chinese characters/Latin words estimate speech units, not measured speed. Known listeners may be outside the frame with `listener_position=offscreen-left|offscreen-right`. Off-screen speakers need `on_screen=false`, motivated `audio_source=offscreen|phone|speaker`, and must be absent from visible cast. Do not invent speech merely to fill gaps.
+
+Use independent character masters and a stable scene map. Keyframes describe only the opening still. Reverse shots use the spatial map and identity references. Action matches can use `handoff_source=reviewed-clip-exit`, which exports the approved previous video exit and rejects changed edit windows. Ordinary previous keyframes are appearance aids, not end-state evidence.
+
+Inspect keyframes before paid video requests. Generate a small meaningful exchange first when provider behavior is uncertain. Native time windows are requests, not guarantees; do not cut words to meet a planned duration. Technical QA and actual content findings stay separate. Answer final understanding questions from the rendered master. Repair affected shots/edits with audited retries; do not scale a failed pilot to a season.

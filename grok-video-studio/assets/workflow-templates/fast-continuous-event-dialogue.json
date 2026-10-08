@@ -1,0 +1,22 @@
+{
+  "id": "fast-continuous-event-dialogue",
+  "title": "单一事件快节奏对白短剧",
+  "summary": "围绕同一目标持续推进；短正反打、动作与物件覆盖承接对白，不插入无声凑时长镜头。",
+  "project_type": "cinematic-short",
+  "director_mode": "dialogue-scene",
+  "genre_packs": [],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 24,
+  "preferred_clip_seconds": 3,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "cut-on-action",
+  "shot_roles": ["wide", "over_shoulder", "closeup", "reaction", "insert"],
+  "shot_defaults": {"generate_image": true, "use_character_master": false},
+  "guidance": {
+    "ask": ["主角要什么", "谁阻止、为什么", "先后发生什么", "每集时长", "人物对白还是旁白"],
+    "story": "一个事件，每次威胁都有可见兑现，每次对策都解决已知阻力。事件拍点和编辑镜头独立，反应/物件镜头可以承接有来源的画外对白；不要用旁白填空。启用 event_flow.required 和 scoped-v1；结构预检不是内容质量证明。",
+    "image_prompt": "先制作共享角色母版和场景地图；当前镜头只出现显式可见角色；一个开场静态瞬间，不注入结局或全季故事。",
+    "video_prompt": "一镜一位明确发言人，0.1秒左右即开始短台词，2到3秒编辑镜头随对白和动作切出；为每句标记听者、意图和状态变化。原生模型时间窗是请求目标，必须审核真实输出；不能剪断词或为凑时长留尾巴。"
+  }
+}

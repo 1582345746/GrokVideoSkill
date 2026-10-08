@@ -217,6 +217,8 @@ def story_clarity_score(project: dict[str, Any]) -> dict[str, Any]:
     missing = [field for field in STORY_CONTRACT_FIELDS if not contract[field]]
     return {
         "score": score,
+        "score_kind": "schema-coverage-only",
+        "semantic_quality": "unverified-until-content-review",
         "threshold": 70.0,
         "required": contract["required"] or v2_contract["required"],
         "missing_contract_fields": missing if not v2_contract["required"] else [field for field in NARRATIVE_CONTRACT_FIELDS if not v2_contract[field]],
@@ -364,8 +366,9 @@ def director_gate(project: dict[str, Any]) -> dict[str, list[str]]:
     dialogue_count = sum(bool(shot.get("dialogue")) for shot in shots)
     if not project.get("story_beats"):
         errors.append("strict director mode requires story_beats before paid generation")
-    if dialogue_count == len(shots):
-        errors.append("strict director mode blocks 100% dialogue-shot coverage")
+    # Coverage and speech are independent. A listener reaction or object insert
+    # can carry motivated off-screen dialogue; requiring a silent shot creates
+    # dead air in fast dialogue stories.
     if len(set(value for value in roles if value)) < 2:
         errors.append("strict director mode requires at least two shot roles")
     if config["mode"] in {"cinematic-short", "dialogue-scene", "comedy-scene"}:

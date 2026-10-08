@@ -1045,7 +1045,7 @@ class SkillIntegrationTests(unittest.TestCase):
         (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
         result = self.run_cli("validate", str(project), expected=1)
         self.assertTrue(any("story_beats" in error for error in result["errors"]))
-        self.assertTrue(any("100% dialogue" in error for error in result["errors"]))
+        self.assertFalse(any("100% dialogue" in error for error in result["errors"]))
 
     def test_i2v_init_aligns_keyframe_orientation_and_warns_for_legacy_square_size(self) -> None:
         landscape = self.root / "landscape-i2v"
@@ -1238,6 +1238,12 @@ class SkillIntegrationTests(unittest.TestCase):
 
     def test_prompt_error_stops_at_three_total_attempts(self) -> None:
         project = self.create_project("prompt-retry-limit", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["shots"][0]["props"] = "A fixed wooden desk and several closed drawers; " * 20
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        variants = gvs.prompt_variants(value, value["shots"][0], kind="video")
+        self.assertGreater(gvs.prompt_bytes(variants["full"]), gvs.prompt_bytes(variants["compact"]))
+        self.assertGreater(gvs.prompt_bytes(variants["compact"]), gvs.prompt_bytes(variants["minimal"]))
         FakeProviderHandler.json_video_create_status = 400
         FakeProviderHandler.json_video_create_error = "prompt too long"
         result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)

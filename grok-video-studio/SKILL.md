@@ -5,7 +5,11 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, continuity handoff, and resumable editing. The installed CLI reports version `2.7.0` (`narrative-contract-layered-delivery-qa`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, continuity handoff, and resumable editing. The installed CLI reports version `2.8.0` (`scoped-event-dialogue-content-review`).
+
+For fast, continuous-event dialogue or a reference-driven short series, read [references/fast-event-dialogue.md](references/fast-event-dialogue.md) before planning. Choose `fast-continuous-event-dialogue` for this requested rhythm. It defaults to `prompt_compiler=scoped-v1` and required `event_flow`; other workflows/legacy tasks keep compatible contracts. A schema score is field coverage, never proof of understandable plot. Separate event beats, camera coverage, generated clips and retained edit windows. Dialogue may continue over listener/prop coverage; do not add silent shots to satisfy a quota.
+
+Use `reference-analyze <video> --output <folder>` for local cut/silence measurements and hash-bound sample frames; inspect actual pixels with Codex. Candidates are not exact cuts; audible sound does not prove intelligible speech. Do not infer the reference creator's model or audio pipeline. Scoped I2V checks approval of the actual sent still; after inspection use `review-shot --kind image` or `review-reference`. Read [references/scoped-prompts.md](references/scoped-prompts.md) for fields and [references/content-reviews.md](references/content-reviews.md) for layer reviews. Never approve audio from frame inspection.
 
 The director layer applies to every video project: standalone T2V, I2V, supplied-image animation, short drama, ads, performance, sourced news, and episodic series. It compiles story beats into shot roles, camera coverage, performance progression, sound intent, cuttable exits, and edit windows. Episodic series add season canon and approval state; they do not own the director layer.
 

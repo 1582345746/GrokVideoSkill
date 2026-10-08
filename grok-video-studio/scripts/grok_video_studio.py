@@ -152,6 +152,9 @@ from visual_evidence import (
     validate_project_pixel_review,
 )
 from chatcut_adapter import apply_chatcut_receipt, chatcut_capability_report, validate_chatcut_receipt
+from event_flow import event_flow_report, validate_event_flow
+from content_reviews import create_review_template, apply_review_receipt, content_review_summary
+from scoped_prompts import scoped_prompt_variants
 from workflow_registry import (
     GENRE_PACKS,
     default_custom_workflow_root,
@@ -161,7 +164,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.7.0"
+SKILL_VERSION = "2.8.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -422,6 +425,24 @@ def pipeline_status(root: Path, project: dict[str, Any], state: dict[str, Any]) 
     master = state.get("character_master") if isinstance(state.get("character_master"), dict) else {}
     final_value = (state.get("deliverables") or {}).get("final") if isinstance(state.get("deliverables"), dict) else {}
     final = final_value if isinstance(final_value, dict) else {}
+    delivery_current = bool((final.get("qa") or {}).get("delivery_pass", False))
+    if delivery_current:
+        final_path = resolve_project_path(root, str(final.get("path", "")), must_exist=False) if final.get("path") else None
+        delivery_current = bool(final_path and final_path.is_file())
+        if delivery_current and final.get("sha256"):
+            delivery_current = final["sha256"] == file_digest(final_path)
+        event_contract = project.get("event_flow")
+        content_review_required = project.get("prompt_compiler") == "scoped-v1" or (
+            isinstance(event_contract, dict) and event_contract.get("required") is True
+        )
+        if content_review_required or state.get("content_reviews"):
+            try:
+                delivery_current = delivery_current and content_review_summary(root, project, state)["status"] == "reviewed"
+            except (SkillError, OSError):
+                delivery_current = False
+        if not delivery_current:
+            final.setdefault("qa", {})["delivery_pass"] = False
+            final["qa"]["review_stale"] = True
     phases = {
         "brief": "completed" if str(project.get("story", "")).strip() else "pending",
         "preflight": "completed" if not validate_project(root, project) else "blocked",
@@ -431,7 +452,7 @@ def pipeline_status(root: Path, project: dict[str, Any], state: dict[str, Any]) 
         "assembly": "completed" if final.get("path") else "pending",
         "qa": "completed" if final.get("qa") else "pending",
         "review": _stage_status([str(item.get("video", {}).get("review_status", "pending")) for item in runtimes]),
-        "delivery": "completed" if bool((final.get("qa") or {}).get("delivery_pass", False)) else "blocked" if final.get("qa") else "pending",
+        "delivery": "completed" if delivery_current else "blocked" if final.get("qa") else "pending",
     }
     completed = [phase for phase in PIPELINE_PHASES if phases[phase] == "completed"]
     current = next((phase for phase in PIPELINE_PHASES if phases[phase] != "completed"), PIPELINE_PHASES[-1])
@@ -838,16 +859,24 @@ def project_prompt_limit(project: dict[str, Any]) -> int:
     return max(1, min(value, HARD_PROMPT_BYTES))
 
 
-def next_prompt_version(variants: dict[str, str], current: str, *, hard_limit: int = HARD_PROMPT_BYTES) -> str:
+def next_prompt_version(variants: dict[str, str], current: str, *, hard_limit: int = HARD_PROMPT_BYTES, require_shorter: bool = False) -> str:
     order = ("full", "compact", "minimal")
+    current_prompt = variants.get(current, "")
     try:
         index = order.index(current)
     except ValueError:
         index = -1
     for candidate in order[index + 1:]:
-        if prompt_bytes(variants.get(candidate, "")) <= hard_limit:
+        candidate_prompt = variants.get(candidate)
+        if candidate_prompt is None or candidate_prompt == current_prompt:
+            continue
+        if require_shorter and prompt_bytes(candidate_prompt) >= prompt_bytes(current_prompt):
+            continue
+        if prompt_bytes(candidate_prompt) <= hard_limit:
             return candidate
-    return "minimal"
+    if require_shorter:
+        raise SkillError("provider rejected prompt length; no shorter distinct prompt preserves this contract. Rewrite or split the shot before another paid request")
+    return current
 
 
 def require_retry_reason(retry_failed: bool, retry_reason: str) -> str:
@@ -933,6 +962,9 @@ def _unsupported_reference_errors(root: Path, references: Any, prefix: str, max_
 
 def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     errors: list[str] = validate_project_pixel_review(root, project)
+    errors.extend(validate_event_flow(project))
+    if project.get("prompt_compiler", "legacy") not in {"legacy", "scoped-v1"}:
+        errors.append("prompt_compiler must be legacy or scoped-v1")
     if project.get("version") != PROJECT_VERSION:
         errors.append("project.version must be 1")
     for field in ("title", "topic", "story"):
@@ -1622,6 +1654,8 @@ def _compact_shot_facts(project: dict[str, Any], shot: dict[str, Any], *, kind: 
 
 def prompt_variants(project: dict[str, Any], shot: dict[str, Any] | None = None, *, kind: str) -> dict[str, str]:
     """Build deterministic full/compact/minimal prompts without truncating text."""
+    if project.get("prompt_compiler") == "scoped-v1":
+        return scoped_prompt_variants(project, shot, kind=kind)
     if kind not in {"image", "video", "character_master"}:
         raise SkillError("prompt kind must be image, video, or character_master")
     if kind == "character_master":
@@ -1724,7 +1758,7 @@ def prompt_budget_entry(
         "safe_limit": SAFE_PROMPT_BYTES,
         "remaining": hard_limit - values[selected]["utf8_bytes"],
         "within_hard_limit": values[selected]["utf8_bytes"] <= hard_limit,
-        "compression_needed": selected != "full",
+        "compression_needed": variants.get(selected) != variants.get("full"),
         "compression_suggestion": (
             f"use {selected} version; remove season-wide and unrelated scene detail while retaining identity, location, action, dialogue, and ending pose"
             if selected != "full"
@@ -1916,6 +1950,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         "quality": quality_config(project),
         "continuity": continuity_config(project),
         "story": story_clarity_score(project),
+        "event_flow": event_flow_report(project),
         "story_contract": story_contract(project),
         "narrative_contract_v2": narrative,
         "narrative_coverage": narrative_coverage,
@@ -2009,8 +2044,8 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
         for role in required_roles:
             if shots and role_counts[role] == 0:
                 warnings.append(f"shot coverage is missing {role}; add a dedicated cinematic beat")
-        if shots and non_dialogue_shots == 0:
-            warnings.append("shot coverage has no non-dialogue visual beat")
+        # Speech can continue over reaction and prop coverage. Do not suggest
+        # adding a silent shot merely to satisfy a categorical quota.
         if shots and action_shots == 0:
             warnings.append("shot coverage has no action-oriented beat")
     return {
@@ -2056,11 +2091,27 @@ def previous_shot_keyframe(root: Path, project: dict[str, Any], state: dict[str,
             continue
         previous_id = str(shots[index - 1].get("id", ""))
         previous_runtime = state.get("shots", {}).get(previous_id, {}) if isinstance(state.get("shots"), dict) else {}
+        if str(shot.get("handoff_source", "")) == "reviewed-clip-exit":
+            video = previous_runtime.get("video", {})
+            video_path = resolve_project_path(root, str(video.get("path", "")), must_exist=False) if video.get("path") else None
+            if not video_path or not video_path.is_file() or video.get("review_status") != "approved" or video.get("reviewed_sha256") != file_digest(video_path):
+                raise SkillError(f"{shot_id}: reviewed-clip-exit needs an approved, unchanged previous video")
+            if project.get("prompt_compiler") == "scoped-v1" and video.get("reviewed_edit_window") != list(edit_window(shots[index - 1])[:2]):
+                raise SkillError(f"{shot_id}: previous reviewed edit window changed; review the actual exit again")
+            out = float(shots[index - 1].get("edit_out") or probe_media(video_path)["duration"])
+            frames = export_review_frames(video_path, root / "assets" / "handoffs", stem=previous_id + "-exit", at_seconds=[max(0.0, out - 0.04)])
+            if not frames:
+                raise SkillError(f"{shot_id}: could not export the reviewed exit frame")
+            return Path(str(frames[0]["path"]))
+        if project.get("prompt_compiler") == "scoped-v1" and shots[index - 1].get("scene_id") != shot.get("scene_id"):
+            return None
         runtime = previous_runtime.get("image", {}) if isinstance(previous_runtime, dict) else {}
         path = str(runtime.get("path", "")).strip()
         if runtime.get("status") == "completed" and path:
             candidate = resolve_project_path(root, path, must_exist=False)
             if candidate.is_file():
+                if project.get("prompt_compiler") == "scoped-v1" and (runtime.get("review_status") != "approved" or runtime.get("reviewed_sha256") != file_digest(candidate)):
+                    return None
                 return candidate
     return None
 
@@ -2208,7 +2259,7 @@ def generate_character_master(root: Path, *, retry_failed: bool, retry_reason: s
         write_event(root, {"kind": "character_master_failed", "error": str(error)[:1000]})
         if category in REPAIRABLE_INPUT_CATEGORIES and runtime["attempts"] < max_total_attempts(project):
             runtime["prompt_version_override"] = next_prompt_version(
-                prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+                prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project), require_shorter=category == "prompt_too_long"
             )
             save_state(root, state)
             return generate_character_master(root, retry_failed=True, retry_reason=f"automatic prompt repair: {category}", progress=progress)
@@ -2323,7 +2374,7 @@ def generate_images(
             write_event(root, {"kind": "image_failed", "shot_id": shot_id, "error": str(error)[:1000]})
             if category in REPAIRABLE_INPUT_CATEGORIES and runtime["attempts"] < max_total_attempts(project):
                 runtime["prompt_version_override"] = next_prompt_version(
-                    prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+                    prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project), require_shorter=category == "prompt_too_long"
                 )
                 save_state(root, state)
                 return generate_images(root, retry_failed=True, retry_reason=f"automatic prompt repair: {category}", progress=progress, shot_ids=shot_ids)
@@ -2409,6 +2460,8 @@ def generate_videos(
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
         references = video_references(root, shot, runtime) if mode == "image-to-video" else []
+        if mode == "image-to-video" and project.get("prompt_compiler") == "scoped-v1":
+            require_approved_video_references(root, state, references, shot_id)
         prompt_variants_value = prompt_variants(project, shot, kind="video")
         prompt_version, prompt = select_prompt_variant(
             prompt_variants_value,
@@ -2668,7 +2721,7 @@ def generate_videos(
                         if category == "size_conflict":
                             video["omit_size"] = True
                         video["prompt_version_override"] = next_prompt_version(
-                            prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project)
+                            prompt_variants_value, prompt_version, hard_limit=project_prompt_limit(project), require_shorter=category == "prompt_too_long"
                         )
                         save_state(root, state)
                         return generate_videos(root, retry_failed=True, retry_reason=f"automatic parameter/prompt repair: {category}", progress=progress, poll_timeout=poll_timeout, shot_ids=shot_ids)
@@ -3230,7 +3283,7 @@ def qa_project(root: Path) -> dict[str, Any]:
             if not report["media"].get("has_audio"):
                 report["errors"].append("native upstream shot has no audio track")
                 report["ok"] = False
-            elif (
+            elif intent != "intentional-silence" and (
                 audio_signals.get("max_volume_db") is None
                 or float(audio_signals.get("max_volume_db", -99)) < -35
                 or float(audio_signals.get("silence_ratio", 1)) > 0.98
@@ -3247,6 +3300,8 @@ def qa_project(root: Path) -> dict[str, Any]:
                 )
             elif intent == "narration":
                 checks.append("listen for intelligible, naturally paced narration that stays consistent with the visible sourced claim")
+            elif intent == "intentional-silence":
+                checks.append("verify the intentional-silence insert contains no unintended speech")
             else:
                 checks.append("verify audible scene-appropriate ambience, effects, or restrained music and no unintended speech")
             if dialogue["mode"] == "narration":
@@ -3384,10 +3439,15 @@ def qa_project(root: Path) -> dict[str, Any]:
         reports.append({"kind": "deliverable", "id": "final", **report})
     save_state(root, state)
     technical_ok = all(bool(item.get("ok")) for item in reports) if reports else False
-    review_states = [
-        str(shot_state(state, str(shot["id"]))["video"].get("review_status", "pending"))
-        for shot in project["shots"]
-    ]
+    review_states = []
+    for shot in project["shots"]:
+        video_review = shot_state(state, str(shot["id"]))["video"]
+        review_status = str(video_review.get("review_status", "pending"))
+        if review_status == "approved":
+            review_path = resolve_project_path(root, str(video_review.get("path", "")), must_exist=False) if video_review.get("path") else None
+            if not review_path or not review_path.is_file() or video_review.get("reviewed_sha256") != file_digest(review_path):
+                review_status = "pending"
+        review_states.append(review_status)
     manual_review_complete = bool(review_states) and all(status in {"approved", "rejected"} for status in review_states)
     if all(status == "approved" for status in review_states):
         visual_ok: bool | None = True
@@ -3454,6 +3514,36 @@ def qa_project(root: Path) -> dict[str, Any]:
         for item in reports
         if item.get("kind") in {"clip", "deliverable"} and item.get("signals", {}).get("duration")
     )
+    content_review = content_review_summary(root, project, state)
+    reviewed_layers = content_review["layers"]
+    formal_review_required = event_flow_report(project)["required"] or project.get("prompt_compiler") == "scoped-v1"
+    if formal_review_required:
+        narrative_pass = reviewed_layers["narrative"] if narrative_pass else False
+        continuity_pass = reviewed_layers["continuity"]
+        visual_ok = reviewed_layers["visual"]
+        # Sampling OCR is a signal, not proof that the full master is clean.
+        clean_frame_pass = reviewed_layers["clean_frame"] is True and not any(item.get("clean_frame_status") == "failed" for item in reports)
+    for layer, value in reviewed_layers.items():
+        if value is False:
+            if layer == "narrative":
+                narrative_pass = False
+            elif layer == "continuity":
+                continuity_pass = False
+            elif layer == "visual":
+                visual_ok = False
+            elif layer == "clean_frame":
+                clean_frame_pass = False
+            elif layer == "audio":
+                audio_pass = False
+    if reviewed_layers["clean_frame"] is True and not any(item.get("clean_frame_status") == "failed" for item in reports):
+        clean_frame_pass = True
+    if audio_requires_content_review or formal_review_required:
+        audio_pass = reviewed_layers["audio"]
+        dialogue_review["status"] = "reviewed" if audio_pass is True else "rejected" if audio_pass is False else "unverified-without-listening-review"
+        if audio_pass is True:
+            dialogue_review.pop("blocking_reason", None)
+    elif reviewed_layers["audio"] is False:
+        dialogue_review["status"] = "rejected"
     delivery_pass = bool(
         technical_ok
         and narrative_pass
@@ -3464,6 +3554,14 @@ def qa_project(root: Path) -> dict[str, Any]:
         and clean_frame_pass
         and final_report is not None
     )
+    if final_report is not None:
+        state["deliverables"]["final"].setdefault("qa", {}).update({
+            "delivery_pass": delivery_pass, "technical_pass": technical_ok,
+            "narrative_pass": narrative_pass, "audio_pass": audio_pass,
+            "continuity_pass": continuity_pass, "visual_pass": visual_ok,
+            "clean_frame_pass": clean_frame_pass,
+        })
+        save_state(root, state)
     return {
         "ok": delivery_pass,
         "technical_ok": technical_ok,
@@ -3480,6 +3578,7 @@ def qa_project(root: Path) -> dict[str, Any]:
         "reports": reports,
         "project_audit": project_audit,
         "dialogue_review": dialogue_review,
+        "content_review": content_review,
         "quality_contract": qconfig,
         "tail_suggestions": [
             {
@@ -3753,6 +3852,14 @@ def init_project(
         },
         "shots": shots,
     }
+    if workflow_id == "fast-continuous-event-dialogue":
+        project["prompt_compiler"] = "scoped-v1"
+        project["prompt_style"] = {}
+        project["event_flow"] = {"required": True, "event_id": "", "initial_state": {}, "pace": {}}
+        project["quality"]["tail_auto_trim"] = False
+        project["quality"]["previous_keyframe_reference"] = False
+        for shot in shots:
+            shot["event"] = {}
     atomic_write_json(path, project)
     save_state(root, fresh_state())
     return path
@@ -4021,6 +4128,51 @@ def status_summary(root: Path) -> dict[str, Any]:
     }
 
 
+@locked_project_state
+def record_content_review(root: Path, receipt: Path) -> dict[str, Any]:
+    project = load_project(root)
+    state = load_state(root)
+    result = apply_review_receipt(root, project, state, receipt)
+    save_state(root, state)
+    write_event(root, {"kind": "content_review_recorded", **result})
+    return result
+
+
+def require_approved_video_references(root: Path, state: dict[str, Any], references: list[Path], shot_id: str) -> None:
+    if len(references) != 1:
+        raise SkillError(f"{shot_id}: scoped I2V requires one reviewed current-shot keyframe")
+    for path in references:
+        actual = file_digest(path)
+        approved = False
+        for runtime in state.get("shots", {}).values():
+            image_review = runtime.get("image", {})
+            image_path = image_review.get("path")
+            if image_path and resolve_project_path(root, str(image_path), must_exist=False) == path.resolve():
+                approved = image_review.get("review_status") == "approved" and image_review.get("reviewed_sha256") == actual
+                break
+        reference_review = state.get("reference_reviews", {}).get(path.resolve().relative_to(root.resolve()).as_posix(), {})
+        approved = approved or (reference_review.get("decision") == "approve" and reference_review.get("sha256") == actual)
+        if not approved:
+            raise SkillError(f"{shot_id}: approve the unchanged actual video reference before a paid request: {path.name}")
+
+
+@locked_project_state
+def review_reference(root: Path, path: Path, *, decision: str, notes: str) -> dict[str, Any]:
+    load_project(root)
+    resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    if not resolved.is_relative_to(root.resolve()) or not resolved.is_file() or resolved.suffix.lower() not in IMAGE_EXTENSIONS:
+        raise SkillError("review-reference requires an existing project-local still image")
+    if not notes.strip():
+        raise SkillError("reference review needs observed pixel findings")
+    key = resolved.relative_to(root.resolve()).as_posix()
+    record = {"path": key, "sha256": file_digest(resolved), "decision": decision, "notes": notes.strip(), "reviewed_at": int(time.time())}
+    state = load_state(root)
+    state.setdefault("reference_reviews", {})[key] = record
+    save_state(root, state)
+    write_event(root, {"kind": "reference_reviewed", **record})
+    return record
+
+
 def preserve_rejected_asset(root: Path, path: Path, shot_id: str, *, kind: str, digest: str) -> Path:
     archive_root = root / ("assets/rejected" if kind == "image" else "clips/rejected")
     archive_root.mkdir(parents=True, exist_ok=True)
@@ -4058,6 +4210,7 @@ def review_shot_asset(root: Path, shot_id: str, *, kind: str, decision: str, not
             "review_notes": notes.strip(),
             "reviewed_at": int(time.time()),
             "reviewed_sha256": digest,
+            "reviewed_edit_window": list(edit_window(next(shot for shot in project["shots"] if shot["id"] == shot_id))[:2]) if kind == "video" else None,
         }
     )
     if decision == "approve":
@@ -4229,6 +4382,21 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("version", help="Print the installed Skill version.")
+    reference = commands.add_parser("reference-analyze", help="Measure reference cuts and silence without paid API calls or semantic quality claims.")
+    reference.add_argument("input", type=Path)
+    reference.add_argument("--output", type=Path, required=True)
+    reference.add_argument("--scene-threshold", type=float, default=0.25)
+    reference.add_argument("--min-interval", type=float, default=0.5)
+    review_template = commands.add_parser("content-review-template", help="Export hash-bound layer review fields, initially unverified.")
+    review_template.add_argument("project", type=Path)
+    review_apply = commands.add_parser("content-review-apply", help="Record observed pixel/audio reviews; validate hashes and retained windows.")
+    review_apply.add_argument("project", type=Path)
+    review_apply.add_argument("receipt", type=Path)
+    reference_review = commands.add_parser("review-reference", help="Record pixel findings for the actual supplied/reused I2V still, bound to its hash.")
+    reference_review.add_argument("project", type=Path)
+    reference_review.add_argument("image", type=Path)
+    reference_review.add_argument("--decision", choices=("approve", "reject"), required=True)
+    reference_review.add_argument("--notes", required=True)
     commands.add_parser("capabilities", help="List editable workflow titles for conversational selection.")
     describe = commands.add_parser("describe", help="Show one workflow's planning and prompt guidance.")
     describe.add_argument("workflow")
@@ -4798,6 +4966,10 @@ def main() -> int:
             return 0
         if args.command == "describe":
             print_json({"ok": True, "workflow": get_workflow(args.workflow)})
+            return 0
+        if args.command == "reference-analyze":
+            from reference_analysis import analyze_reference
+            print_json(analyze_reference(args.input.resolve(), args.output.resolve(), scene_threshold=args.scene_threshold, min_interval=args.min_interval))
             return 0
         if args.command == "visual-classify":
             print_json({"ok": True, "visual_profile": classify_visual_text(args.text, reference_paths=args.reference)})
@@ -5639,6 +5811,16 @@ def main() -> int:
             print_json({"ok": True, "cover": result})
             return 0
         root = args.project.resolve()
+        if args.command == "content-review-template":
+            output = create_review_template(root, load_project(root), load_state(root))
+            print_json({"ok": True, "path": str(output), "status": "unverified; fill only findings actually observed/heard"})
+            return 0
+        if args.command == "content-review-apply":
+            print_json({"ok": True, **record_content_review(root, args.receipt.resolve())})
+            return 0
+        if args.command == "review-reference":
+            print_json({"ok": True, "review": review_reference(root, args.image, decision=args.decision, notes=args.notes)})
+            return 0
         if args.command in {"validate", "preflight"}:
             project = load_project(root)
             errors = validate_project(root, project)

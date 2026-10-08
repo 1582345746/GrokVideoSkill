@@ -7,3 +7,5 @@ test-output/
 acceptance/
 projects/
 dist/
+.tmp-reference-frames/
+analysis-frames/

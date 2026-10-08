@@ -1,5 +1,7 @@
 # Prompt Contract
 
+Fast event dialogue uses [scoped-v1](scoped-prompts.md): only current visible identities, visual-only style, state, current action, speech window and cut protection are sent. All variants preserve the same contract; oversize blocks instead of discarding facts. The following also documents the legacy composer kept for existing task signatures. A constraint in its full prompt may not be present in its selected compact prompt.
+
 ## Plan before generating
 
 Write a concise story, then split it into shots that can each be represented by one starting frame and one motion instruction. Choose the number of shots from the target duration and scene changes; never assume eight. Keep every shot between 1 and 15 seconds.

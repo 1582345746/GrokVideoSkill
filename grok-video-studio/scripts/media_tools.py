@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -352,7 +353,7 @@ def detect_text_overlay(
     scan_end: float | None = None,
     sample_count: int = 3,
 ) -> dict[str, Any]:
-    """Use an installed Tesseract binary as a best-effort text signal.
+    """Use installed Tesseract or Windows OCR as a sampled text signal.
 
     OCR is optional because the base skill must remain usable without a local
     OCR runtime. When unavailable, the report explicitly retains a human pixel
@@ -360,8 +361,10 @@ def detect_text_overlay(
     """
     tesseract = shutil.which("tesseract")
     ffmpeg = shutil.which("ffmpeg")
-    if not tesseract or not ffmpeg:
-        return {"available": False, "detected": False, "samples": [], "reason": "tesseract_or_ffmpeg_not_found"}
+    windows_shell = shutil.which("powershell.exe") if sys.platform == "win32" and not tesseract else None
+    windows_script = Path(__file__).with_name("windows_ocr.ps1")
+    if not ffmpeg or (not tesseract and (not windows_shell or not windows_script.is_file())):
+        return {"available": False, "detected": False, "samples": [], "reason": "no_installed_ocr_or_ffmpeg"}
     media = probe_media(path)
     start = max(0.0, float(scan_start))
     end = min(media["duration"], float(scan_end) if scan_end is not None else media["duration"])
@@ -381,17 +384,27 @@ def detect_text_overlay(
             )
             if frame.returncode != 0 or not image.is_file():
                 continue
+            ocr_command = [tesseract, str(image), "stdout", "--psm", "11"] if tesseract else [windows_shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(windows_script), "-ImagePath", str(image)]
             ocr = subprocess.run(
-                [tesseract, str(image), "stdout", "--psm", "11"],
+                ocr_command,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 timeout=120,
             )
-            text = " ".join(line.strip() for line in (ocr.stdout or "").splitlines() if line.strip())
+            if ocr.returncode != 0:
+                continue
+            if tesseract:
+                text = " ".join(line.strip() for line in (ocr.stdout or "").splitlines() if line.strip())
+            else:
+                try:
+                    text = str(json.loads((ocr.stdout or "").lstrip("\ufeff")).get("text", ""))
+                except (ValueError, TypeError):
+                    continue
             samples.append({"at_seconds": round(at, 3), "text": text[:300], "detected": len(re.sub(r"\s+", "", text)) >= 2})
-    return {"available": True, "detected": any(item["detected"] for item in samples), "samples": samples}
+    return {"available": bool(samples), "detected": any(item["detected"] for item in samples), "samples": samples,
+            "engine": "tesseract" if tesseract else "windows-media-ocr", "scope": "sampled-frames", "verified_full_video": False}
 
 
 def _atempo_chain(speed: float) -> str:
