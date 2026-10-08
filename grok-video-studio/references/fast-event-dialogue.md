@@ -20,7 +20,8 @@ For roughly one-minute episodes, 1.5–3 second edit shots are a useful referenc
       "max_dialogue_lead_seconds": 0.4, "max_dialogue_tail_seconds": 0.5,
       "max_no_change_seconds": 6, "max_function_repeat": 2,
       "max_visible_characters": 3, "max_speakers_per_shot": 1,
-      "max_speech_units_per_second": 8}
+      "max_speech_units_per_second": 8, "max_timeline_silent_seconds": 0.8,
+      "max_task_silent_seconds": 1.2}
   },
   "shots": [{
     "id": "shot-001", "seconds": 4, "edit_in": 0, "edit_out": 2.4,
@@ -46,6 +47,8 @@ For roughly one-minute episodes, 1.5–3 second edit shots are a useful referenc
 State dictionaries have scalar values and flat keys (dotted names allowed). Later shots name the preceding `cause_shot_id`; `requires` is checked against accumulated state and `effects` changes it. Each `advance` changes state. `coverage` references the active advancing `beat_id`, has `coverage_role=speaker|listener|object|action` and may have no effects; its dialogue effect key can refer to that active beat. Coverage still has a configurable no-change time budget. This reducer checks declared contradictions, not whether the video realized them.
 
 Speech times are source-clip times and must fit the retained edit window. Chinese characters/Latin words estimate speech units, not measured speed. Known listeners may be outside the frame with `listener_position=offscreen-left|offscreen-right`. Off-screen speakers need `on_screen=false`, motivated `audio_source=offscreen|phone|speaker`, and must be absent from visible cast. Do not invent speech merely to fill gaps.
+
+This workflow requires `event_flow.required=true`; disabling it blocks preflight. `event_flow.dialogue_timeline` joins every retained no-dialogue interval across cuts, so a 0.5-second tail followed by a 0.4-second lead cannot hide as two independently short pauses. Ordinary gaps default to at most `max_timeline_silent_seconds=0.8`. A whole silent insert may have a longer budget, `max_task_silent_seconds=1.2`, only with declared listener/object/action coverage of the active beat, an event state effect, or a nonempty `entry_action`/`exit_action`. Adjacent silent inserts and their neighboring lead/tail pads share this budget; unmotivated padding within that span must still fit the ordinary 0.8-second budget. Existing per-line lead, tail and internal-gap limits still apply; a task in a speaking shot cannot excuse its padded dialogue tail. The report lists final-timeline start/end, affected shot IDs, source-clip ranges, and declared task reasons. These are editable planning limits, not reference measurements or proof of audible dialogue: listen to actual clips and verify the edited master before approving content. Legacy workflows retain their existing single-shot silence rules.
 
 Use independent character masters and a stable scene map. Keyframes describe only the opening still. Reverse shots use the spatial map and identity references. Action matches can use `handoff_source=reviewed-clip-exit`, which exports the approved previous video exit and rejects changed edit windows. Ordinary previous keyframes are appearance aids, not end-state evidence.
 

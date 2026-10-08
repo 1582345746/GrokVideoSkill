@@ -16,6 +16,7 @@ from typing import Any
 from gvs_common import SkillError, atomic_write_json, project_state_lock, read_json
 from media_tools import detect_tail_motion, export_review_frames, postprocess_video, probe_media, quality_report
 from chatcut_adapter import build_chatcut_contract, chatcut_capability_report
+from dialogue_workflow import audio_config
 
 
 EDIT_PLAN_VERSION = 2
@@ -190,6 +191,7 @@ def create_edit_plan(
     shot_by_id = {str(shot.get("id", "")): shot for shot in shots}
     quality = project.get("quality") if isinstance(project.get("quality"), dict) else {}
     tail_auto_trim = bool(quality.get("tail_auto_trim", False))
+    audio_mode = audio_config(project)["mode"]
     try:
         tail_guard_seconds = float(quality.get("tail_guard_seconds", 0.8))
         tail_motion_threshold = float(quality.get("tail_motion_threshold", 0.012))
@@ -211,23 +213,27 @@ def create_edit_plan(
             and str(shot.get("exit_behavior", "continue-action")) in {"continue-action", "cut-on-action"}
             and source_path.is_file()
         ):
-            source_end = edit_out if edit_out is not None else float(probe_media(source_path)["duration"])
-            signal = detect_tail_motion(
-                source_path,
-                scan_end=source_end,
-                tail_seconds=tail_guard_seconds,
-                threshold=tail_motion_threshold,
-            )
-            suggestion = signal.get("suggested_edit_out")
-            if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
-                edit_out = float(suggestion)
-                tail_trim = {
-                    "applied": True,
-                    "reason": "tail_motion_settled",
-                    "from": round(source_end, 3),
-                    "to": round(edit_out, 3),
-                    "motion": signal.get("motion_score"),
-                }
+            # Visual stillness cannot authorize shortening upstream speech.
+            if audio_mode in {"native-dialogue", "narration"}:
+                tail_trim["reason"] = "tail_motion_skipped_audio_boundary_unverified"
+            else:
+                source_end = edit_out if edit_out is not None else float(probe_media(source_path)["duration"])
+                signal = detect_tail_motion(
+                    source_path,
+                    scan_end=source_end,
+                    tail_seconds=tail_guard_seconds,
+                    threshold=tail_motion_threshold,
+                )
+                suggestion = signal.get("suggested_edit_out")
+                if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
+                    edit_out = float(suggestion)
+                    tail_trim = {
+                        "applied": True,
+                        "reason": "tail_motion_settled",
+                        "from": round(source_end, 3),
+                        "to": round(edit_out, 3),
+                        "motion": signal.get("motion_score"),
+                    }
         inputs.append(
             {
                 "id": shot_id,

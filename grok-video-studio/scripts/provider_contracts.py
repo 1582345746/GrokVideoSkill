@@ -79,9 +79,15 @@ class ProviderTaskFailedError(SkillError):
         super().__init__(message)
 
 
+class SubmissionUnknownError(SkillError):
+    """A successful create response did not identify the submitted task."""
+
+
 def classify_provider_error(error: Exception, *, phase: str, task_known: bool) -> str:
     """Return a stable internal category without persisting raw provider payloads."""
     message = str(error).lower()
+    if isinstance(error, SubmissionUnknownError):
+        return "submission_unknown" if phase == "create" else "unknown_provider_error"
     if isinstance(error, TimeoutError):
         return "task_timeout" if task_known else "submission_unknown"
     if isinstance(error, APIError):

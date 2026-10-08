@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -40,6 +41,7 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
         runtime.update(status="completed", path="assets/keyframes/shot-001.png", review_status="pending")
         self.provider = mock.Mock()
         self.provider.create.side_effect = RuntimeError("fixture-paid-create-boundary")
+        self.persisted_states: list[dict] = []
 
     def run_with_fake_provider(self) -> Exception:
         with mock.patch.object(gvs, "require_valid_project", return_value=self.project), \
@@ -47,7 +49,8 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
              mock.patch.object(gvs, "clients", return_value=(mock.Mock(), mock.Mock(), {"video_model": "fixture"})), \
              mock.patch.object(gvs, "video_provider_candidates", return_value=["newapi"]), \
              mock.patch.object(gvs, "select_video_client", return_value=self.provider), \
-             mock.patch.object(gvs, "save_state"), mock.patch.object(gvs, "write_event"):
+             mock.patch.object(gvs, "save_state", side_effect=lambda _root, state: self.persisted_states.append(copy.deepcopy(state))), \
+             mock.patch.object(gvs, "write_event"):
             try:
                 gvs.generate_videos(self.root, retry_failed=False, poll_timeout=1)
             except Exception as error:
@@ -76,6 +79,43 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
         error = self.run_with_fake_provider()
         self.assertIn("fixture-paid-create-boundary", str(error))
         self.provider.create.assert_called_once()
+
+    def test_selected_outbound_reference_and_prompt_are_bound_to_submitted_attempt(self) -> None:
+        selected = self.image.with_name("reviewed-crop.png")
+        selected.write_bytes(b"fixture approved current-shot crop")
+        relative = "assets/keyframes/reviewed-crop.png"
+        self.project["shots"][0]["video_references"] = [relative]
+        expected_references = [{"path": relative, "sha256": gvs.file_digest(selected)}]
+        self.state["reference_reviews"] = {relative: {"decision": "approve", "sha256": expected_references[0]["sha256"]}}
+
+        def inspect_submission(prompt: str, **values: object) -> None:
+            self.assertEqual(values["references"], [selected.resolve()])
+            video = gvs.shot_state(self.state, "shot-001")["video"]
+            attempt = video["provider_attempts"][-1]
+            self.assertEqual(video["status"], "submitting")
+            self.assertEqual(video["references"], expected_references)
+            self.assertEqual(attempt["references"], expected_references)
+            self.assertEqual(video["prompt_sha256"], hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+            self.assertEqual(attempt["prompt_sha256"], video["prompt_sha256"])
+            self.assertEqual(attempt["signature"], video["signature"])
+            persisted = self.persisted_states[-1]["shots"]["shot-001"]["video"]
+            self.assertEqual(persisted["references"], expected_references)
+            self.assertEqual(persisted["provider_attempts"][-1]["prompt_sha256"], video["prompt_sha256"])
+            raise RuntimeError("fixture-paid-create-boundary")
+
+        self.provider.create.side_effect = inspect_submission
+        error = self.run_with_fake_provider()
+        self.assertIn("fixture-paid-create-boundary", str(error))
+        self.provider.create.assert_called_once()
+        with mock.patch.object(gvs, "load_project", return_value=self.project), \
+             mock.patch.object(gvs, "load_state", return_value=self.state), \
+             mock.patch.object(gvs, "pipeline_status", return_value={}):
+            status = gvs.status_summary(self.root)["shots"][0]["video"]
+        self.assertEqual(status["references"], expected_references)
+        self.assertEqual(status["provider_attempts"][-1]["references"], expected_references)
+        self.assertEqual(status["prompt_sha256"], status["provider_attempts"][-1]["prompt_sha256"])
+        self.assertNotIn("prompt", status)
+        self.assertNotIn("data:", json.dumps(status))
 
     def test_legacy_does_not_inherit_new_keyframe_approval_gate(self) -> None:
         self.project["prompt_compiler"] = "legacy"

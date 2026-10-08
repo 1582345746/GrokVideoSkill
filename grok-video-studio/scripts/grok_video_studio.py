@@ -164,7 +164,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.8.0"
+SKILL_VERSION = "2.8.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -2658,6 +2658,11 @@ def generate_videos(
                     raise SkillError(f"video create was already attempted for {shot_id}; inspect state.json and use --retry-failed only if duplicate billing is acceptable")
                 if attempts > 0 and retry_failed and not automatic_failover and video.get("status") != "failed":
                     archive_runtime_attempt(video, reason)
+                reference_records = [
+                    {"path": path.resolve().relative_to(root.resolve()).as_posix(), "sha256": file_digest(path)}
+                    for path in references
+                ]
+                prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
                 record_budget_attempt(state, project, "video")
                 attempt_id = uuid.uuid4().hex
                 video.update(
@@ -2672,12 +2677,14 @@ def generate_videos(
                         "prompt_versions": prompt_variants_value,
                         "prompt_version": prompt_version,
                         "prompt_utf8_bytes": prompt_bytes(prompt),
+                        "prompt_sha256": prompt_sha256,
                         "provider": active_provider,
                         "model": settings["video_model"],
                         "seconds": seconds,
                         "resolution": resolution,
                         "aspect_ratio": aspect_ratio,
                         "reference_count": len(references),
+                        "references": reference_records,
                         "generate_audio": generate_audio,
                         "error": "",
                         "error_category": "",
@@ -2695,6 +2702,9 @@ def generate_videos(
                     task_id="",
                     status="submitting",
                     created_at=int(time.time()),
+                    signature=video["signature"],
+                    prompt_sha256=prompt_sha256,
+                    references=reference_records,
                 )
                 save_state(root, state)
                 write_event(root, {"kind": "video_create", "shot_id": shot_id, "request_id": request_id, "attempt_id": attempt_id, "provider": active_provider, "attempt": video["attempts"]})
@@ -3087,6 +3097,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
     windows: list[dict[str, float]] = []
     boundary_qa: list[dict[str, Any]] = []
     qconfig = quality_config(project)
+    audio_mode = audio_config(project)["mode"]
     shot_records = list(project["shots"])
     for index, shot in enumerate(shot_records):
         video = shot_state(state, str(shot["id"]))["video"]
@@ -3107,17 +3118,21 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
             and qconfig["tail_guard_seconds"] > 0
             and str(shot.get("exit_behavior", director_config(project)["default_exit_behavior"])) in {"continue-action", "cut-on-action"}
         ):
-            signal = detect_tail_motion(
-                clip_path,
-                scan_end=edit_out,
-                tail_seconds=qconfig["tail_guard_seconds"],
-                threshold=qconfig["tail_motion_threshold"],
-            )
-            suggestion = signal.get("suggested_edit_out")
-            if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
-                trim.update({"applied": True, "reason": "tail_motion_settled", "from": edit_out, "to": float(suggestion), "motion": signal.get("motion_score")})
-                edit_out = float(suggestion)
-                timeline = edit_out - edit_in
+            # Visual stillness cannot authorize shortening upstream speech.
+            if audio_mode in {"native-dialogue", "narration"}:
+                trim["reason"] = "tail_motion_skipped_audio_boundary_unverified"
+            else:
+                signal = detect_tail_motion(
+                    clip_path,
+                    scan_end=edit_out,
+                    tail_seconds=qconfig["tail_guard_seconds"],
+                    threshold=qconfig["tail_motion_threshold"],
+                )
+                suggestion = signal.get("suggested_edit_out")
+                if signal.get("static") and suggestion is not None and float(suggestion) > edit_in + 0.25:
+                    trim.update({"applied": True, "reason": "tail_motion_settled", "from": edit_out, "to": float(suggestion), "motion": signal.get("motion_score")})
+                    edit_out = float(suggestion)
+                    timeline = edit_out - edit_in
         boundary_qa.append(trim)
         windows.append({"edit_in": edit_in, "edit_out": edit_out, "timeline_duration": timeline})
     output = root / "deliverables" / "final.mp4"
@@ -3126,7 +3141,7 @@ def assemble(root: Path) -> tuple[Path, dict[str, Any]]:
         runtime = shot_state(state, str(shot["id"]))["video"]
         if qconfig["resolution_policy"] == "block" and isinstance(runtime.get("qa"), dict) and not runtime["qa"].get("ok", True):
             raise SkillError(f"quality contract blocks assembly for {shot['id']}: " + "; ".join(runtime["qa"].get("errors", [])))
-    native_audio_required = audio_config(project)["mode"] in {"native-dialogue", "narration"}
+    native_audio_required = audio_mode in {"native-dialogue", "narration"}
     media = assemble_clips(
         clips,
         output,
@@ -4106,7 +4121,7 @@ def status_summary(root: Path) -> dict[str, Any]:
                 },
                 "video": {
                     key: runtime["video"].get(key)
-                    for key in ("status", "request_id", "attempt_id", "task_id", "path", "sha256", "media", "attempts", "progress", "mode", "provider", "final_provider", "provider_attempts", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "qa", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
+                    for key in ("status", "request_id", "attempt_id", "task_id", "path", "sha256", "media", "attempts", "progress", "mode", "provider", "final_provider", "provider_attempts", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "references", "prompt_sha256", "signature", "qa", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
                     if runtime["video"].get(key) not in (None, "")
                 },
             }

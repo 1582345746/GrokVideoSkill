@@ -167,6 +167,101 @@ class EventFlowRegressionTests(unittest.TestCase):
         event_flow_report(project)
         self.assertEqual(project, original)
 
+    def test_fast_dialogue_merges_legal_tail_and_lead_across_cut(self) -> None:
+        project = event_project()
+        project["workflow"] = "fast-continuous-event-dialogue"
+        project["shots"][0]["dialogue"][0]["end"] = 1.5
+        project["shots"][1]["dialogue"][0]["start"] = 0.49
+        report = event_flow_report(project)
+        gaps = report["dialogue_timeline"]["no_dialogue_intervals"]
+        blocked = next(gap for gap in gaps if gap["blocked"])
+        self.assertEqual(blocked["shot_ids"], ["shot-001", "shot-002"])
+        self.assertAlmostEqual(blocked["duration"], 0.89)
+        self.assertEqual(blocked["parts"][0]["source_start"], 1.5)
+        self.assertEqual(blocked["parts"][1]["source_end"], 0.49)
+        self.assertFalse(blocked["task_motivated"])
+        self.assertEqual(report["status"], "blocked")
+        self.assertTrue(any("shot-001 -> shot-002" in error for error in report["errors"]))
+        self.assertFalse(report["dialogue_timeline"]["actual_speech_verified"])
+
+    def test_legacy_event_flow_does_not_enable_new_timeline_gate(self) -> None:
+        project = event_project()
+        project["shots"][0]["dialogue"][0]["end"] = 1.5
+        project["shots"][1]["dialogue"][0]["start"] = 0.49
+        report = event_flow_report(project)
+        self.assertEqual(report["errors"], [])
+        self.assertEqual(report["dialogue_timeline"]["status"], "not-enabled")
+
+    def test_fast_dialogue_short_task_insert_is_allowed_but_legacy_stays_strict(self) -> None:
+        project = event_project()
+        project["shots"][0].update(dialogue=[], edit_out=1.1)
+        project["workflow"] = "fast-continuous-event-dialogue"
+        report = event_flow_report(project)
+        self.assertEqual(report["errors"], [])
+        gap = report["dialogue_timeline"]["no_dialogue_intervals"][0]
+        self.assertAlmostEqual(gap["duration"], 1.1)
+        self.assertIn("state-effect", gap["parts"][0]["task_reasons"])
+        self.assertTrue(gap["task_motivated"])
+        del project["workflow"]
+        self.assertTrue(any("silent shot" in error for error in event_flow_report(project)["errors"]))
+
+    def test_fast_dialogue_consecutive_task_inserts_cannot_bypass_gap_budget(self) -> None:
+        project = event_project()
+        project["workflow"] = "fast-continuous-event-dialogue"
+        for shot in project["shots"]:
+            shot.update(dialogue=[], edit_out=0.75)
+        report = event_flow_report(project)
+        self.assertTrue(any("task insert gap" in error for error in report["errors"]))
+        self.assertFalse(any("silent shot" in error for error in report["errors"]))
+        self.assertAlmostEqual(report["dialogue_timeline"]["longest_no_dialogue_seconds"], 1.3)
+
+    def test_fast_dialogue_allows_short_silent_coverage_without_fake_effect(self) -> None:
+        project = event_project()
+        project["workflow"] = "fast-continuous-event-dialogue"
+        project["shots"][0]["edit_out"] = 1.7
+        project["shots"][1].update(dialogue=[], edit_out=1.1)
+        project["shots"][1]["event"].update(mode="coverage", beat_id="escape", coverage_role="object", effects={})
+        report = event_flow_report(project)
+        self.assertEqual(report["errors"], [])
+        gap = report["dialogue_timeline"]["no_dialogue_intervals"][-1]
+        self.assertEqual(gap["parts"][0]["task_reasons"], ["coverage:object"])
+        self.assertEqual(report["final_state"]["door.closed"], False)
+
+    def test_fast_dialogue_task_insert_cannot_hide_excessive_neighbor_padding(self) -> None:
+        project = event_project()
+        project["workflow"] = "fast-continuous-event-dialogue"
+        final = copy.deepcopy(project["shots"][1])
+        final["id"] = "shot-003"
+        final["event"]["cause_shot_id"] = "shot-002"
+        final["dialogue"][0]["start"] = 0.5
+        project["shots"][0]["dialogue"][0]["end"] = 1.5
+        project["shots"][1].update(dialogue=[], edit_out=0.3)
+        project["shots"][1]["event"].update(mode="coverage", beat_id="escape", coverage_role="object", effects={})
+        project["shots"].append(final)
+        report = event_flow_report(project)
+        gap = next(gap for gap in report["dialogue_timeline"]["no_dialogue_intervals"] if gap["blocked"])
+        self.assertAlmostEqual(gap["duration"], 1.1)
+        self.assertAlmostEqual(gap["unmotivated_seconds"], 0.9)
+        self.assertTrue(any("task insert cannot excuse padding" in error for error in report["errors"]))
+
+    def test_fast_dialogue_cannot_disable_required_contract(self) -> None:
+        for raw in (None, {}, {"required": False}):
+            with self.subTest(event_flow=raw):
+                report = event_flow_report({"workflow": "fast-continuous-event-dialogue", "event_flow": raw})
+                self.assertEqual(report["status"], "blocked")
+                self.assertTrue(any("requires event_flow.required=true" in error for error in report["errors"]))
+
+    def test_fast_dialogue_gap_budgets_reject_invalid_values_and_accept_override(self) -> None:
+        project = event_project()
+        project["workflow"] = "fast-continuous-event-dialogue"
+        for value in (True, 0, float("nan"), "1.2", []):
+            project["event_flow"]["pace"] = {"max_task_silent_seconds": value}
+            self.assertTrue(any("max_task_silent_seconds must" in error for error in event_flow_report(project)["errors"]))
+        project["event_flow"]["pace"] = {"max_timeline_silent_seconds": 0.95}
+        project["shots"][0]["dialogue"][0]["end"] = 1.5
+        project["shots"][1]["dialogue"][0]["start"] = 0.49
+        self.assertEqual(event_flow_report(project)["errors"], [])
+
     def test_container_values_in_enum_fields_produce_preflight_errors(self) -> None:
         for value in ([], {}):
             for field, expected in (("mode", "mode must"), ("coverage_role", "coverage_role"), ("audio_source", "audio_source")):

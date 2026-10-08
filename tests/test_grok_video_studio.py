@@ -235,6 +235,8 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     multipart_video_error = "provider capacity is full"
     json_video_create_status = 0
     json_video_create_error = "provider rejected video create"
+    json_video_create_missing_task_id = False
+    multipart_video_create_missing_task_id = False
     task_lookup_404_remaining = 0
     task_content_404_remaining = 0
     tts_creates = 0
@@ -380,6 +382,9 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             if type(self).fail_video_create:
                 self.send_json({"error": {"message": "temporary upstream failure"}}, 502)
                 return
+            if type(self).multipart_video_create_missing_task_id:
+                self.send_json({"status": "queued"})
+                return
             self.send_json({"data": {"id": "task-1", "status": "queued"}})
             return
         if self.path == "/v1/videos/generations":
@@ -394,6 +399,9 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
                 return
             if type(self).json_video_create_status:
                 self.send_json({"error": {"message": type(self).json_video_create_error}}, type(self).json_video_create_status)
+                return
+            if type(self).json_video_create_missing_task_id:
+                self.send_json({"status": "queued"})
                 return
             self.send_json({"request_id": "task-1"})
             return
@@ -495,6 +503,8 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.multipart_video_error = "provider capacity is full"
         FakeProviderHandler.json_video_create_status = 0
         FakeProviderHandler.json_video_create_error = "provider rejected video create"
+        FakeProviderHandler.json_video_create_missing_task_id = False
+        FakeProviderHandler.multipart_video_create_missing_task_id = False
         FakeProviderHandler.task_lookup_404_remaining = 0
         FakeProviderHandler.task_content_404_remaining = 0
         FakeProviderHandler.tts_creates = 0
@@ -1492,6 +1502,50 @@ class SkillIntegrationTests(unittest.TestCase):
         state = json.loads((project / "state.json").read_text(encoding="utf-8"))
         history = state["shots"]["shot-001"]["video"]["history"]
         self.assertEqual(history[-1]["reason"], "provider dashboard confirmed no usable task")
+
+    def test_sub2api_success_without_task_id_does_not_fail_over_or_create_twice(self) -> None:
+        project = self.create_project("sub2api-missing-task-id", generate_image=False)
+        FakeProviderHandler.json_video_create_missing_task_id = True
+        first = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "submission_unknown")
+        self.assertEqual(video["error_category"], "submission_unknown")
+        self.assertEqual(video["provider_attempts"][-1]["status"], "submission_unknown")
+        self.assertEqual(video.get("task_id", ""), "")
+        self.assertEqual(state["budget_usage"]["video_attempts"], 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
+        second = self.run_cli("resume", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(second["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
+    def test_newapi_success_without_task_id_does_not_create_twice(self) -> None:
+        project = self.create_project("newapi-missing-task-id", generate_image=False)
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["video_provider"] = "newapi"
+        value["video_provider_policy"] = "fixed"
+        (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
+        FakeProviderHandler.multipart_video_create_missing_task_id = True
+        first = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "submission_unknown")
+        self.assertEqual(video["error_category"], "submission_unknown")
+        self.assertEqual(video["provider_attempts"][-1]["status"], "submission_unknown")
+        self.assertEqual(video.get("task_id", ""), "")
+        self.assertEqual(state["budget_usage"]["video_attempts"], 1)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 0)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+        second = self.run_cli("resume", str(project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(second["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 0)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
 
     def test_known_task_lookup_404_resumes_without_a_second_create(self) -> None:
         project = self.create_project("known-task-lookup", generate_image=False)

@@ -32,6 +32,7 @@ from provider_contracts import (
     TASK_POLL_RETRYABLE_HTTP,
     CircuitBreaker,
     ProviderTaskFailedError,
+    SubmissionUnknownError,
     is_completed,
     result_urls,
     safe_operation,
@@ -394,7 +395,7 @@ class NewApiVideoClient:
         )
         created_task_id = task_id(payload)
         if not created_task_id:
-            raise SkillError("video provider returned no task ID")
+            raise SubmissionUnknownError("video provider returned a successful response without a task ID")
         return created_task_id
 
     def query(self, task_id: str) -> tuple[str, dict[str, Any]]:
@@ -538,7 +539,7 @@ class Sub2ApiVideoClient:
             )
         created_task_id = task_id(response)
         if not created_task_id:
-            raise SkillError("video provider returned no task ID")
+            raise SubmissionUnknownError("video provider returned a successful response without a task ID")
         return created_task_id
 
     def query(self, task_id: str) -> tuple[str, dict[str, Any]]:

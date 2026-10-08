@@ -19,6 +19,7 @@
 | Video receives a multi-view character sheet | Reference selection | Generate a per-shot keyframe from the sheet and send only that keyframe to image-to-video. |
 | `429` | Rate or account limit | Wait before a new create; polling may use backoff. |
 | `502`, `503`, `context deadline exceeded` | Gateway/upstream | Treat create as ambiguous if no task ID was returned. Do not automatically create again. |
+| Successful create response without a task ID | Unknown submission | Preserve the attempt as `submission_unknown`; the provider may have accepted the write. Do not automatically fall back or create again. Inspect the provider record before any authorized replacement. |
 | Retry count exceeded | Cost control | Default is three total attempts (initial plus two retries), including provider failover. A known task is resumed/polled/downloaded only; `submission_unknown` is not recreated automatically. |
 | Sub2Api task reaches a confirmed provider failure | Provider task | Record the failed Sub2Api attempt, then automatically continue with NewApi only when its video key is configured and the failure is not content/account/input related. |
 | Sub2Api create is rejected as unsupported or rate-limited before a task exists | Provider routing | It is safe to record a separate NewApi attempt. Keep the same internal request ID and a new attempt ID. |
@@ -32,6 +33,7 @@
 | Resolution downgraded by upstream | Provider output contract | Record requested and observed resolution in state/QA; do not report it as an exact match. |
 | Quality policy blocks a low-resolution clip | Quality contract | Set `quality.resolution_policy=warn` only when an explicit downgrade is acceptable; otherwise regenerate at a supported upstream tier. |
 | Tail motion settles into a generic pose | Director/edit contract | Inspect `signals.tail_motion.suggested_edit_out`, update the shot edit window, and review the preceding action before delivery. |
+| Upstream speech is present but its end is unverified | Audio/edit contract | Native dialogue and narration skip visual-only automatic tail trimming. Listen before changing explicit edit windows; a still frame or low-amplitude interval is not a word boundary. |
 | OCR detects visible text in a clean frame | Visual QA | Inspect the cited samples for captions, logos, or watermarks; use `quality.caption_detection=block` for a hard gate. |
 | Final assembly has no audio | Local assembly policy | Keep `defaults.audio_policy=preserve`; assembly retains source audio and adds silent AAC to clips without audio. Use `mute` only intentionally. |
 | App controls, likes, comments, captions, or watermarks appear | Generative visual artifact | Keep `allow_ui_elements=false`, regenerate the affected shot, and inspect every exported QA review frame before delivery. Do not crop blindly when overlays cover story content. |

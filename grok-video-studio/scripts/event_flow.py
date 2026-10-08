@@ -22,6 +22,10 @@ PACE_DEFAULTS = {
     "max_speakers_per_shot": 1,
     "max_speech_units_per_second": 8.0,
 }
+FAST_DIALOGUE_PACE_DEFAULTS = {
+    "max_timeline_silent_seconds": 0.8,
+    "max_task_silent_seconds": 1.2,
+}
 
 
 def speech_units(text: str) -> int:
@@ -40,14 +44,66 @@ def _flat_state(value: Any) -> bool:
     )
 
 
+def _dialogue_timeline(gaps: list[dict[str, Any]], total: float, enabled: bool,
+                       pace: dict[str, Any]) -> dict[str, Any]:
+    """Join no-dialogue fragments across editorial cuts, including lead/tail pads."""
+    merged: list[dict[str, Any]] = []
+    for gap in gaps:
+        if merged and abs(merged[-1]["end"] - gap["start"]) < 0.001:
+            merged[-1]["end"] = gap["end"]
+            merged[-1]["parts"].append(gap)
+        else:
+            merged.append({"start": gap["start"], "end": gap["end"], "parts": [gap]})
+    errors: list[str] = []
+    for gap in merged:
+        duration = gap["end"] - gap["start"]
+        motivated = any(part["task_reasons"] for part in gap["parts"])
+        limit = pace["max_task_silent_seconds"] if motivated else pace["max_timeline_silent_seconds"]
+        unmotivated = sum(part["end"] - part["start"] for part in gap["parts"] if not part["task_reasons"])
+        shot_ids = list(dict.fromkeys(part["shot_id"] for part in gap["parts"]))
+        blocked = enabled and (duration > limit + 0.001 or unmotivated > pace["max_timeline_silent_seconds"] + 0.001)
+        if enabled and duration > limit + 0.001:
+            kind = "task insert" if motivated else "unmotivated no-dialogue"
+            errors.append(
+                f"dialogue timeline {' -> '.join(shot_ids)}: {kind} gap "
+                f"{gap['start']:.2f}-{gap['end']:.2f}s ({duration:.2f}s) exceeds {limit}s"
+            )
+        elif blocked:
+            errors.append(
+                f"dialogue timeline {' -> '.join(shot_ids)}: unmotivated padding "
+                f"{unmotivated:.2f}s within {gap['start']:.2f}-{gap['end']:.2f}s "
+                f"exceeds {pace['max_timeline_silent_seconds']}s; a task insert cannot excuse padding"
+            )
+        gap.update({"start": round(gap["start"], 3), "end": round(gap["end"], 3),
+                    "duration": round(duration, 3), "shot_ids": shot_ids,
+                    "unmotivated_seconds": round(unmotivated, 3),
+                    "task_motivated": motivated, "limit_seconds": limit, "blocked": blocked})
+        for part in gap["parts"]:
+            for key in ("start", "end", "source_start", "source_end"):
+                part[key] = round(part[key], 3)
+    return {
+        "enabled": enabled, "evidence_kind": "declared-plan",
+        "actual_speech_verified": False,
+        "status": "blocked" if errors else "contract-valid" if enabled else "not-enabled",
+        "errors": errors, "no_dialogue_intervals": merged,
+        "no_dialogue_seconds": round(sum(gap["duration"] for gap in merged), 3),
+        "longest_no_dialogue_seconds": max((gap["duration"] for gap in merged), default=0.0),
+        "timeline_seconds": round(total, 3),
+    }
+
+
 def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
     raw = project.get("event_flow")
     required = isinstance(raw, dict) and raw.get("required") is True
+    fast_dialogue = project.get("workflow") == "fast-continuous-event-dialogue"
     errors: list[str] = []
     report: dict[str, Any] = {
         "required": required, "status": "not-enabled", "evidence_kind": "declared-plan",
         "semantic_quality": "unverified", "errors": errors, "shots": [],
     }
+    if fast_dialogue and not required:
+        errors.append("fast-continuous-event-dialogue requires event_flow.required=true")
+        report["status"] = "blocked"
     if raw is None:
         return report
     if not isinstance(raw, dict):
@@ -70,7 +126,9 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
         errors.append("event_flow.pace must be an object")
         pace_raw = {}
     pace = dict(PACE_DEFAULTS)
-    for key, default in PACE_DEFAULTS.items():
+    pace.update(FAST_DIALOGUE_PACE_DEFAULTS)
+    defaults = {**PACE_DEFAULTS, **(FAST_DIALOGUE_PACE_DEFAULTS if fast_dialogue else {})}
+    for key, default in defaults.items():
         value = pace_raw.get(key, default)
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
             errors.append(f"event_flow.pace.{key} must be a positive finite number")
@@ -89,6 +147,7 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
     total = 0.0
     speaking = 0.0
     longest = 0.0
+    timeline_gaps: list[dict[str, Any]] = []
     shots = project.get("shots", [])
     if not isinstance(shots, list) or not shots:
         errors.append("event_flow requires shots")
@@ -181,6 +240,7 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
             errors.append(f"{prefix}: split speaking turns into separate editorial shots")
         cursor = edit_in
         spoken_duration = 0.0
+        speech_intervals: list[tuple[float, float]] = []
         for line in lines:
             if not isinstance(line, dict):
                 errors.append(f"{prefix}: dialogue line must be an object")
@@ -227,18 +287,42 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
                 errors.append(f"{lp}: line is too long to remain intelligible in its window")
             spoken_duration += end - start
             cursor = end
+            if text:
+                speech_intervals.append((start, end))
         speaking += spoken_duration
+        task_reasons: list[str] = []
+        if mode == "coverage" and event.get("beat_id") == active_beat and event.get("coverage_role") in ("listener", "object", "action") and not changed:
+            task_reasons.append(f"coverage:{event['coverage_role']}")
+        if changed:
+            task_reasons.append("state-effect")
+        if any(isinstance(shot.get(key), str) and shot[key].strip() for key in ("entry_action", "exit_action")):
+            task_reasons.append("visible-action")
         if lines:
             if edit_out - cursor > pace["max_dialogue_tail_seconds"]:
                 errors.append(f"{prefix}: dead tail after dialogue {edit_out - cursor:.2f}s")
-        elif duration > pace["max_silent_seconds"]:
-            errors.append(f"{prefix}: silent shot {duration:.2f}s; carry motivated off-screen dialogue or shorten the insert")
+        else:
+            limit = pace["max_task_silent_seconds"] if fast_dialogue and task_reasons else pace["max_silent_seconds"]
+            if duration > limit + 0.001:
+                errors.append(f"{prefix}: silent shot {duration:.2f}s exceeds {limit}s; carry motivated off-screen dialogue or shorten the insert")
+        # Valid source windows remain source-relative; only this projection uses final timeline time.
+        gap_cursor = edit_in
+        silent_tasks = task_reasons if not speech_intervals else []
+        for start, end in speech_intervals + [(edit_out, edit_out)]:
+            if start > gap_cursor + 0.001:
+                timeline_gaps.append({"shot_id": sid, "start": total - duration + gap_cursor - edit_in,
+                                      "end": total - duration + start - edit_in,
+                                      "source_start": gap_cursor, "source_end": start,
+                                      "task_reasons": list(silent_tasks)})
+            gap_cursor = max(gap_cursor, end)
         report["shots"].append({"id": sid, "function": function, "state_in": before, "state_out": dict(state), "changes": changed, "timeline_start": round(total - duration, 3), "timeline_duration": round(duration, 3), "declared_speech_seconds": round(spoken_duration, 3)})
+    dialogue_timeline = _dialogue_timeline(timeline_gaps, total, fast_dialogue, pace)
+    errors.extend(dialogue_timeline["errors"])
     report.update({
         "status": "contract-valid" if not errors else "blocked", "final_state": state, "pace": pace,
         "timeline_seconds": round(total, 3), "mean_edit_shot_seconds": round(total / max(1, len(shots)), 3),
         "longest_edit_shot_seconds": round(longest, 3),
         "declared_speech_ratio": round(speaking / total, 3) if total else 0.0,
+        "dialogue_timeline": dialogue_timeline,
     })
     return report
 
