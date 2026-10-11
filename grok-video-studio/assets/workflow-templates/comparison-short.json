@@ -1,0 +1,35 @@
+{
+  "id": "comparison-short",
+  "title": "以前 VS 现在对比短视频",
+  "summary": "用成对的过去/现在镜头快速回答同一个问题；每组有清晰反差、桥接和包袱。",
+  "project_type": "cinematic-short",
+  "director_mode": "comedy-scene",
+  "genre_packs": ["family", "comedy"],
+  "routes": ["text-to-video", "image-to-video"],
+  "default_shots": 6,
+  "preferred_clip_seconds": 3,
+  "character_master": true,
+  "strict_director": true,
+  "default_exit_behavior": "cut-on-action",
+  "shot_roles": ["wide", "reaction", "wide", "reaction", "wide", "ending_hook"],
+  "shot_defaults": {
+    "generate_image": true,
+    "use_character_master": false
+  },
+  "comparison_contract": {
+    "required": true,
+    "axis": "then_vs_now",
+    "comparison_order": "before_then_after",
+    "label_delivery": "post_overlay",
+    "max_pair_gap_seconds": 0.8,
+    "hook_deadline_seconds": 3.0,
+    "max_no_information_seconds": 3.0,
+    "minimum_pairs": 3
+  },
+  "guidance": {
+    "ask": ["比较的共同问题", "以前和现在各自的做法", "每组可见反差", "开头钩子", "最后包袱或结论"],
+    "story": "整条视频只围绕一个共同问题。每个 pair 必须由一个 before 镜头和紧邻的 after 镜头组成，先展示过去，再展示现在；下一组通过动作、道具或对白桥接进入。不要把无关段子拼成合集。",
+    "image_prompt": "明确时代、服装、道具、场景和光线的 era_lock；每镜只显示当前一侧的可见状态，禁止把另一时代道具带入画面。",
+    "video_prompt": "每镜只完成一个短笑点或信息变化；人物对白立即推进比较，不留叹气、挥手、定格或无任务空镜。不要生成字幕，时代标签由后期叠加。"
+  }
+}

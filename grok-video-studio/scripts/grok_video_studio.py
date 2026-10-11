@@ -155,6 +155,7 @@ from chatcut_adapter import apply_chatcut_receipt, chatcut_capability_report, va
 from event_flow import event_flow_report, validate_event_flow
 from content_reviews import create_review_template, apply_review_receipt, content_review_summary
 from scoped_prompts import scoped_prompt_variants
+from comparison_contract import comparison_contract_report, comparison_shot_direction, validate_comparison_contract
 from workflow_registry import (
     GENRE_PACKS,
     default_custom_workflow_root,
@@ -164,7 +165,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.8.1"
+SKILL_VERSION = "2.9.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -195,6 +196,8 @@ SHOT_ROLES = {
     "reaction",
     "transition",
     "ending_hook",
+    "comparison_before",
+    "comparison_after",
 }
 TERMINAL_FAILURES = {"failed", "submission_unknown"}
 SKILL_ROOT = Path(__file__).resolve().parents[1]
@@ -589,6 +592,63 @@ def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any])
     if not candidates:
         raise SkillError("未配置可用的视频 Key：请配置 Sub2Api 或 NewApi 视频 Key")
     return candidates
+
+
+def validate_retry_provider_override(
+    provider: str | None,
+    project: dict[str, Any],
+    settings: dict[str, Any],
+    video: dict[str, Any],
+    *,
+    retry_failed: bool,
+) -> str:
+    """Allow an explicit provider change only after a confirmed create rejection."""
+    override = str(provider or "").strip().lower()
+    if not override:
+        return ""
+    if override not in PROVIDER_CAPABILITIES:
+        raise SkillError("--retry-provider must be sub2api or newapi")
+    if not retry_failed:
+        raise SkillError("--retry-provider requires --retry-failed and --retry-reason")
+    if str(video.get("status", "")) != "failed" or str(video.get("task_id", "")).strip():
+        raise SkillError("--retry-provider is allowed only for a failed create with no task ID; known tasks stay on their original provider")
+    attempts = video.get("provider_attempts", [])
+    latest_attempt = attempts[-1] if isinstance(attempts, list) and attempts else None
+    failed_provider = str(latest_attempt.get("provider", "")).strip().lower() if isinstance(latest_attempt, dict) else ""
+    if (
+        not isinstance(latest_attempt, dict)
+        or latest_attempt.get("status") != "failed"
+        or str(latest_attempt.get("task_id", "")).strip()
+        or not failed_provider
+        or failed_provider == override
+        or failed_provider != str(video.get("provider", "")).strip().lower()
+    ):
+        raise SkillError("--retry-provider requires a recorded rejected create from another provider with no task ID")
+    candidates = video_provider_candidates(project, settings)
+    if override not in candidates:
+        raise SkillError(f"retry provider {override} is not available under this project's provider policy or credentials")
+    return override
+
+
+def validate_retry_provider_override_batch(
+    provider: str | None,
+    project: dict[str, Any],
+    settings: dict[str, Any],
+    state: dict[str, Any],
+    shots: list[dict[str, Any]],
+    *,
+    retry_failed: bool,
+) -> str:
+    """Validate an explicit provider override for every selected shot before writes."""
+    override = str(provider or "").strip().lower()
+    if not override:
+        return ""
+    if not shots:
+        raise SkillError("--retry-provider requires at least one selected shot")
+    for shot in shots:
+        runtime = shot_state(state, str(shot["id"]))
+        validate_retry_provider_override(override, project, settings, runtime["video"], retry_failed=retry_failed)
+    return override
 
 
 def video_resolution(project: dict[str, Any], shot: dict[str, Any]) -> str:
@@ -1008,6 +1068,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         errors.append("defaults.audio_policy must be preserve or mute")
     errors.extend(validate_dialogue(root, project))
     errors.extend(validate_director(project))
+    errors.extend(validate_comparison_contract(project))
     errors.extend(validate_visual_profile(project))
     errors.extend(validate_quality_config(project))
     errors.extend(validate_continuity_config(project))
@@ -1133,7 +1194,10 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         shot_role = str(raw_shot.get("shot_role", "")).strip().lower()
         if shot_role and shot_role not in SHOT_ROLES:
             errors.append(f"{prefix}.shot_role must be one of {', '.join(sorted(SHOT_ROLES))}")
-        if bool(raw_shot.get("generate_image", True)) and not str(raw_shot.get("image_prompt", "")).strip():
+        image_prompt = str(raw_shot.get("image_prompt", "")).strip()
+        if not image_prompt and project.get("workflow") == "comparison-short":
+            image_prompt = str(raw_shot.get("video_prompt", "")).strip()
+        if bool(raw_shot.get("generate_image", True)) and not image_prompt:
             errors.append(f"{prefix}.image_prompt is required when generate_image is true")
         if not str(raw_shot.get("video_prompt", "")).strip():
             errors.append(f"{prefix}.video_prompt is required")
@@ -1482,6 +1546,29 @@ def clean_frame_direction(project: dict[str, Any]) -> str:
     return base + "Animation camera original. The rendered scene fills every edge and remains one uninterrupted composition in the declared animation medium."
 
 
+def comparison_clean_frame_direction(project: dict[str, Any], shot: dict[str, Any]) -> tuple[str, str]:
+    """Return comparison clean-frame guidance without reintroducing forbidden devices."""
+    overrides = project.get("comparison_contract", {}).get("clean_frame_overrides", {})
+    override = overrides.get(str(shot.get("id", ""))) if isinstance(overrides, dict) else ""
+    text = str(override or "").strip()
+    normalized = text.lower()
+    forbids_devices = any(
+        token in text or token in normalized
+        for token in ("完全不出现", "不要手机", "不要设备", "no phone", "no device", "screen_policy=forbidden")
+    )
+    if forbids_devices:
+        base = (
+            "Do not show readable screens, television text, phone UI, numbers, subtitles, captions, logos, or watermarks. "
+            "Do not depict any phone, television, tablet, watch, electronic device, screen, or device-like light effect."
+        )
+    else:
+        base = (
+            "Do not show readable screens, television text, phone UI, numbers, subtitles, captions, logos, or watermarks. "
+            "If a phone or television is present, show only its back or an abstract non-readable glow facing away from camera."
+        )
+    return base, text
+
+
 def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections = []
     sections.append("[VISUAL MEDIUM CONTRACT]\n" + visual_prompt_direction(project))
@@ -1503,7 +1590,20 @@ def composed_image_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     sections.append("[FRAME LAYOUT]\n" + frame_layout_direction(project, shot))
     if not allow_ui_elements(project, shot):
         sections.append("[CLEAN FRAME POLICY]\n" + clean_frame_direction(project))
-    sections.append("[SHOT KEYFRAME]\n" + str(shot["image_prompt"]).strip())
+    if project.get("workflow") == "comparison-short":
+        clean_frame, override = comparison_clean_frame_direction(project, shot)
+        sections.append("[COMPARISON CLEAN FRAME]\n" + clean_frame)
+        if override:
+            sections.append("[SHOT-SPECIFIC CLEAN FRAME]\n" + override)
+        comparison_direction = comparison_shot_direction(project, shot)
+        if comparison_direction:
+            sections.append("[COMPARISON PAIR AND ERA LOCK]\n" + comparison_direction)
+    # A clean-frame override is a constraint layer. It must not replace the
+    # shot's authored visual action with a generic positive scene description.
+    image_prompt = str(shot.get("image_prompt") or shot.get("video_prompt") or "").strip()
+    if not image_prompt:
+        image_prompt = "One continuous full-frame physical scene matching the shot contract."
+    sections.append("[SHOT KEYFRAME]\n" + image_prompt)
     if continuity_config(project)["enabled"] and str(shot.get("continuity_in", "")).strip():
         sections.append("[CONTINUITY HANDOFF]\nPreserve the reviewed previous-shot state at the start of this keyframe: " + str(shot["continuity_in"]).strip())
     return "\n\n".join(sections)
@@ -1553,6 +1653,14 @@ def composed_video_prompt(project: dict[str, Any], shot: dict[str, Any]) -> str:
     subtitle_source = audio_config(project)["subtitle_source"]
     if not allow_ui_elements(project, shot) and subtitle_source != "upstream":
         sections.append("[CLEAN FRAME POLICY]\n" + clean_frame_direction(project))
+    if project.get("workflow") == "comparison-short":
+        clean_frame, override = comparison_clean_frame_direction(project, shot)
+        sections.append("[COMPARISON CLEAN FRAME]\n" + clean_frame)
+        if override:
+            sections.append("[SHOT-SPECIFIC CLEAN FRAME]\n" + override)
+        comparison_direction = comparison_shot_direction(project, shot)
+        if comparison_direction:
+            sections.append("[COMPARISON PAIR AND ERA LOCK]\n" + comparison_direction)
     native_audio = dialogue_prompt(project, shot, visual_medium=str(resolve_visual_profile(project)["medium"]))
     if native_audio:
         sections.append("[NATIVE AUDIO AND PERFORMANCE]\n" + native_audio)
@@ -1936,6 +2044,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         )
     narrative = narrative_contract(project)
     narrative_coverage = narrative_contract_coverage(project)
+    comparison = comparison_contract_report(project)
     if narrative["required"] and narrative_coverage["complete_shots"] < narrative_coverage["shot_count"]:
         warnings.append(
             "narrative_contract_v2 is required but one or more shots lack a complete causal beat; paid generation is blocked"
@@ -1951,6 +2060,8 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         "continuity": continuity_config(project),
         "story": story_clarity_score(project),
         "event_flow": event_flow_report(project),
+        "comparison_contract": comparison,
+        "comparison": comparison,
         "story_contract": story_contract(project),
         "narrative_contract_v2": narrative,
         "narrative_coverage": narrative_coverage,
@@ -2062,6 +2173,7 @@ def audit_project(root: Path, project: dict[str, Any]) -> dict[str, Any]:
         },
         "director": director_config(project),
         "story": story_clarity_score(project),
+        "comparison_contract": comparison_contract_report(project),
         "continuity_diffs": continuity_diffs,
         "manual_review_required": [
             "character identity and wardrobe across adjacent shots",
@@ -2438,6 +2550,7 @@ def generate_videos(
     poll_timeout: int,
     shot_ids: list[str] | None = None,
     replace_lost_task: bool = False,
+    retry_provider: str | None = None,
 ) -> dict[str, Any]:
     reason = require_retry_reason(retry_failed, retry_reason)
     if replace_lost_task and not retry_failed:
@@ -2449,13 +2562,24 @@ def generate_videos(
     _, _, settings = clients()
     mode = video_mode(project)
     candidates = video_provider_candidates(project, settings)
+    shots = selected_shots(project, shot_ids)
+    if retry_provider and not shot_ids:
+        raise SkillError("--retry-provider requires at least one explicit --shot")
+    retry_provider_override = validate_retry_provider_override_batch(
+        retry_provider,
+        project,
+        settings,
+        state,
+        shots,
+        retry_failed=retry_failed,
+    )
     generate_audio = bool(audio_config(project)["generate_audio"])
     if mode not in {"text-to-video", "image-to-video"}:
         raise SkillError("video_mode must be text-to-video or image-to-video")
     completed: list[str] = []
     skipped: list[str] = []
     final_providers: dict[str, str] = {}
-    for shot in selected_shots(project, shot_ids):
+    for shot in shots:
         shot_id = str(shot["id"])
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
@@ -2492,8 +2616,10 @@ def generate_videos(
         task_id = str(video.get("task_id", "")).strip()
         if replace_lost_task and not task_id:
             raise SkillError(f"{shot_id} has no known task ID to verify or replace")
-        active_provider = stored_provider or candidates[0]
-        if active_provider not in candidates:
+        active_provider = retry_provider_override or stored_provider or candidates[0]
+        if retry_provider_override:
+            candidates_for_shot = [retry_provider_override]
+        elif active_provider not in candidates:
             candidates_for_shot = [active_provider]
         else:
             candidates_for_shot = candidates
@@ -2646,6 +2772,20 @@ def generate_videos(
             video["task_id"] = ""
             video.pop("failover_next_provider", None)
             task_id = ""
+
+        if retry_provider_override:
+            archive_runtime_attempt(video, reason)
+            write_event(
+                root,
+                {
+                    "kind": "video_retry_provider_authorized",
+                    "shot_id": shot_id,
+                    "request_id": request_id,
+                    "from_provider": stored_provider,
+                    "to_provider": retry_provider_override,
+                    "reason": reason,
+                },
+            )
 
         while True:
             provider_index = candidates_for_shot.index(active_provider) if active_provider in candidates_for_shot else 0
@@ -3867,6 +4007,20 @@ def init_project(
         },
         "shots": shots,
     }
+    if workflow_id == "comparison-short":
+        project["comparison_contract"] = {
+            "required": True,
+            "axis": "then_vs_now",
+            "shared_question": "",
+            "comparison_order": "before_then_after",
+            "hook": "",
+            "payoff": "",
+            "label_delivery": "post_overlay",
+            "max_pair_gap_seconds": 0.8,
+            "hook_deadline_seconds": 3.0,
+            "max_no_information_seconds": 3.0,
+            "pairs": [],
+        }
     if workflow_id == "fast-continuous-event-dialogue":
         project["prompt_compiler"] = "scoped-v1"
         project["prompt_style"] = {}
@@ -4727,6 +4881,11 @@ def build_parser() -> argparse.ArgumentParser:
         videos.add_argument("project", type=Path)
         videos.add_argument("--retry-failed", action="store_true")
         videos.add_argument("--retry-reason", default="")
+        videos.add_argument(
+            "--retry-provider",
+            choices=("sub2api", "newapi"),
+            help="Retry one or more explicitly selected, definitely rejected creates through the named provider.",
+        )
         videos.add_argument("--progress", action="store_true", help="Write JSONL progress events to stderr.")
         videos.add_argument("--poll-timeout", type=int, default=1800)
         videos.add_argument("--shot", action="append", help="Process only this shot id; repeat for multiple shots.")
@@ -5917,6 +6076,7 @@ def main() -> int:
                         poll_timeout=args.poll_timeout,
                         shot_ids=args.shot,
                         replace_lost_task=args.replace_lost_task,
+                        retry_provider=args.retry_provider,
                     ),
                 }
             )

@@ -1732,6 +1732,117 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.video_creates, 1)
 
+    def test_retry_provider_uses_newapi_only_after_recorded_sub2api_rejection(self) -> None:
+        project = self.create_project("retry-provider", generate_image=False)
+        FakeProviderHandler.json_video_create_status = 400
+        FakeProviderHandler.json_video_create_error = "xAI upstream returned status 400"
+        rejected = self.run_cli("generate-videos", str(project), "--shot", "shot-001", "--poll-timeout", "5", expected=1)
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        failed_video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(failed_video["status"], "failed")
+        self.assertEqual(failed_video["provider"], "sub2api")
+        self.assertEqual(failed_video.get("task_id", ""), "")
+        self.assertEqual(failed_video["provider_attempts"][-1]["status"], "failed")
+
+        FakeProviderHandler.json_video_create_status = 0
+        missing_scope = self.run_cli(
+            "resume", str(project), "--retry-failed", "--retry-reason", "confirmed create rejection",
+            "--retry-provider", "newapi", "--poll-timeout", "5", expected=1,
+        )
+        self.assertIn("--shot", missing_scope["error"])
+        missing_authorization = self.run_cli(
+            "resume", str(project), "--shot", "shot-001", "--retry-provider", "newapi",
+            "--poll-timeout", "5", expected=1,
+        )
+        self.assertIn("--retry-failed", missing_authorization["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
+        retried = self.run_cli(
+            "resume", str(project), "--shot", "shot-001", "--retry-failed",
+            "--retry-reason", "Sub2Api rejected this shot twice without creating a task",
+            "--retry-provider", "newapi", "--poll-timeout", "5",
+        )
+        self.assertTrue(retried["ok"])
+        self.assertEqual(retried["videos"]["final_providers"], {"shot-001": "newapi"})
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["provider"], "newapi")
+        self.assertEqual(video["final_provider"], "newapi")
+        self.assertEqual([item["provider"] for item in video["provider_attempts"]], ["sub2api", "newapi"])
+        self.assertEqual(video["provider_attempts"][0]["status"], "failed")
+        self.assertEqual(video["provider_attempts"][1]["status"], "completed")
+        self.assertEqual(video["history"][-1]["provider"], "sub2api")
+        self.assertEqual(state["budget_usage"]["video_attempts"], 2)
+
+    def test_retry_provider_rejects_known_tasks_and_ambiguous_creates(self) -> None:
+        known_project = self.create_project("retry-provider-known-task", generate_image=False)
+        self.env.update({"GVS_NEWAPI_VIDEO_KEY": ""})
+        FakeProviderHandler.video_status = "failed"
+        failed_task = self.run_cli("generate-videos", str(known_project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(failed_task["ok"])
+        known_retry = self.run_cli(
+            "resume", str(known_project), "--shot", "shot-001", "--retry-failed",
+            "--retry-reason", "provider task failed", "--retry-provider", "newapi",
+            "--poll-timeout", "5", expected=1,
+        )
+        self.assertIn("no task ID", known_retry["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
+        ambiguous_project = self.create_project("retry-provider-ambiguous", generate_image=False)
+        FakeProviderHandler.video_status = "completed"
+        FakeProviderHandler.fail_video_create = True
+        first = self.run_cli("generate-videos", str(ambiguous_project), "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        ambiguous_retry = self.run_cli(
+            "resume", str(ambiguous_project), "--shot", "shot-001", "--retry-failed",
+            "--retry-reason", "retry after uncertain gateway failure", "--retry-provider", "newapi",
+            "--poll-timeout", "5", expected=1,
+        )
+        self.assertIn("failed create", ambiguous_retry["error"])
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+        self.assertEqual(FakeProviderHandler.json_video_creates, 2)
+
+    def test_retry_provider_prevalidates_all_selected_shots_before_creating(self) -> None:
+        project = self.root / "retry-provider-prevalidation"
+        self.run_cli(
+            "init", str(project), "--title", "Retry", "--topic", "Provider",
+            "--workflow", "text-to-video", "--mode", "text-to-video",
+            "--video-provider", "sub2api", "--video-provider-policy", "automatic",
+            "--shots", "2", "--video-size", "720x1280", "--seconds", "6",
+        )
+        value = json.loads((project / "project.json").read_text(encoding="utf-8"))
+        value["story"] = "A failed Sub2Api create followed by a scoped provider retry."
+        for shot in value["shots"]:
+            shot["generate_image"] = False
+            shot["image_prompt"] = ""
+            shot["video_prompt"] = "A short, clearly readable action."
+        (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
+
+        FakeProviderHandler.json_video_create_status = 400
+        first = self.run_cli(
+            "generate-videos", str(project), "--shot", "shot-001", "--poll-timeout", "5", expected=1,
+        )
+        self.assertFalse(first["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1, first)
+
+        FakeProviderHandler.json_video_create_status = 0
+        blocked = self.run_cli(
+            "resume", str(project), "--shot", "shot-001", "--shot", "shot-002",
+            "--retry-failed", "--retry-reason", "confirmed upstream rejection", "--retry-provider", "newapi",
+            "--poll-timeout", "5", expected=1,
+        )
+        self.assertIn("failed create", blocked["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+
     def test_shot_asset_review_locks_images_and_requires_reason_for_rejected_video_retry(self) -> None:
         project = self.create_project("asset-review")
         self.run_cli("generate-images", str(project))

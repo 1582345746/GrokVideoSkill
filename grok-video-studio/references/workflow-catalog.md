@@ -19,6 +19,7 @@ Product route is separate from workflow. The four routes are text-to-video, imag
 | `product-ad` | 产品广告 | Product image or keyframe |
 | `scene-animation` | 插画与风景动效 | One scene image |
 | `short-drama` | 人物短剧与多镜头叙事 | Script plus character master |
+| `comparison-short` | 以前 VS 现在对比短视频 | Paired before/after beats plus era locks |
 | `news-video` | 热点新闻视频 | Current web sources plus verified claim mappings |
 
 For character workflows, create one master sheet image containing the same character's front, side, and back or full-body views. Use that sheet only to derive per-shot keyframes. Send the current shot keyframe, not the multi-view sheet, to image-to-video.
@@ -28,6 +29,14 @@ For character workflows, create one master sheet image containing the same chara
 `news-video` is initialized with `news-init`, not plain `init`. Codex must browse current sources and complete `news.json`; generation is blocked until `news-validate` passes. See `news-schema.md`.
 
 The selected `video_mode` and `video_provider` are part of the project contract. Do not infer the mode from whether an image happens to exist in state.
+
+`comparison-short` is a strict six-shot starting preset for fast comparison clips. Its
+`comparison_contract` requires at least three adjacent pairs, one `before` and one
+`after` shot per pair, a shared question, a hook, a payoff, and an era lock containing
+the era, wardrobe, props, location, and lighting for each side. Keep
+`audio.subtitle_source=none`; use `label_delivery=post_overlay` for deterministic
+"以前/现在" labels after visual review. This contract is a preflight gate and does
+not replace human review of generated pixels or dialogue.
 
 ## Layout and shot selection
 

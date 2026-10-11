@@ -371,6 +371,11 @@ def director_gate(project: dict[str, Any]) -> dict[str, list[str]]:
     # dead air in fast dialogue stories.
     if len(set(value for value in roles if value)) < 2:
         errors.append("strict director mode requires at least two shot roles")
+    if project.get("workflow") == "comparison-short":
+        # Pair membership and before/after order are validated by the
+        # comparison contract.  Standard director roles still describe the
+        # camera coverage and should not be forced to use synthetic names.
+        return {"errors": errors, "warnings": warnings}
     if config["mode"] in {"cinematic-short", "dialogue-scene", "comedy-scene"}:
         establishing_roles = {"establishing", "wide", "over_shoulder"} if config["mode"] == "dialogue-scene" else {"establishing", "wide"}
         if not any(value in establishing_roles for value in roles):

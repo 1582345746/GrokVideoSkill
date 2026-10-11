@@ -1,4 +1,4 @@
-# Project Contract (v2.8.1 dialogue-gap-and-audio-tail-guard)
+# Project Contract (v2.9.0 comparison-short-workflow)
 
 Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md), [scoped compiler](scoped-prompts.md), and [content reviews](content-reviews.md). Format version remains 1 for compatibility. Field-coverage scores do not evaluate semantic quality.
 
@@ -46,6 +46,34 @@ Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md
     "choice": "",
     "visible_consequence": "",
     "next_question": ""
+  },
+  "comparison_contract": {
+    "required": false,
+    "axis": "then_vs_now",
+    "shared_question": "",
+    "comparison_order": "before_then_after",
+    "hook": "",
+    "payoff": "",
+    "label_delivery": "post_overlay",
+    "max_pair_gap_seconds": 0.8,
+    "hook_deadline_seconds": 3.0,
+    "max_no_information_seconds": 3.0,
+    "pairs": [
+      {
+        "id": "pair-01",
+        "shared_question": "",
+        "before_claim": "",
+        "after_claim": "",
+        "visible_difference": "",
+        "bridge_in": "",
+        "bridge_out": "",
+        "payoff": "",
+        "era_lock": {
+          "before": {"era": "", "wardrobe": "", "props": "", "location": "", "lighting": ""},
+          "after": {"era": "", "wardrobe": "", "props": "", "location": "", "lighting": ""}
+        }
+      }
+    ]
   },
   "character_bible": "Concise stable identity, clothing, and props",
   "style_bible": "Concise stable visual language",
@@ -239,6 +267,18 @@ New project keyframes follow the video orientation: `16:9`/`4:3`/`3:2` use `1536
 For `prompt_compiler=scoped-v1`, optional shot-level `prompt_state={"scene":{},"assets":{}}` separates visible request state from the full world state in `scene_state` and `asset_state`. The compiler sends the projection instead of the full scene/asset locks to both still and motion requests; continuity audits still use the world state. `prompt_state` and any supplied `scene` or `assets` section must be objects; other section names are rejected. Missing or empty sections inject no locks, including `prompt_state={}`. Omit the field to retain existing full-lock behavior. `event.requires` and `event.effects` are unaffected, as are local dialogue and other shot descriptions. Use this projection for a wall-backed closeup that must not acquire off-camera trucks or freight crates; it does not remove entities named elsewhere in the prompt. See the [scoped compiler](scoped-prompts.md) for an example.
 
 For multi-shot narrative projects, `story_contract` describes the causal chain and `story_beats[].why_next` explains why the following shot must happen. Strict product projects can use `narrative_contract_v2` to require audience knowledge, character knowledge, the choice, visible consequence, and the next question; each shot then needs `main_event`, `motivation`, `result`, and `next_reason`. Preflight reports the `story` clarity score and causal coverage. `quality.tail_auto_trim` trims settled tails from non-final shots during assembly and records the applied window in `state.json.deliverables.final.boundary_qa`. For upstream `audio.mode=native-dialogue|narration`, assembly and edit-plan conservatively skip visual-only automatic shortening and record `tail_motion_skipped_audio_boundary_unverified`: stillness, a planned speech window, silence detection, or whole-clip audio approval cannot prove a safe word boundary. Explicit `edit_in`/`edit_out` windows are preserved; actual listening must establish safe cuts until hash-bound measured audio-boundary approval is supported.
+
+For `workflow=comparison-short`, the comparison contract is always required
+(writing `required=false` does not disable the built-in workflow gate). The
+preflight gate requires at least three pairs of adjacent shots, with each pair
+containing exactly one `comparison_side=before` and one `comparison_side=after` shot
+in the declared order. Every pair must answer the same `shared_question`, describe
+both claims and the visible difference, and provide separate `era_lock` values for
+era, wardrobe, props, location, and lighting. `hook` and `payoff` are required; each
+shot must also contain `comparison_pair_id`, `visible_difference`, and a concise
+`summary`. Keep `audio.subtitle_source=none` and `audio.allow_upstream_captions=false`;
+post-overlay labels are independent from dialogue subtitles. The comparison score is
+structural preflight evidence only and never approves generated media.
 
 `retry_policy.max_total_attempts` defaults to three total billable attempts (initial request plus two retries). `max_retries` must not imply more attempts than this total; configure four total attempts explicitly when three retries are required. Provider failover consumes one of the same attempts. `submission_unknown` is never recreated automatically.
 
