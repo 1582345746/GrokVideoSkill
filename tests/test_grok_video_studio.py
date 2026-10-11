@@ -974,6 +974,32 @@ class SkillIntegrationTests(unittest.TestCase):
                 "exit_action": "The hand continues toward the pump.",
                 "continuity_out": "The pump handle remains tilted and wet.",
             })
+        value["event_flow"] = {
+            "required": True,
+            "event_id": "pump-repair",
+            "initial_state": {"pump": "dry"},
+        }
+        value["shots"][0]["event"] = {
+            "event_id": "pump-repair",
+            "function": "discovery",
+            "beat_id": "beat-001",
+            "requires": {"pump": "dry"},
+            "effects": {"pump": "fountain"},
+            "trigger": "The pump stops and the loose valve is exposed.",
+            "viewer_learns": "The failed pump is the immediate problem.",
+            "bridge_to_next": "The attempted repair makes the leak worse.",
+        }
+        value["shots"][1]["event"] = {
+            "event_id": "pump-repair",
+            "function": "escalation",
+            "beat_id": "beat-002",
+            "cause_shot_id": "shot-001",
+            "requires": {"pump": "fountain"},
+            "effects": {"pump": "loose-screw-visible"},
+            "trigger": "The repair handle is turned.",
+            "viewer_learns": "The wrong repair worsens the leak.",
+            "bridge_to_next": "The villagers inspect the loose screw.",
+        }
         value["shots"][1]["entry_action"] = "The hand enters already reaching for the pump handle."
         value["shots"][1]["continuity_in"] = "The pump handle remains tilted and wet."
         (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
@@ -995,7 +1021,7 @@ class SkillIntegrationTests(unittest.TestCase):
         value["shots"].append(dict(value["shots"][0], id="shot-002", seconds=1))
         (project / "project.json").write_text(json.dumps(value), encoding="utf-8")
         result = self.run_cli("validate", str(project), expected=1)
-        self.assertTrue(any("story clarity score" in error for error in result["errors"]))
+        self.assertTrue(any("story schema coverage score" in error for error in result["errors"]))
 
     def test_workflow_route_contract_is_enforced_by_init_and_validate(self) -> None:
         failed = self.run_cli(
@@ -3335,6 +3361,33 @@ class SkillIntegrationTests(unittest.TestCase):
                 "asset_state": {"crate_count": 1},
             }
         )
+        value["event_flow"] = {
+            "required": True,
+            "event_id": "village-negotiation",
+            "initial_state": {"crate": "on-ground"},
+            "pace": {"max_silent_seconds": 1.0},
+        }
+        value["shots"][0]["event"] = {
+            "event_id": "village-negotiation",
+            "function": "goal",
+            "beat_id": "beat-001",
+            "requires": {"crate": "on-ground"},
+            "effects": {"crate": "in-buyer-hands"},
+            "trigger": "The buyer reaches for the crate.",
+            "viewer_learns": "The buyer starts the handoff.",
+            "bridge_to_next": "The villager reacts and pulls the crate back.",
+        }
+        value["shots"][1]["event"] = {
+            "event_id": "village-negotiation",
+            "function": "reaction",
+            "beat_id": "beat-002",
+            "cause_shot_id": "shot-001",
+            "requires": {"crate": "in-buyer-hands"},
+            "effects": {"crate": "pulled-back"},
+            "trigger": "The villager sees the handoff.",
+            "viewer_learns": "The villager blocks the handoff.",
+            "bridge_to_next": "The negotiation must continue.",
+        }
         (project / "project.json").write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
         report = self.run_cli("preflight", str(project))
         self.assertTrue(report["ok"])

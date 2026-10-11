@@ -59,7 +59,11 @@ class ProductQualityContractTests(unittest.TestCase):
             }],
         }
         self.assertEqual(validate_narrative_contract(project), [])
-        self.assertGreaterEqual(story_clarity_score(project)["score"], 70)
+        report = story_clarity_score(project)
+        self.assertGreaterEqual(report["schema_coverage_score"], 70)
+        self.assertEqual(report["score_kind"], "schema-coverage-only")
+        self.assertIn("not viewer comprehension", report["score_label"])
+        self.assertEqual(report["score"], report["schema_coverage_score"])
 
     def test_continuity_diff_exposes_unannounced_asset_change(self) -> None:
         diff = continuity_state_diff(

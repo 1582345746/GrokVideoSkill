@@ -27,6 +27,71 @@ FAST_DIALOGUE_PACE_DEFAULTS = {
     "max_task_silent_seconds": 1.2,
 }
 
+# Narrative workflows need an explicit state-changing event chain before any
+# paid request is allowed.  The exception list is intentionally small: a
+# single shot, silent film, or montage can be valid without causality, while a
+# project that presents itself as a narrative must opt into the reducer.
+EVENT_FLOW_REQUIRED_WORKFLOWS = frozenset(
+    {
+        "short-drama",
+        "dialogue-scene",
+        "cinematic-short",
+        "action-scene",
+        "fast-continuous-event-dialogue",
+    }
+)
+EVENT_FLOW_REQUIRED_DIRECTOR_MODES = frozenset(
+    {"dialogue-scene", "cinematic-short", "action-scene"}
+)
+EVENT_FLOW_EXEMPT_WORKFLOWS = frozenset(
+    {"single-shot", "silent", "silent-cinema", "montage"}
+)
+EVENT_FLOW_EXEMPT_DIRECTOR_MODES = frozenset(
+    {"single-shot", "silent", "silent-cinema", "montage"}
+)
+
+
+def event_flow_policy(project: dict[str, Any]) -> dict[str, Any]:
+    """Resolve whether this project must declare a causal event flow.
+
+    Workflow IDs are the primary signal, but manually authored projects may
+    only carry a director mode.  Explicit non-narrative modes remain exempt
+    unless a narrative workflow was selected alongside them.
+    """
+    workflow = str(project.get("workflow", "")).strip()
+    director = project.get("director") if isinstance(project.get("director"), dict) else {}
+    mode = str(director.get("mode", "")).strip()
+    required_by_workflow = workflow in EVENT_FLOW_REQUIRED_WORKFLOWS
+    # A declared workflow is authoritative.  Director-mode fallback is only
+    # for hand-authored projects that omit `workflow`; otherwise presets such
+    # as character-consistent-story would unexpectedly inherit a narrative
+    # event contract from their rendering mode.
+    required_by_mode = not workflow and mode in EVENT_FLOW_REQUIRED_DIRECTOR_MODES
+    explicit_exception = (
+        workflow in EVENT_FLOW_EXEMPT_WORKFLOWS or mode in EVENT_FLOW_EXEMPT_DIRECTOR_MODES
+    )
+    required = required_by_workflow or required_by_mode
+    # An explicitly narrative workflow cannot be downgraded by a copied or
+    # stale director mode.  Otherwise a selected silent/montage mode is a
+    # deliberate exception and remains compatible with legacy projects.
+    if explicit_exception and not required_by_workflow:
+        required = False
+    if required:
+        reason = "narrative workflow/director mode"
+    elif explicit_exception:
+        reason = "explicit non-narrative exception"
+    else:
+        reason = "non-narrative workflow"
+    return {
+        "required": required,
+        "workflow": workflow or "unspecified",
+        "director_mode": mode or "unspecified",
+        "required_by_workflow": required_by_workflow,
+        "required_by_director_mode": required_by_mode,
+        "explicit_exception": explicit_exception,
+        "reason": reason,
+    }
+
 
 def speech_units(text: str) -> int:
     """Count CJK syllables and Latin words, rather than whitespace in Mandarin."""
@@ -94,15 +159,26 @@ def _dialogue_timeline(gaps: list[dict[str, Any]], total: float, enabled: bool,
 
 def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
     raw = project.get("event_flow")
-    required = isinstance(raw, dict) and raw.get("required") is True
+    policy = event_flow_policy(project)
+    declared_required = isinstance(raw, dict) and raw.get("required") is True
+    required = bool(policy["required"])
     fast_dialogue = project.get("workflow") == "fast-continuous-event-dialogue"
     errors: list[str] = []
     report: dict[str, Any] = {
         "required": required, "status": "not-enabled", "evidence_kind": "declared-plan",
+        "declared_required": declared_required,
+        "policy": policy,
         "semantic_quality": "unverified", "errors": errors, "shots": [],
     }
-    if fast_dialogue and not required:
-        errors.append("fast-continuous-event-dialogue requires event_flow.required=true")
+    if required and not declared_required:
+        workflow_label = policy["workflow"]
+        mode_label = policy["director_mode"]
+        if workflow_label == "fast-continuous-event-dialogue":
+            errors.append("fast-continuous-event-dialogue requires event_flow.required=true")
+        elif policy["required_by_workflow"]:
+            errors.append(f"{workflow_label} requires event_flow.required=true")
+        else:
+            errors.append(f"director.mode={mode_label} requires event_flow.required=true")
         report["status"] = "blocked"
     if raw is None:
         return report
@@ -111,7 +187,13 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
         return report
     if not isinstance(raw.get("required", False), bool):
         errors.append("event_flow.required must be a boolean")
-    if not required:
+    if required and raw.get("required") is not True:
+        # The policy error above is the actionable message.  Do not continue
+        # validating an intentionally disabled contract and produce a noisy
+        # cascade of missing event fields.
+        report["status"] = "blocked"
+        return report
+    if not required and not declared_required:
         return report
     event_id = raw.get("event_id")
     if not isinstance(event_id, str) or not event_id.strip():
@@ -235,6 +317,7 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(lines, list):
             errors.append(f"{prefix}: dialogue must be an array")
             lines = []
+        has_narration = bool(str(shot.get("narration", "")).strip()) or str(shot.get("audio_intent", "")).strip().lower() == "narration"
         speakers = {str(line.get("speaker")) for line in lines if isinstance(line, dict)}
         if len(speakers) > pace["max_speakers_per_shot"]:
             errors.append(f"{prefix}: split speaking turns into separate editorial shots")
@@ -300,7 +383,7 @@ def event_flow_report(project: dict[str, Any]) -> dict[str, Any]:
         if lines:
             if edit_out - cursor > pace["max_dialogue_tail_seconds"]:
                 errors.append(f"{prefix}: dead tail after dialogue {edit_out - cursor:.2f}s")
-        else:
+        elif not has_narration:
             limit = pace["max_task_silent_seconds"] if fast_dialogue and task_reasons else pace["max_silent_seconds"]
             if duration > limit + 0.001:
                 errors.append(f"{prefix}: silent shot {duration:.2f}s exceeds {limit}s; carry motivated off-screen dialogue or shorten the insert")

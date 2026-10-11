@@ -825,6 +825,8 @@ def validate_continuity_config(project: dict[str, Any]) -> list[str]:
         errors.append("continuity.state_change_policy must be allow, warn, or block")
     if not isinstance(config["enabled"], bool) or not isinstance(config["strict"], bool):
         errors.append("continuity.enabled and continuity.strict must be booleans")
+    if config["handoff_policy"] not in {"keyframe", "reviewed-clip-exit"}:
+        errors.append("continuity.handoff_policy must be keyframe or reviewed-clip-exit")
     return errors
 
 
@@ -834,6 +836,7 @@ def continuity_config(project: dict[str, Any]) -> dict[str, Any]:
         "enabled": bool(value.get("enabled", quality_config(project)["continuity_enabled"])),
         "strict": bool(value.get("strict", True)),
         "state_change_policy": str(value.get("state_change_policy", "warn")).strip().lower() or "warn",
+        "handoff_policy": str(value.get("handoff_policy", "keyframe")).strip().lower() or "keyframe",
         "world_state": value.get("world_state", {}) if isinstance(value.get("world_state", {}), dict) else {},
     }
 
@@ -1076,6 +1079,36 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
         return errors
+    fast_dialogue = project.get("workflow") == "fast-continuous-event-dialogue"
+    if fast_dialogue:
+        continuity = continuity_config(project)
+        quality = quality_config(project)
+        if continuity["handoff_policy"] != "reviewed-clip-exit":
+            errors.append("fast-continuous-event-dialogue requires continuity.handoff_policy=reviewed-clip-exit")
+        if not continuity["enabled"]:
+            errors.append("fast-continuous-event-dialogue requires continuity.enabled=true")
+        if not quality["previous_keyframe_reference"]:
+            errors.append("fast-continuous-event-dialogue requires quality.previous_keyframe_reference=true")
+        for index, handoff_shot in enumerate(shots):
+            if not isinstance(handoff_shot, dict):
+                continue
+            source = str(handoff_shot.get("handoff_source", "")).strip()
+            if index == 0 and source:
+                errors.append("fast-continuous-event-dialogue first shot cannot declare a previous clip handoff")
+            elif index > 0 and source != "reviewed-clip-exit":
+                errors.append(
+                    f"shots[{index}].handoff_source must be reviewed-clip-exit; approve the previous clip before generation"
+                )
+            if index < len(shots) - 1:
+                exit_behavior = str(handoff_shot.get("exit_behavior", "")).strip()
+                if exit_behavior not in {"continue-action", "cut-on-action"}:
+                    errors.append(
+                        f"shots[{index}].exit_behavior must be continue-action or cut-on-action before the final shot"
+                    )
+                if str(handoff_shot.get("ending_pose", "")).strip():
+                    errors.append(f"shots[{index}].ending_pose is forbidden before the final shot")
+                if not str(handoff_shot.get("exit_action", "")).strip():
+                    errors.append(f"shots[{index}].exit_action is required to protect the continuing action")
     limits = project.get("limits") if isinstance(project.get("limits"), dict) else {}
     try:
         total_attempts = max_total_attempts(project)
@@ -1132,8 +1165,10 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     if project.get("character_master") is not None and not isinstance(project.get("character_master"), dict):
         errors.append("project.character_master must be an object")
     if master_enabled:
-        if str(master.get("mode", "single-sheet")) != "single-sheet":
-            errors.append("character_master.mode must be single-sheet")
+        if str(master.get("mode", "single-sheet")) not in {"single-sheet", "multi-sheet"}:
+            errors.append("character_master.mode must be single-sheet or multi-sheet")
+        if str(master.get("mode", "single-sheet")) == "multi-sheet" and len(project_characters(project)) < 2:
+            errors.append("character_master.mode=multi-sheet requires at least two project characters")
         master_path = str(master.get("path", "")).strip()
         if not master_path:
             errors.append("character_master.path is required when enabled")
@@ -1386,12 +1421,22 @@ def signature(value: dict[str, Any], references: list[Path]) -> str:
 
 def composed_character_prompt(project: dict[str, Any]) -> str:
     master = character_master_config(project)
+    multi_sheet = str(master.get("mode", "single-sheet")) == "multi-sheet"
     sections = []
     character = str(project.get("character_bible", "")).strip()
     style = str(project.get("style_bible", "")).strip()
     if character:
         sections.append("[CHARACTER IDENTITY]\n" + character)
-    sections.append("[SINGLE-SHEET CHARACTER MASTER]\n" + str(master.get("prompt", "")).strip())
+    if multi_sheet:
+        cast = _compact_character_identity(project)
+        if cast:
+            sections.append("[DISTINCT PROJECT CAST]\n" + cast)
+        character_count = max(2, len(project_characters(project)))
+        sections.append(f"Each cast member occupies a separate slot; show exactly {character_count} distinct characters.")
+        heading = "[MULTI-CHARACTER MASTER SHEET]"
+    else:
+        heading = "[SINGLE-SHEET CHARACTER MASTER]"
+    sections.append(heading + "\n" + str(master.get("prompt", "")).strip())
     if style:
         sections.append("[STYLE]\n" + style)
     return "\n\n".join(sections)
@@ -1770,12 +1815,22 @@ def prompt_variants(project: dict[str, Any], shot: dict[str, Any] | None = None,
         full = composed_character_prompt(project)
         identity = _compact_character_identity(project)
         master = character_master_config(project)
+        multi_sheet = str(master.get("mode", "single-sheet")) == "multi-sheet"
+        character_count = max(2, len(project_characters(project))) if multi_sheet else 1
+        sheet_guidance = (
+            f"Multi-character sheet with one distinct full-body character per slot, exactly {character_count} slots, neutral studio background; preserve every identity and wardrobe."
+            if multi_sheet
+            else "Clean single-sheet turnaround, one person only, consistent face, hair, clothing, body proportions, and signature props."
+        )
         compact = "\n\n".join(item for item in (
             "[CHARACTER IDENTITY]\n" + identity if identity else "",
             "[MASTER]\n" + str(master.get("prompt", "")).strip(),
-            "Clean single-sheet turnaround, one person only, consistent face, hair, clothing, body proportions, and signature props.",
+            sheet_guidance,
         ) if item)
-        minimal = "One clean single-sheet character master: " + (identity or str(master.get("prompt", "")).strip())
+        if multi_sheet:
+            minimal = f"One clean multi-character sheet with exactly {character_count} distinct full-body characters: " + (identity or str(master.get("prompt", "")).strip())
+        else:
+            minimal = "One clean single-sheet character master: " + (identity or str(master.get("prompt", "")).strip())
         return {"full": full, "compact": compact, "minimal": minimal}
     if shot is None:
         raise SkillError("shot is required for image and video prompts")
@@ -2193,9 +2248,26 @@ def shot_state(state: dict[str, Any], shot_id: str) -> dict[str, Any]:
     return value
 
 
-def previous_shot_keyframe(root: Path, project: dict[str, Any], state: dict[str, Any], shot_id: str) -> Path | None:
+def previous_shot_keyframe(
+    root: Path,
+    project: dict[str, Any],
+    state: dict[str, Any],
+    shot_id: str,
+    *,
+    require_reviewed_clip: bool = False,
+) -> Path | None:
     """Return the immediately preceding approved/generated keyframe when usable."""
-    if not quality_config(project)["previous_keyframe_reference"] or not continuity_config(project)["enabled"]:
+    handoff_required = require_reviewed_clip and any(
+        isinstance(shot, dict)
+        and str(shot.get("id", "")) == shot_id
+        and str(shot.get("handoff_source", "")) == "reviewed-clip-exit"
+        for shot in project.get("shots", [])
+    )
+    continuity_enabled = continuity_config(project)["enabled"]
+    previous_reference_enabled = quality_config(project)["previous_keyframe_reference"]
+    if handoff_required and (not continuity_enabled or not previous_reference_enabled):
+        raise SkillError(f"{shot_id}: reviewed-clip-exit cannot be produced while continuity/reference controls are disabled")
+    if not previous_reference_enabled or not continuity_enabled:
         return None
     shots = [item for item in project.get("shots", []) if isinstance(item, dict)]
     for index, shot in enumerate(shots):
@@ -2206,7 +2278,19 @@ def previous_shot_keyframe(root: Path, project: dict[str, Any], state: dict[str,
         if str(shot.get("handoff_source", "")) == "reviewed-clip-exit":
             video = previous_runtime.get("video", {})
             video_path = resolve_project_path(root, str(video.get("path", "")), must_exist=False) if video.get("path") else None
-            if not video_path or not video_path.is_file() or video.get("review_status") != "approved" or video.get("reviewed_sha256") != file_digest(video_path):
+            if (
+                not video_path
+                or not video_path.is_file()
+                or video.get("review_status") != "approved"
+                or video.get("reviewed_sha256") != file_digest(video_path)
+            ):
+                # Image generation often precedes the first clip review. Do
+                # not silently fall back to a stale opening keyframe for a
+                # contract that explicitly requests a reviewed clip exit;
+                # video generation passes require_reviewed_clip=True and
+                # raises a useful gate instead.
+                if not require_reviewed_clip:
+                    return None
                 raise SkillError(f"{shot_id}: reviewed-clip-exit needs an approved, unchanged previous video")
             if project.get("prompt_compiler") == "scoped-v1" and video.get("reviewed_edit_window") != list(edit_window(shots[index - 1])[:2]):
                 raise SkillError(f"{shot_id}: previous reviewed edit window changed; review the actual exit again")
@@ -2584,8 +2668,21 @@ def generate_videos(
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
         references = video_references(root, shot, runtime) if mode == "image-to-video" else []
+        # Fast event dialogue uses the actual approved exit of the preceding
+        # clip as a temporal reference. A static keyframe alone cannot carry
+        # motion direction, eyeline, contact, or prop handoff across a cut.
+        if mode == "image-to-video" and str(shot.get("handoff_source", "")) == "reviewed-clip-exit":
+            handoff = previous_shot_keyframe(root, project, state, shot_id, require_reviewed_clip=True)
+            if handoff and handoff not in references:
+                references.append(handoff)
         if mode == "image-to-video" and project.get("prompt_compiler") == "scoped-v1":
-            require_approved_video_references(root, state, references, shot_id)
+            require_approved_video_references(
+                root,
+                state,
+                references,
+                shot_id,
+                allow_reviewed_handoff=str(shot.get("handoff_source", "")) == "reviewed-clip-exit",
+            )
         prompt_variants_value = prompt_variants(project, shot, kind="video")
         prompt_version, prompt = select_prompt_variant(
             prompt_variants_value,
@@ -3835,6 +3932,7 @@ def init_project(
             "asset_state": {},
             "continuity_in": "",
             "continuity_out": "",
+            "handoff_source": "reviewed-clip-exit" if workflow_id == "fast-continuous-event-dialogue" and index > 1 else "",
             "state_change_reason": "",
             "lens": "",
             "camera": "",
@@ -3966,7 +4064,7 @@ def init_project(
             "scale_mode": "fill",
             "caption_detection": "warn",
             "tail_guard_seconds": 0.8,
-            "tail_motion_policy": "warn",
+            "tail_motion_policy": "block" if workflow_id == "fast-continuous-event-dialogue" else "warn",
             "tail_motion_threshold": 0.012,
             "tail_auto_trim": True,
             "duration_policy": "block",
@@ -3975,7 +4073,13 @@ def init_project(
             "continuity_enabled": True,
             "previous_keyframe_reference": True,
         },
-        "continuity": {"enabled": True, "strict": True, "state_change_policy": "warn", "world_state": {}},
+        "continuity": {
+            "enabled": True,
+            "strict": True,
+            "state_change_policy": "warn",
+            "handoff_policy": "reviewed-clip-exit" if workflow_id == "fast-continuous-event-dialogue" else "keyframe",
+            "world_state": {},
+        },
         "frame_layout": frame_layout_value,
         "allow_multi_panel": frame_layout_value != "single-full-frame",
         "layout_risk_policy": "block",
@@ -4025,8 +4129,16 @@ def init_project(
         project["prompt_compiler"] = "scoped-v1"
         project["prompt_style"] = {}
         project["event_flow"] = {"required": True, "event_id": "", "initial_state": {}, "pace": {}}
+        # Native dialogue must not be blindly trimmed. Static/generic tails
+        # remain a hard QA failure, while each next shot is handed the
+        # approved previous clip exit explicitly.
         project["quality"]["tail_auto_trim"] = False
-        project["quality"]["previous_keyframe_reference"] = False
+        project["quality"]["previous_keyframe_reference"] = True
+        project["quality"]["tail_motion_policy"] = "block"
+        project["event_flow"]["pace"] = {
+            "max_dialogue_lead_seconds": 0.25,
+            "max_dialogue_tail_seconds": 0.35,
+        }
         for shot in shots:
             shot["event"] = {}
     atomic_write_json(path, project)
@@ -4307,10 +4419,23 @@ def record_content_review(root: Path, receipt: Path) -> dict[str, Any]:
     return result
 
 
-def require_approved_video_references(root: Path, state: dict[str, Any], references: list[Path], shot_id: str) -> None:
-    if len(references) != 1:
-        raise SkillError(f"{shot_id}: scoped I2V requires one reviewed current-shot keyframe")
+def require_approved_video_references(
+    root: Path,
+    state: dict[str, Any],
+    references: list[Path],
+    shot_id: str,
+    *,
+    allow_reviewed_handoff: bool = False,
+) -> None:
+    expected = {1, 2} if allow_reviewed_handoff else {1}
+    if len(references) not in expected:
+        suffix = " plus one reviewed clip-exit frame" if allow_reviewed_handoff else ""
+        raise SkillError(f"{shot_id}: scoped I2V requires one reviewed current-shot keyframe{suffix}")
     for path in references:
+        if allow_reviewed_handoff and path.parent.name == "handoffs":
+            if not path.is_file():
+                raise SkillError(f"{shot_id}: reviewed clip-exit frame is missing: {path.name}")
+            continue
         actual = file_digest(path)
         approved = False
         for runtime in state.get("shots", {}).values():

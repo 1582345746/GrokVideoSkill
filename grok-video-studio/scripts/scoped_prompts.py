@@ -231,9 +231,22 @@ def compile_scoped_prompt(project: dict[str, Any], shot: dict[str, Any] | None =
         master_prompt = _text(master.get("prompt"))
         if not character_id and not master_prompt:
             raise SkillError("scoped character master requires character_id or an explicit standalone master prompt")
+        characters = _characters(project)
+        multi_sheet = str(master.get("mode", "single-sheet")) == "multi-sheet"
+        if multi_sheet:
+            if characters:
+                sections.append("Distinct fictional cast, keep each identity separate: " + " | ".join(
+                    _identity(cid, item) for cid, item in characters.items()
+                ))
+            character_count = max(2, len(characters))
+            sections.append(
+                f"Multi-character reference sheet: exactly {character_count} distinct non-overlapping slots, one full-body character per slot; preserve age, face, hair, body, wardrobe, and signature props. No one may replace another."
+            )
+        else:
+            sections.append("One character only on a plain neutral background, front/side/back views of that same identity.")
         if master_prompt:
             sections.append("Master composition: " + master_prompt)
-        sections.append("One character only on a plain neutral background, front/side/back views of that same identity. No crowd, location, story action, text, labels, captions, logo, or watermark.")
+        sections.append("Plain neutral background, no crowd, location, story action, text, labels, captions, logo, or watermark.")
     else:
         if not isinstance(shot, dict):
             raise SkillError("scoped image/video prompt requires a shot")
@@ -253,6 +266,12 @@ def compile_scoped_prompt(project: dict[str, Any], shot: dict[str, Any] | None =
             if not action:
                 raise SkillError("scoped video prompt requires a current action description")
             sections.append("Current action only: " + action)
+            if _text(shot.get("handoff_source")) == "reviewed-clip-exit":
+                sections.append(
+                    "Temporal handoff: the supplied reviewed-clip-exit reference is the exact previous shot exit. "
+                    "Continue its motion, eyeline, screen direction, body contact, and prop position immediately; "
+                    "do not reset into a new pose."
+                )
             if _text(shot.get("camera_motion")):
                 sections.append("Camera movement: " + _text(shot["camera_motion"]))
             if _text(shot.get("entry_action")):

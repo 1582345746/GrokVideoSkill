@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "grok-video-studio" / "scripts"))
 
-from event_flow import event_flow_report, speech_units  # noqa: E402
+from event_flow import event_flow_policy, event_flow_report, speech_units  # noqa: E402
 
 
 def event_project() -> dict:
@@ -52,6 +52,42 @@ def event_project() -> dict:
 
 
 class EventFlowRegressionTests(unittest.TestCase):
+    def test_narrative_workflows_require_an_enabled_event_flow(self) -> None:
+        for project in (
+            {"workflow": "short-drama"},
+            {"workflow": "dialogue-scene"},
+            {"workflow": "cinematic-short"},
+            {"workflow": "action-scene"},
+            {"workflow": "fast-continuous-event-dialogue"},
+            {"director": {"mode": "dialogue-scene"}},
+        ):
+            with self.subTest(project=project):
+                policy = event_flow_policy(project)
+                report = event_flow_report(project)
+                self.assertTrue(policy["required"])
+                self.assertTrue(report["required"])
+                self.assertEqual(report["status"], "blocked")
+                self.assertTrue(any("requires event_flow.required=true" in error for error in report["errors"]))
+
+    def test_explicit_non_narrative_modes_can_skip_event_flow(self) -> None:
+        for project in (
+            {"director": {"mode": "single-shot"}},
+            {"workflow": "silent-cinema", "director": {"mode": "silent-cinema"}},
+            {"director": {"mode": "montage"}},
+        ):
+            with self.subTest(project=project):
+                policy = event_flow_policy(project)
+                report = event_flow_report(project)
+                self.assertFalse(policy["required"])
+                self.assertFalse(report["required"])
+                self.assertEqual(report["status"], "not-enabled")
+                self.assertEqual(report["errors"], [])
+
+    def test_narrative_workflow_cannot_disable_event_flow(self) -> None:
+        report = event_flow_report({"workflow": "short-drama", "event_flow": {"required": False}})
+        self.assertEqual(report["status"], "blocked")
+        self.assertTrue(any("short-drama requires event_flow.required=true" in error for error in report["errors"]))
+
     def test_state_reducer_exposes_real_cause_and_does_not_claim_semantic_quality(self) -> None:
         report = event_flow_report(event_project())
         self.assertEqual(report["errors"], [])

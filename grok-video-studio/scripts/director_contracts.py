@@ -216,8 +216,14 @@ def story_clarity_score(project: dict[str, Any]) -> dict[str, Any]:
     )
     missing = [field for field in STORY_CONTRACT_FIELDS if not contract[field]]
     return {
+        # Keep `score` as a compatibility alias for existing clients, but make
+        # the meaning explicit in the primary field and labels.  This metric
+        # counts authored contract fields; it cannot establish that a viewer
+        # understood the rendered video.
+        "schema_coverage_score": score,
         "score": score,
         "score_kind": "schema-coverage-only",
+        "score_label": "schema coverage (not viewer comprehension)",
         "semantic_quality": "unverified-until-content-review",
         "threshold": 70.0,
         "required": contract["required"] or v2_contract["required"],
@@ -344,7 +350,10 @@ def director_gate(project: dict[str, Any]) -> dict[str, list[str]]:
     narrative_project = bool(story_contract(project)["required"]) or config["mode"] != "single-shot" or len(shots) >= 2
     if narrative_project and clarity["score"] < clarity["threshold"]:
         missing = ", ".join(clarity["missing_contract_fields"]) or "shot-level causal handoffs"
-        message = f"story clarity score {clarity['score']:.1f}/100 is below {clarity['threshold']:.0f}; fill {missing}"
+        message = (
+            f"story schema coverage score {clarity['schema_coverage_score']:.1f}/100 is below "
+            f"{clarity['threshold']:.0f}; fill {missing}"
+        )
         if clarity["required"]:
             errors.append(message)
         else:

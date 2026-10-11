@@ -8,7 +8,7 @@ For roughly one-minute episodes, 1.5–3 second edit shots are a useful referenc
 
 ## Contract
 
-`init --workflow fast-continuous-event-dialogue` sets `prompt_compiler=scoped-v1`, `event_flow.required=true`, and disables blind tail trimming/previous-opening-frame references. Fill the scaffold before preflight.
+`init --workflow fast-continuous-event-dialogue` sets `prompt_compiler=scoped-v1`, `event_flow.required=true`, and declares `continuity.handoff_policy=reviewed-clip-exit`. Every shot after the first is initialized with `handoff_source=reviewed-clip-exit`; video generation blocks until the preceding clip is content-approved, hash unchanged, and its actual exit frame is exported. Fill the scaffold before preflight.
 
 ```json
 {
@@ -50,6 +50,6 @@ Speech times are source-clip times and must fit the retained edit window. Chines
 
 This workflow requires `event_flow.required=true`; disabling it blocks preflight. `event_flow.dialogue_timeline` joins every retained no-dialogue interval across cuts, so a 0.5-second tail followed by a 0.4-second lead cannot hide as two independently short pauses. Ordinary gaps default to at most `max_timeline_silent_seconds=0.8`. A whole silent insert may have a longer budget, `max_task_silent_seconds=1.2`, only with declared listener/object/action coverage of the active beat, an event state effect, or a nonempty `entry_action`/`exit_action`. Adjacent silent inserts and their neighboring lead/tail pads share this budget; unmotivated padding within that span must still fit the ordinary 0.8-second budget. Existing per-line lead, tail and internal-gap limits still apply; a task in a speaking shot cannot excuse its padded dialogue tail. The report lists final-timeline start/end, affected shot IDs, source-clip ranges, and declared task reasons. These are editable planning limits, not reference measurements or proof of audible dialogue: listen to actual clips and verify the edited master before approving content. Legacy workflows retain their existing single-shot silence rules.
 
-Use independent character masters and a stable scene map. Keyframes describe only the opening still. Reverse shots use the spatial map and identity references. Action matches can use `handoff_source=reviewed-clip-exit`, which exports the approved previous video exit and rejects changed edit windows. Ordinary previous keyframes are appearance aids, not end-state evidence.
+Use independent character masters and a stable scene map. Keyframes describe only the opening still. Reverse shots use the spatial map and identity references. Fast event dialogue uses `handoff_source=reviewed-clip-exit` for every non-first shot; it exports the approved previous video exit, adds it to the motion request, and rejects changed edit windows. Ordinary previous keyframes are appearance aids, not end-state evidence. A missing or unapproved exit never falls back to a static opening frame.
 
 Inspect keyframes before paid video requests. Generate a small meaningful exchange first when provider behavior is uncertain. Native time windows are requests, not guarantees; do not cut words to meet a planned duration. Technical QA and actual content findings stay separate. Answer final understanding questions from the rendered master. Repair affected shots/edits with audited retries; do not scale a failed pilot to a season.
