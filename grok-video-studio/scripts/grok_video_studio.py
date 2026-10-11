@@ -165,7 +165,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.9.0"
+SKILL_VERSION = "2.10.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -504,6 +504,20 @@ def video_mode(project: dict[str, Any]) -> str:
     return "text-to-video" if project.get("workflow") == "text-to-video" else "image-to-video"
 
 
+def shot_video_mode(project: dict[str, Any], shot: dict[str, Any]) -> str:
+    if "video_mode" not in shot:
+        return video_mode(project)
+    return str(shot.get("video_mode", "")).strip()
+
+
+def shots_for_video_mode(project: dict[str, Any], mode: str) -> list[dict[str, Any]]:
+    return [
+        shot
+        for shot in project.get("shots", [])
+        if isinstance(shot, dict) and shot_video_mode(project, shot) == mode
+    ]
+
+
 def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
     value = str(project.get("video_provider", "")).strip()
     if value:
@@ -561,15 +575,15 @@ def provider_capability_report(settings: dict[str, Any]) -> dict[str, dict[str, 
     return report
 
 
-def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any]) -> list[str]:
+def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any], *, mode: str | None = None) -> list[str]:
     preferred = video_provider(project, settings)
     policy = video_provider_policy(project)
-    mode = video_mode(project)
-    capability_name = "text_to_video" if mode == "text-to-video" else "image_to_video"
+    resolved_mode = mode or video_mode(project)
+    capability_name = "text_to_video" if resolved_mode == "text-to-video" else "image_to_video"
     if preferred not in PROVIDER_CAPABILITIES:
         raise SkillError("video_provider must be sub2api or newapi")
     if not getattr(PROVIDER_CAPABILITIES[preferred], capability_name):
-        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} does not support {mode}")
+        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} does not support {resolved_mode}")
 
     if policy == "fixed":
         credential_role = PROVIDER_CAPABILITIES[preferred].credential_role
@@ -601,6 +615,7 @@ def validate_retry_provider_override(
     video: dict[str, Any],
     *,
     retry_failed: bool,
+    mode: str | None = None,
 ) -> str:
     """Allow an explicit provider change only after a confirmed create rejection."""
     override = str(provider or "").strip().lower()
@@ -624,7 +639,7 @@ def validate_retry_provider_override(
         or failed_provider != str(video.get("provider", "")).strip().lower()
     ):
         raise SkillError("--retry-provider requires a recorded rejected create from another provider with no task ID")
-    candidates = video_provider_candidates(project, settings)
+    candidates = video_provider_candidates(project, settings, mode=mode)
     if override not in candidates:
         raise SkillError(f"retry provider {override} is not available under this project's provider policy or credentials")
     return override
@@ -647,7 +662,14 @@ def validate_retry_provider_override_batch(
         raise SkillError("--retry-provider requires at least one selected shot")
     for shot in shots:
         runtime = shot_state(state, str(shot["id"]))
-        validate_retry_provider_override(override, project, settings, runtime["video"], retry_failed=retry_failed)
+        validate_retry_provider_override(
+            override,
+            project,
+            settings,
+            runtime["video"],
+            retry_failed=retry_failed,
+            mode=shot_video_mode(project, shot),
+        )
     return override
 
 
@@ -704,7 +726,7 @@ def layout_risk_policy(project: dict[str, Any], shot: dict[str, Any] | None = No
 
 def has_vertical_multi_character_t2v_layout_risk(project: dict[str, Any], shot: dict[str, Any]) -> bool:
     return (
-        video_mode(project) == "text-to-video"
+        shot_video_mode(project, shot) == "text-to-video"
         and frame_layout(project, shot) == "single-full-frame"
         and video_aspect_ratio(project, shot) in {"9:16", "3:4", "2:3"}
         and len(shot.get("character_ids", [])) >= 2
@@ -1040,6 +1062,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     if mode not in {"text-to-video", "image-to-video"}:
         errors.append("project.video_mode must be text-to-video or image-to-video")
     workflow_id = str(project.get("workflow", "general-video")).strip() or "general-video"
+    routes = ["text-to-video", "image-to-video"]
     try:
         workflow = get_workflow(workflow_id)
         routes = [str(item) for item in workflow.get("routes", ["text-to-video", "image-to-video"])]
@@ -1092,13 +1115,17 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         for index, handoff_shot in enumerate(shots):
             if not isinstance(handoff_shot, dict):
                 continue
+            handoff_mode = shot_video_mode(project, handoff_shot)
             source = str(handoff_shot.get("handoff_source", "")).strip()
             if index == 0 and source:
                 errors.append("fast-continuous-event-dialogue first shot cannot declare a previous clip handoff")
-            elif index > 0 and source != "reviewed-clip-exit":
-                errors.append(
-                    f"shots[{index}].handoff_source must be reviewed-clip-exit; approve the previous clip before generation"
-                )
+            elif index > 0:
+                if handoff_mode != "image-to-video":
+                    errors.append(f"shots[{index}].video_mode must be image-to-video after the opening shot to preserve reviewed clip handoff")
+                if source != "reviewed-clip-exit":
+                    errors.append(
+                        f"shots[{index}].handoff_source must be reviewed-clip-exit; approve the previous clip before generation"
+                    )
             if index < len(shots) - 1:
                 exit_behavior = str(handoff_shot.get("exit_behavior", "")).strip()
                 if exit_behavior not in {"continue-action", "cut-on-action"}:
@@ -1226,6 +1253,13 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         elif shot_id in seen:
             errors.append(f"duplicate shot id: {shot_id}")
         seen.add(shot_id)
+        shot_mode = shot_video_mode(project, raw_shot)
+        if shot_mode not in {"text-to-video", "image-to-video"}:
+            errors.append(f"{prefix}.video_mode must be text-to-video or image-to-video")
+        elif shot_mode not in routes:
+            errors.append(
+                f"{prefix}.video_mode {shot_mode} is not supported by workflow {workflow_id}; allowed routes: {', '.join(routes)}"
+            )
         shot_role = str(raw_shot.get("shot_role", "")).strip().lower()
         if shot_role and shot_role not in SHOT_ROLES:
             errors.append(f"{prefix}.shot_role must be one of {', '.join(sorted(SHOT_ROLES))}")
@@ -1359,7 +1393,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         # the temporal handoff and may reintroduce stale identity frames.
         if (
             fast_dialogue
-            and mode == "image-to-video"
+            and shot_mode == "image-to-video"
             and index > 1
             and not bool(raw_shot.get("generate_image", True))
             and isinstance(raw_shot.get("video_references", []), list)
@@ -1370,7 +1404,7 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
             )
         if (
             fast_dialogue
-            and mode == "image-to-video"
+            and shot_mode == "image-to-video"
             and index == 1
             and not bool(raw_shot.get("generate_image", True))
             and not raw_shot.get("video_references", [])
@@ -2003,6 +2037,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         if not isinstance(shot, dict):
             continue
         shot_id = str(shot.get("id", ""))
+        shot_mode = shot_video_mode(project, shot)
         if bool(shot.get("generate_image", True)):
             image_requests += 1
             image_size = str(shot_value(project, shot, "image_size", "1024x1024"))
@@ -2087,7 +2122,16 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
             pass
         if bool(shot.get("use_character_master", False)) and shot.get("video_references"):
             warnings.append(f"{shot_id}: explicit video_references bypass the generated keyframe; do not send a multi-view master sheet directly to video")
-        if root is not None and video_mode(project) == "image-to-video":
+        if root is not None and shot_mode == "text-to-video":
+            reference_plan.append(
+                {
+                    "shot": shot_id,
+                    "route": "text-to-video",
+                    "generate_image": bool(shot.get("generate_image", True)),
+                    "video_references_sent": 0,
+                }
+            )
+        elif root is not None and shot_mode == "image-to-video":
             handoff_only = reviewed_clip_exit_only(project, shot)
             reference_values = shot.get("video_references", []) if isinstance(shot.get("video_references", []), list) else []
             if handoff_only:
@@ -2146,7 +2190,8 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
                 f"{item['kind']} prompt {item['id']} uses {prompt_size} UTF-8 bytes; selected {item['selected_version']} prompt and keep it at or below {SAFE_PROMPT_BYTES} for provider headroom"
             )
     shots = [shot for shot in project.get("shots", []) if isinstance(shot, dict)]
-    if video_mode(project) == "text-to-video" and len(shots) > 1 and (str(project.get("character_bible", "")).strip() or project_characters(project)):
+    t2v_shots = shots_for_video_mode(project, "text-to-video")
+    if len(t2v_shots) > 1 and (str(project.get("character_bible", "")).strip() or project_characters(project)):
         warnings.append(
             "multi-shot text-to-video identity continuity is prompt-only; use image-to-video with a character master and per-shot keyframes when strict identity is required"
         )
@@ -2648,7 +2693,7 @@ def reviewed_clip_exit_only(project: dict[str, Any], shot: dict[str, Any]) -> bo
     """Whether this fast-dialogue shot must use only the prior reviewed exit."""
     return (
         project.get("workflow") == "fast-continuous-event-dialogue"
-        and video_mode(project) == "image-to-video"
+        and shot_video_mode(project, shot) == "image-to-video"
         and str(shot.get("handoff_source", "")).strip() == "reviewed-clip-exit"
         and not bool(shot.get("generate_image", True))
     )
@@ -2733,8 +2778,9 @@ def generate_videos(
     project = require_valid_project(root)
     state = load_state(root)
     _, _, settings = clients()
-    mode = video_mode(project)
-    candidates = video_provider_candidates(project, settings)
+    project_mode = video_mode(project)
+    if project_mode not in {"text-to-video", "image-to-video"}:
+        raise SkillError("video_mode must be text-to-video or image-to-video")
     shots = selected_shots(project, shot_ids)
     if retry_provider and not shot_ids:
         raise SkillError("--retry-provider requires at least one explicit --shot")
@@ -2747,13 +2793,15 @@ def generate_videos(
         retry_failed=retry_failed,
     )
     generate_audio = bool(audio_config(project)["generate_audio"])
-    if mode not in {"text-to-video", "image-to-video"}:
-        raise SkillError("video_mode must be text-to-video or image-to-video")
     completed: list[str] = []
     skipped: list[str] = []
     final_providers: dict[str, str] = {}
     for shot in shots:
         shot_id = str(shot["id"])
+        mode = shot_video_mode(project, shot)
+        if mode not in {"text-to-video", "image-to-video"}:
+            raise SkillError(f"{shot_id}.video_mode must be text-to-video or image-to-video")
+        candidates = video_provider_candidates(project, settings, mode=mode)
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
         references: list[Path] = []
@@ -5714,11 +5762,11 @@ def main() -> int:
                 sync_episode_contract(root, series, episode)
                 project = require_valid_project(project_root)
                 series_state = load_series_state(root, series)
-                if video_mode(project) == "image-to-video":
+                i2v_shots = shots_for_video_mode(project, "image-to-video")
+                if i2v_shots:
                     used_characters = {
                         str(character_id)
-                        for shot in project.get("shots", [])
-                        if isinstance(shot, dict)
+                        for shot in i2v_shots
                         for character_id in shot.get("character_ids", [])
                     }
                     by_id = {str(item.get("id", "")): item for item in series.get("characters", []) if isinstance(item, dict)}

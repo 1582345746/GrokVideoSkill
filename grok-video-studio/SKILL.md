@@ -5,7 +5,7 @@ description: Plan and build resumable standalone, episodic, or sourced-news AI v
 
 # Grok Video Studio
 
-Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, continuity handoff, and resumable editing. The installed CLI reports version `2.9.0` (`comparison-short-workflow`).
+Create the creative plan with Codex. Use the bundled scripts for credentials, paid API calls, durable state, visual evidence and profiling, voice auditions and approval, downloads, validation, dialogue, assembly, technical QA, continuity handoff, and resumable editing. The installed CLI reports version `2.10.0` (`comparison-short-workflow`).
 
 For fast, continuous-event dialogue or a reference-driven short series, read [references/fast-event-dialogue.md](references/fast-event-dialogue.md) before planning. Choose `fast-continuous-event-dialogue` for this requested rhythm. It defaults to `prompt_compiler=scoped-v1` and required `event_flow`; `short-drama`, `dialogue-scene`, `cinematic-short`, and `action-scene` now also require `event_flow.required=true` before paid generation. Explicit `single-shot`, `silent-cinema`, and `montage` modes are exempt. The reported `schema_coverage_score` is authored-field coverage, never proof of understandable plot. Separate event beats, camera coverage, generated clips and retained edit windows. Dialogue may continue over listener/prop coverage; do not add silent shots to satisfy a quota.
 

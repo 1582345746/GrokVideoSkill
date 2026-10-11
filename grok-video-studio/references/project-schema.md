@@ -1,4 +1,4 @@
-# Project Contract (v2.9.0 comparison-short-workflow)
+# Project Contract (v2.10.0 comparison-short-workflow)
 
 Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md), [scoped compiler](scoped-prompts.md), and [content reviews](content-reviews.md). Format version remains 1 for compatibility. Field-coverage scores do not evaluate semantic quality.
 
@@ -176,6 +176,7 @@ Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md
   },
   "shots": [{
     "id": "shot-001",
+    "video_mode": "image-to-video",
     "summary": "What happens",
     "shot_role": "medium",
     "scene_id": "office",
@@ -246,7 +247,7 @@ Every character selected by `shot.character_ids` also contributes its `character
 
 Every clip is 1-15 seconds. Final composed image, video, and character-master prompts cannot exceed 4096 UTF-8 bytes; 3800 is the recommended working ceiling. Preflight exposes full/compact/minimal versions and remaining byte space. Limits are hard preflight gates and request counts include a generated character master.
 
-`video_mode` must be `text-to-video` or `image-to-video`; `video_provider` must be `sub2api` or `newapi`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to Sub2Api plus `automatic`. Supplying `--video-provider sub2api|newapi` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic Sub2Api safely fails and the NewApi video key is configured, the runtime records a separate provider attempt and can continue with NewApi. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+`video_mode` must be `text-to-video` or `image-to-video`. An optional `shots[].video_mode` overrides the project value for that shot; when omitted, it inherits `project.video_mode`. A T2V shot does not require a generated keyframe and sends no image references with its video request. An I2V shot follows the normal keyframe/reference rules, including any required reviewed-clip-exit handoff. `video_provider` must be `sub2api` or `newapi`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to Sub2Api plus `automatic`. Supplying `--video-provider sub2api|newapi` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic Sub2Api safely fails and the NewApi video key is configured, the runtime records a separate provider attempt and can continue with NewApi. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
 
 A user preference for Sub2Api first with NewApi only when unavailable must use both `--video-provider sub2api --video-provider-policy automatic`. A saved default affects new projects; a known task stays on its original provider during resume, and completed media is not regenerated to change providers. Runtime `references[{path,sha256}]` records the selected source stills before adapter processing, along with `prompt_sha256` and the request `signature`; each new provider attempt preserves these values. These source hashes do not prove the hash or fidelity of Sub2Api's temporary cropped JPEG payload. Legacy attempts have no retroactively inferred evidence.
 

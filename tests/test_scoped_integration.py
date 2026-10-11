@@ -80,6 +80,37 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
         self.assertIn("fixture-paid-create-boundary", str(error))
         self.provider.create.assert_called_once()
 
+    def test_t2v_shot_ignores_stale_keyframe_and_binds_mode_to_signature(self) -> None:
+        self.project["shots"][0].update(video_mode="text-to-video", generate_image=False)
+
+        def inspect_submission(prompt: str, **values: object) -> None:
+            self.assertEqual(values["references"], [])
+            video = gvs.shot_state(self.state, "shot-001")["video"]
+            self.assertEqual(video["mode"], "text-to-video")
+            self.assertEqual(video["reference_count"], 0)
+            expected_signature = gvs.signature(
+                {
+                    "mode": "text-to-video",
+                    "provider": "newapi",
+                    "model": "fixture",
+                    "prompt": prompt,
+                    "seconds": 5,
+                    "size": "1280x720",
+                    "resolution": "480p",
+                    "aspect_ratio": "16:9",
+                    "generate_audio": video["generate_audio"],
+                },
+                [],
+            )
+            self.assertEqual(video["signature"], expected_signature)
+            self.assertEqual(video["provider_attempts"][-1]["signature"], expected_signature)
+            raise RuntimeError("fixture-paid-create-boundary")
+
+        self.provider.create.side_effect = inspect_submission
+        error = self.run_with_fake_provider()
+        self.assertIn("fixture-paid-create-boundary", str(error))
+        self.provider.create.assert_called_once()
+
     def test_selected_outbound_reference_and_prompt_are_bound_to_submitted_attempt(self) -> None:
         selected = self.image.with_name("reviewed-crop.png")
         selected.write_bytes(b"fixture approved current-shot crop")

@@ -103,6 +103,34 @@ class FastHandoffContractTests(unittest.TestCase):
             self.assertTrue(handoff_only)
             self.assertEqual(references, [handoff])
 
+    def test_shot_mode_override_allows_t2v_opening_with_reviewed_i2v_followup(self) -> None:
+        project = self._project()
+        project["video_mode"] = "image-to-video"
+        project["shots"][0].update(video_mode="text-to-video", generate_image=False)
+        project["shots"][1].update(generate_image=False, video_references=[])
+
+        self.assertEqual(gvs.shot_video_mode(project, project["shots"][0]), "text-to-video")
+        self.assertEqual(gvs.shot_video_mode(project, project["shots"][1]), "image-to-video")
+        self.assertEqual(gvs.shots_for_video_mode(project, "text-to-video"), [project["shots"][0]])
+        self.assertEqual(gvs.shots_for_video_mode(project, "image-to-video"), [project["shots"][1]])
+        self.assertFalse(gvs.reviewed_clip_exit_only(project, project["shots"][0]))
+        self.assertTrue(gvs.reviewed_clip_exit_only(project, project["shots"][1]))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            errors = validate_project(Path(temp_dir), project)
+        self.assertFalse(any("opening keyframe" in error for error in errors))
+
+    def test_fast_workflow_rejects_t2v_after_the_opening_shot(self) -> None:
+        project = self._project()
+        project["shots"][1]["video_mode"] = "text-to-video"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            errors = validate_project(Path(temp_dir), project)
+        self.assertTrue(any("must be image-to-video after the opening shot" in error for error in errors))
+
+    def test_provider_candidates_check_the_effective_shot_mode(self) -> None:
+        project = self._project()
+        settings = {"newapi_video_key": "configured"}
+        self.assertEqual(gvs.video_provider_candidates(project, settings, mode="text-to-video"), ["newapi"])
+
     def test_generate_image_false_rejects_explicit_reference_in_fast_i2v(self) -> None:
         project = self._project()
         project["video_mode"] = "image-to-video"
