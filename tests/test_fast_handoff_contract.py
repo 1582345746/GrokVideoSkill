@@ -4,11 +4,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "grok-video-studio" / "scripts"))
 
+import grok_video_studio as gvs  # noqa: E402
 from grok_video_studio import SkillError, previous_shot_keyframe, prompt_variants, validate_project  # noqa: E402
 from scoped_prompts import compile_scoped_prompt  # noqa: E402
 
@@ -81,6 +83,43 @@ class FastHandoffContractTests(unittest.TestCase):
                 previous_shot_keyframe(
                     Path(temp_dir), project, {"shots": {}}, "shot-002", require_reviewed_clip=True
                 )
+
+    def test_generate_image_false_resolves_only_the_reviewed_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            handoff = root / "assets" / "handoffs" / "shot-001-exit-000.png"
+            handoff.parent.mkdir(parents=True)
+            handoff.write_bytes(b"reviewed exit")
+            stale = root / "assets" / "keyframes" / "shot-002.png"
+            stale.parent.mkdir(parents=True)
+            stale.write_bytes(b"stale current frame")
+            project = self._project()
+            project["video_mode"] = "image-to-video"
+            project["shots"][1]["generate_image"] = False
+            project["shots"][1]["video_references"] = []
+            state = {"shots": {"shot-002": {"image": {"status": "completed", "path": str(stale.relative_to(root))}}}}
+            with mock.patch.object(gvs, "previous_shot_keyframe", return_value=handoff):
+                references, handoff_only = gvs.resolved_video_references(root, project, state, project["shots"][1])
+            self.assertTrue(handoff_only)
+            self.assertEqual(references, [handoff])
+
+    def test_generate_image_false_rejects_explicit_reference_in_fast_i2v(self) -> None:
+        project = self._project()
+        project["video_mode"] = "image-to-video"
+        project["shots"][1]["generate_image"] = False
+        project["shots"][1]["video_references"] = ["assets/references/old.png"]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            errors = validate_project(Path(temp_dir), project)
+        self.assertTrue(any("video_references must be empty when generate_image=false" in error for error in errors))
+
+    def test_handoff_only_scoped_gate_rejects_non_exit_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            current = root / "assets" / "keyframes" / "shot-002.png"
+            current.parent.mkdir(parents=True)
+            current.write_bytes(b"current")
+            with self.assertRaisesRegex(SkillError, "handoff-only I2V"):
+                gvs.require_approved_video_references(root, {"shots": {}}, [current], "shot-002", handoff_only=True)
 
     def test_multi_sheet_prompt_matches_cast_size_in_both_compilers(self) -> None:
         project = self._project()

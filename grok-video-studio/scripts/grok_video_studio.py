@@ -1353,6 +1353,31 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
         for ref_name in ("image_references", "video_references"):
             references = raw_shot.get(ref_name, [])
             errors.extend(_unsupported_reference_errors(root, references, f"{prefix}.{ref_name}", max_references))
+        # Fast event dialogue can intentionally skip a per-shot keyframe after
+        # the opening shot. In that route the approved previous clip exit is
+        # the sole I2V reference; explicit references would silently weaken
+        # the temporal handoff and may reintroduce stale identity frames.
+        if (
+            fast_dialogue
+            and mode == "image-to-video"
+            and index > 1
+            and not bool(raw_shot.get("generate_image", True))
+            and isinstance(raw_shot.get("video_references", []), list)
+            and raw_shot.get("video_references", [])
+        ):
+            errors.append(
+                f"{prefix}.video_references must be empty when generate_image=false; the reviewed previous clip exit is the only I2V reference"
+            )
+        if (
+            fast_dialogue
+            and mode == "image-to-video"
+            and index == 1
+            and not bool(raw_shot.get("generate_image", True))
+            and not raw_shot.get("video_references", [])
+        ):
+            errors.append(
+                f"{prefix} must provide an opening keyframe (generate_image=true) or an explicit video_references entry"
+            )
         if bool(raw_shot.get("generate_image", True)) and isinstance(shot_character_ids, list):
             by_character_id = {
                 str(character.get("id", "")): character for character in raw_characters if isinstance(character, dict)
@@ -1951,6 +1976,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
     prompt_limit = project_prompt_limit(project)
     prompts: list[dict[str, Any]] = []
     references_report: list[dict[str, Any]] = []
+    reference_plan: list[dict[str, Any]] = []
     warnings: list[str] = []
     resolved_visual_profile = resolve_visual_profile(project)
     if resolved_visual_profile["review_required"]:
@@ -2062,12 +2088,39 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         if bool(shot.get("use_character_master", False)) and shot.get("video_references"):
             warnings.append(f"{shot_id}: explicit video_references bypass the generated keyframe; do not send a multi-view master sheet directly to video")
         if root is not None and video_mode(project) == "image-to-video":
+            handoff_only = reviewed_clip_exit_only(project, shot)
             reference_values = shot.get("video_references", []) if isinstance(shot.get("video_references", []), list) else []
-            if not reference_values and isinstance(state_for_references, dict):
+            if handoff_only:
+                reference_plan.append(
+                    {
+                        "shot": shot_id,
+                        "route": "reviewed-clip-exit-only",
+                        "generate_image": False,
+                        "handoff_source": "reviewed-clip-exit",
+                    }
+                )
+                # The actual exit is exported only after the previous clip is
+                # content-approved, so preflight records the route without
+                # pretending an unreviewed frame is ready.
+                if reference_values:
+                    warnings.append(
+                        f"{shot_id}: generate_image=false uses only the reviewed previous clip exit; explicit video_references are ignored by the route and blocked by validation"
+                    )
+                reference_values = []
+            elif not reference_values and isinstance(state_for_references, dict):
                 runtime = (state_for_references.get("shots") or {}).get(shot_id, {})
                 image_runtime = runtime.get("image") if isinstance(runtime, dict) else {}
                 if isinstance(image_runtime, dict) and image_runtime.get("status") == "completed" and image_runtime.get("path"):
                     reference_values = [str(image_runtime["path"])]
+            if not handoff_only:
+                reference_plan.append(
+                    {
+                        "shot": shot_id,
+                        "route": "explicit" if shot.get("video_references") else "current-shot-keyframe",
+                        "generate_image": bool(shot.get("generate_image", True)),
+                        "handoff_source": str(shot.get("handoff_source", "")).strip(),
+                    }
+                )
             for reference_value in reference_values:
                 try:
                     reference_path = resolve_project_path(root, str(reference_value))
@@ -2131,6 +2184,7 @@ def preflight_report(project: dict[str, Any], root: Path | None = None) -> dict[
         "generation_video_seconds": total_seconds,
         "timeline_video_seconds": round(timeline_seconds, 3),
         "edit_plan": edit_plan,
+        "reference_plan": reference_plan,
         "layout_risks": layout_risks,
         "max_clip_seconds": MAX_VIDEO_SECONDS,
         "prompt_hard_limit_bytes": prompt_limit,
@@ -2590,6 +2644,41 @@ def video_references(root: Path, shot: dict[str, Any], runtime: dict[str, Any]) 
     return []
 
 
+def reviewed_clip_exit_only(project: dict[str, Any], shot: dict[str, Any]) -> bool:
+    """Whether this fast-dialogue shot must use only the prior reviewed exit."""
+    return (
+        project.get("workflow") == "fast-continuous-event-dialogue"
+        and video_mode(project) == "image-to-video"
+        and str(shot.get("handoff_source", "")).strip() == "reviewed-clip-exit"
+        and not bool(shot.get("generate_image", True))
+    )
+
+
+def resolved_video_references(
+    root: Path,
+    project: dict[str, Any],
+    state: dict[str, Any],
+    shot: dict[str, Any],
+) -> tuple[list[Path], bool]:
+    """Resolve I2V references and whether the route is handoff-only.
+
+    A handoff-only shot intentionally discards a stale current-shot image
+    runtime and all implicit appearance references. The previous clip exit is
+    then resolved and validated as the one temporal reference.
+    """
+    handoff_only = reviewed_clip_exit_only(project, shot)
+    references = [] if handoff_only else video_references(root, shot, shot_state(state, str(shot["id"])))
+    if str(shot.get("handoff_source", "")).strip() == "reviewed-clip-exit":
+        handoff = previous_shot_keyframe(root, project, state, str(shot["id"]), require_reviewed_clip=True)
+        if not handoff:
+            raise SkillError(f"{shot['id']}: reviewed-clip-exit reference could not be resolved")
+        if handoff_only:
+            references = [handoff]
+        elif handoff not in references:
+            references.append(handoff)
+    return references, handoff_only
+
+
 def sanitized_provider_error(error: Exception, settings: dict[str, Any]) -> str:
     return redact(
         str(error)[:1000],
@@ -2667,14 +2756,14 @@ def generate_videos(
         shot_id = str(shot["id"])
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
-        references = video_references(root, shot, runtime) if mode == "image-to-video" else []
-        # Fast event dialogue uses the actual approved exit of the preceding
-        # clip as a temporal reference. A static keyframe alone cannot carry
-        # motion direction, eyeline, contact, or prop handoff across a cut.
-        if mode == "image-to-video" and str(shot.get("handoff_source", "")) == "reviewed-clip-exit":
-            handoff = previous_shot_keyframe(root, project, state, shot_id, require_reviewed_clip=True)
-            if handoff and handoff not in references:
-                references.append(handoff)
+        references: list[Path] = []
+        handoff_only = False
+        if mode == "image-to-video":
+            # Fast event dialogue uses the actual approved exit of the
+            # preceding clip as a temporal reference. When no current-shot
+            # keyframe is requested, this resolver deliberately ignores stale
+            # image runtime data and returns exactly that one exit frame.
+            references, handoff_only = resolved_video_references(root, project, state, shot)
         if mode == "image-to-video" and project.get("prompt_compiler") == "scoped-v1":
             require_approved_video_references(
                 root,
@@ -2682,6 +2771,7 @@ def generate_videos(
                 references,
                 shot_id,
                 allow_reviewed_handoff=str(shot.get("handoff_source", "")) == "reviewed-clip-exit",
+                handoff_only=handoff_only,
             )
         prompt_variants_value = prompt_variants(project, shot, kind="video")
         prompt_version, prompt = select_prompt_variant(
@@ -4426,12 +4516,17 @@ def require_approved_video_references(
     shot_id: str,
     *,
     allow_reviewed_handoff: bool = False,
+    handoff_only: bool = False,
 ) -> None:
-    expected = {1, 2} if allow_reviewed_handoff else {1}
+    expected = {1} if handoff_only else ({1, 2} if allow_reviewed_handoff else {1})
     if len(references) not in expected:
+        if handoff_only:
+            raise SkillError(f"{shot_id}: scoped I2V requires exactly one reviewed previous clip-exit frame")
         suffix = " plus one reviewed clip-exit frame" if allow_reviewed_handoff else ""
         raise SkillError(f"{shot_id}: scoped I2V requires one reviewed current-shot keyframe{suffix}")
     for path in references:
+        if handoff_only and path.parent.name != "handoffs":
+            raise SkillError(f"{shot_id}: handoff-only I2V may use only the reviewed previous clip-exit frame")
         if allow_reviewed_handoff and path.parent.name == "handoffs":
             if not path.is_file():
                 raise SkillError(f"{shot_id}: reviewed clip-exit frame is missing: {path.name}")
