@@ -165,7 +165,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.10.0"
+SKILL_VERSION = "2.11.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -2417,6 +2417,84 @@ def write_event(root: Path, event: dict[str, Any]) -> None:
     record = {"at": int(time.time()), **event}
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+@locked_project_state
+def resolve_unknown_submission(
+    root: Path,
+    shot_id: str,
+    *,
+    outcome: str,
+    evidence: str,
+    task_id: str = "",
+) -> dict[str, Any]:
+    """Record an operator-verified outcome for a create with no task ID."""
+    selected_outcome = str(outcome).strip().lower()
+    note = str(evidence).strip()
+    provider_task_id = str(task_id).strip()
+    if selected_outcome not in {"accepted", "rejected"}:
+        raise SkillError("submission outcome must be accepted or rejected")
+    if not note or len(note) > 1000:
+        raise SkillError("--evidence must contain 1 to 1000 characters")
+    if selected_outcome == "accepted" and not provider_task_id:
+        raise SkillError("--task-id is required when the provider confirmed acceptance")
+    if selected_outcome == "rejected" and provider_task_id:
+        raise SkillError("--task-id must be omitted when the provider confirmed rejection")
+    if len(provider_task_id) > 500 or any(character.isspace() for character in provider_task_id):
+        raise SkillError("--task-id must be a non-empty provider ID without whitespace")
+
+    project = load_project(root)
+    if not any(str(shot.get("id", "")) == shot_id for shot in project.get("shots", []) if isinstance(shot, dict)):
+        raise SkillError(f"unknown shot ID: {shot_id}")
+    state = load_state(root)
+    video = shot_state(state, shot_id)["video"]
+    if video.get("status") != "submission_unknown" or str(video.get("task_id", "")).strip():
+        raise SkillError(f"{shot_id} is not an unresolved submission_unknown create")
+
+    attempts = video.get("provider_attempts", [])
+    if not isinstance(attempts, list) or not attempts:
+        raise SkillError(f"{shot_id} has no provider attempt to resolve")
+    attempt_id = str(video.get("attempt_id", "")).strip()
+    attempt = next(
+        (item for item in reversed(attempts) if isinstance(item, dict) and str(item.get("attempt_id", "")) == attempt_id),
+        attempts[-1] if isinstance(attempts[-1], dict) else None,
+    )
+    if not isinstance(attempt, dict) or attempt.get("status") != "submission_unknown" or str(attempt.get("task_id", "")).strip():
+        raise SkillError(f"{shot_id} has no matching ambiguous provider attempt")
+
+    settings: dict[str, Any] = {}
+    try:
+        settings = load_settings(require_secrets=False)
+    except SkillError:
+        pass
+    note = redact(
+        note,
+        [str(settings.get(name, "")) for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")],
+    )
+    resolved_at = int(time.time())
+    resolution = {"outcome": selected_outcome, "evidence": note, "resolved_at": resolved_at}
+    if selected_outcome == "accepted":
+        video.update({"status": "queued", "task_id": provider_task_id, "error": "", "error_category": ""})
+        attempt.update({"status": "queued", "task_id": provider_task_id})
+    else:
+        message = "Provider confirmed that no task was created."
+        video.update({"status": "failed", "task_id": "", "error": message, "error_category": "provider_confirmed_rejection"})
+        attempt.update({"status": "failed", "task_id": "", "error": message, "error_category": "provider_confirmed_rejection"})
+    video["submission_resolution"] = resolution
+    attempt["submission_resolution"] = resolution
+    save_state(root, state)
+    write_event(
+        root,
+        {
+            "kind": "video_submission_resolved",
+            "shot_id": shot_id,
+            "attempt_id": attempt_id,
+            "provider": str(video.get("provider", "")),
+            **resolution,
+            "task_id": provider_task_id if selected_outcome == "accepted" else "",
+        },
+    )
+    return {"shot_id": shot_id, "provider": str(video.get("provider", "")), **resolution, "task_id": provider_task_id}
 
 
 def clients(*, require_secrets: bool = True) -> tuple[Sub2ApiImageClient, NewApiVideoClient, dict[str, Any]]:
@@ -5120,6 +5198,16 @@ def build_parser() -> argparse.ArgumentParser:
         command = commands.add_parser(name)
         command.add_argument("project", type=Path)
 
+    submission_resolve = commands.add_parser(
+        "submission-resolve",
+        help="Record a verified accepted/rejected outcome for one ambiguous provider create without making a paid request.",
+    )
+    submission_resolve.add_argument("project", type=Path)
+    submission_resolve.add_argument("--shot", required=True)
+    submission_resolve.add_argument("--outcome", choices=("accepted", "rejected"), required=True)
+    submission_resolve.add_argument("--task-id", default="", help="Provider task ID, required only when outcome is accepted.")
+    submission_resolve.add_argument("--evidence", required=True, help="Short dashboard/support confirmation; never include credentials.")
+
     review_shot = commands.add_parser("review-shot", help="Approve or reject one completed shot image/video asset.")
     review_shot.add_argument("project", type=Path)
     review_shot.add_argument("shot")
@@ -6253,6 +6341,17 @@ def main() -> int:
             print_json({"ok": True, "cover": result})
             return 0
         root = args.project.resolve()
+        if args.command == "submission-resolve":
+            resolution = resolve_unknown_submission(
+                root,
+                args.shot,
+                outcome=args.outcome,
+                task_id=args.task_id,
+                evidence=args.evidence,
+            )
+            next_step = "resume this shot" if args.outcome == "accepted" else "explicitly authorize a shot-scoped retry"
+            print_json({"ok": True, "resolution": resolution, "next_step": next_step})
+            return 0
         if args.command == "content-review-template":
             output = create_review_template(root, load_project(root), load_state(root))
             print_json({"ok": True, "path": str(output), "status": "unverified; fill only findings actually observed/heard"})

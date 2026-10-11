@@ -1549,6 +1549,81 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.video_creates, 0)
 
+    def test_unknown_submission_can_attach_provider_confirmed_task_and_resume(self) -> None:
+        project = self.create_project("resolve-accepted-unknown", generate_image=False)
+        FakeProviderHandler.fail_video_create = True
+        first = self.run_cli("generate-videos", str(project), "--shot", "shot-001", "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        FakeProviderHandler.fail_video_create = False
+
+        resolved = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "accepted",
+            "--task-id", "task-1", "--evidence", "Sub2Api support confirmed task task-1.",
+        )
+        self.assertTrue(resolved["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        state_path = project / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "queued")
+        self.assertEqual(video["task_id"], "task-1")
+        self.assertEqual(video["provider_attempts"][-1]["task_id"], "task-1")
+        self.assertEqual(video["submission_resolution"]["outcome"], "accepted")
+
+        resumed = self.run_cli("resume", str(project), "--shot", "shot-001", "--poll-timeout", "5")
+        self.assertTrue(resumed["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "completed")
+
+    def test_unknown_submission_rejection_requires_explicit_retry(self) -> None:
+        project = self.create_project("resolve-rejected-unknown", generate_image=False)
+        FakeProviderHandler.fail_video_create = True
+        first = self.run_cli("generate-videos", str(project), "--shot", "shot-001", "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        FakeProviderHandler.fail_video_create = False
+
+        rejected = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "rejected",
+            "--evidence", "Provider dashboard confirms no task exists for the trace.",
+        )
+        self.assertTrue(rejected["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "failed")
+        self.assertEqual(video["error_category"], "provider_confirmed_rejection")
+        self.assertEqual(video["provider_attempts"][-1]["status"], "failed")
+
+        missing_reason = self.run_cli("resume", str(project), "--shot", "shot-001", "--retry-failed", expected=1)
+        self.assertIn("--retry-reason", missing_reason["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        retried = self.run_cli(
+            "resume", str(project), "--shot", "shot-001", "--retry-failed", "--retry-reason",
+            "provider confirmed the ambiguous attempt was rejected",
+            "--retry-provider", "newapi", "--poll-timeout", "5",
+        )
+        self.assertTrue(retried["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.video_creates, 1)
+
+    def test_unknown_submission_resolution_rejects_invalid_or_stale_outcomes(self) -> None:
+        project = self.create_project("resolve-invalid-unknown", generate_image=False)
+        missing_task = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "accepted",
+            "--evidence", "The provider reported acceptance.", expected=1,
+        )
+        self.assertIn("--task-id is required", missing_task["error"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"], {})
+
+        stale = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "rejected",
+            "--evidence", "Provider dashboard confirms there is no task.", expected=1,
+        )
+        self.assertIn("unresolved submission_unknown", stale["error"])
+
     def test_newapi_success_without_task_id_does_not_create_twice(self) -> None:
         project = self.create_project("newapi-missing-task-id", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))

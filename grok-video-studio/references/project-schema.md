@@ -1,4 +1,4 @@
-# Project Contract (v2.10.0 comparison-short-workflow)
+# Project Contract (v2.11.0 unknown-submission-recovery)
 
 Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md), [scoped compiler](scoped-prompts.md), and [content reviews](content-reviews.md). Format version remains 1 for compatibility. Field-coverage scores do not evaluate semantic quality.
 
@@ -292,6 +292,8 @@ Video reference/edit/extend and audio reference are separate future capabilities
 New projects can inherit this pair from an installation profile with `init`, `series-init`, or `news-init --install-profile <profile>`. The profile is only a default; explicit project flags override it, and changing the installation profile never rewrites existing projects.
 
 Runtime states include `pending`, `submitting`, `queued`, `in_progress`, `completed`, `failed`, `submission_unknown`, and `poll_timeout`. A task ID is sufficient to resume polling without another create request. `request_id` stays stable across safe provider fallback, while every billable write has a distinct `attempt_id` under `provider_attempts`. Paths must be project-relative and stay inside the project.
+
+An operator may resolve only a `submission_unknown` video with no task ID by recording verified evidence. `submission-resolve` binds a provider-confirmed task ID and returns it to `queued`, or marks a provider-confirmed rejection as `failed`; it performs no API calls. The gateway trace ID and local request ID are not provider task IDs. A rejection still requires a shot-scoped `resume --retry-failed --retry-reason` before another billable create.
 
 `review-shot` records the reviewed file SHA-256, decision, notes, and timestamp. An approved image is marked `locked=true`; a rejected image or video is moved to `assets/rejected/` or `clips/rejected/` with its SHA-256 in the filename while task metadata moves to a failed review state. Regeneration then requires the normal explicit retry reason and writes a new canonical asset without overwriting the rejected media.
 
