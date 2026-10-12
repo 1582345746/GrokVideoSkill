@@ -606,6 +606,68 @@ class Sub2ApiVideoClient:
         raise SkillError(f"video content is unavailable: {content_error}")
 
 
+class NewApiJsonVideoClient(Sub2ApiVideoClient):
+    """NewApi-compatible unified JSON video adapter.
+
+    Some NewApi gateways expose the documented ``/v1/videos`` JSON contract
+    instead of the legacy multipart contract implemented above. Keep this
+    adapter separate so an upstream declaration selects its wire protocol
+    explicitly.
+    """
+
+    @staticmethod
+    def _data_url(path: Path) -> str:
+        payload = path.read_bytes()
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        return f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}"
+
+    def create(
+        self,
+        prompt: str,
+        *,
+        seconds: int,
+        size: str,
+        resolution: str = "480p",
+        aspect_ratio: str = "16:9",
+        generate_audio: bool = False,
+        references: Iterable[Path],
+    ) -> str:
+        _validate_prompt(prompt)
+        if seconds < 1 or seconds > MAX_VIDEO_SECONDS:
+            raise SkillError(f"video seconds must be from 1 to {MAX_VIDEO_SECONDS}")
+        if resolution not in VIDEO_RESOLUTIONS:
+            raise SkillError("video resolution must be one of 480p, 720p, 1080p")
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "prompt": prompt,
+            "seconds": seconds,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+            "generate_audio": bool(generate_audio),
+        }
+        references_by_type: dict[str, list[str]] = {"images": [], "videos": [], "audios": []}
+        for path in references:
+            suffix = path.suffix.lower()
+            field = "images" if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} else (
+                "videos" if suffix in {".mp4", ".mov", ".webm"} else "audios"
+            )
+            references_by_type[field].append(self._data_url(path))
+        for field, values in references_by_type.items():
+            if values:
+                payload[field] = values
+        response = request_json(
+            "POST",
+            api_url(self.base_url, "/v1/videos"),
+            key=self.key,
+            value=payload,
+            timeout=120,
+        )
+        created_task_id = task_id(response)
+        if not created_task_id:
+            raise SubmissionUnknownError("video provider returned a successful response without a task ID")
+        return created_task_id
+
+
 def save_image_bytes(data: bytes, target_stem: Path) -> Path:
     extension = image_extension(data)
     destination = target_stem.with_suffix(extension)

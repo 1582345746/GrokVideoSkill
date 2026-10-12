@@ -69,6 +69,7 @@ from director_contracts import (
 )
 from media_client import (
     Sub2ApiImageClient,
+    NewApiJsonVideoClient,
     NewApiVideoClient,
     Sub2ApiVideoClient,
     VIDEO_RESOLUTIONS,
@@ -2585,7 +2586,7 @@ def select_video_client(
     settings: dict[str, Any],
     provider: str,
     model: str | None = None,
-) -> Sub2ApiVideoClient | NewApiVideoClient:
+) -> Sub2ApiVideoClient | NewApiVideoClient | NewApiJsonVideoClient:
     registry = upstream_registry(settings)
     upstream = registry.get(provider)
     if not isinstance(upstream, dict):
@@ -2598,8 +2599,10 @@ def select_video_client(
     model_map = upstream.get("model_map") if isinstance(upstream.get("model_map"), dict) else {}
     remote_model = str(model_map.get(canonical_model, canonical_model)).strip()
     adapter = str(upstream.get("adapter", "")).strip().lower()
-    if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json", "newapi-json"}:
+    if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json"}:
         return Sub2ApiVideoClient(base_url, key, remote_model)
+    if adapter == "newapi-json":
+        return NewApiJsonVideoClient(base_url, key, remote_model)
     if adapter in {"newapi", "newapi-multipart", "openai-video-multipart"}:
         return NewApiVideoClient(base_url, key, remote_model)
     raise SkillError(f"video upstream {provider!r} uses unsupported adapter {adapter!r}")
