@@ -392,6 +392,28 @@ class ProviderContractTests(unittest.TestCase):
         self.assertEqual(classify_provider_error(known_lookup, phase="task", task_known=True), "task_lookup_transient")
         self.assertFalse(allows_automatic_failover(known_lookup, phase="task", task_known=True))
 
+    def test_provider_attempt_recovery_clears_stale_failure_metadata(self) -> None:
+        video = {
+            "provider_attempts": [{
+                "attempt_id": "attempt-1",
+                "status": "submission_unknown",
+                "error": "gateway timed out",
+                "error_category": "submission_unknown",
+                "finished_at": 100,
+            }],
+        }
+        gvs.update_provider_attempt(video, attempt_id="attempt-1", status="queued", task_id="task-1")
+        record = video["provider_attempts"][0]
+        self.assertNotIn("error", record)
+        self.assertNotIn("error_category", record)
+        self.assertNotIn("finished_at", record)
+
+        record.update({"error": "stale failure", "error_category": "task_timeout", "finished_at": 200})
+        gvs.update_provider_attempt(video, attempt_id="attempt-1", status="completed", finished_at=300)
+        self.assertNotIn("error", record)
+        self.assertNotIn("error_category", record)
+        self.assertEqual(record["finished_at"], 300)
+
     def test_input_error_categories_are_specific(self) -> None:
         self.assertEqual(classify_provider_error(APIError(400, "prompt too long"), phase="create", task_known=False), "prompt_too_long")
         self.assertEqual(classify_provider_error(APIError(400, "size and aspect ratio conflict"), phase="create", task_known=False), "size_conflict")
@@ -861,6 +883,9 @@ class SkillIntegrationTests(unittest.TestCase):
         doctor = self.run_cli("doctor")
         self.assertTrue(doctor["ok"])
         self.assertEqual(doctor["providers"]["newapi_video"]["matched_model"], "grok-imagine-video-1.5（按次）")
+        self.assertEqual(doctor["providers"]["sub2api_video"]["create_verification"], "unverified")
+        self.assertEqual(doctor["providers"]["newapi_video"]["create_verification"], "unverified")
+        self.assertTrue(any("模型目录命中不等于可创建" in item for item in doctor["diagnostics_zh"]))
 
         FakeProviderHandler.model_ids = ["gpt-image-2", "prefix-grok-imagine-video-1.5-other"]
         blocked = self.run_cli("doctor", expected=1)

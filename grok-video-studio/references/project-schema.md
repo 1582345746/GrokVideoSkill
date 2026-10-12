@@ -1,4 +1,4 @@
-# Project Contract (v2.12.0 multi-model-routing)
+# Project Contract (v2.12.1 multi-model-routing)
 
 Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md), [scoped compiler](scoped-prompts.md), and [content reviews](content-reviews.md). Format version remains 1 for compatibility. Field-coverage scores do not evaluate semantic quality.
 

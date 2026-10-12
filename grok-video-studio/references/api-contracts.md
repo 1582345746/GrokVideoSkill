@@ -45,6 +45,8 @@ The configured NewApi multipart adapter uses this contract when it is selected f
 
 `POST /v1/videos` as multipart with `model`, `prompt`, `seconds`, optional `size`, `resolution`, `aspect_ratio`, `generate_audio`, and zero or more repeated `input_reference` file parts. `generate_audio=true` is the v2 default for native dialogue. This Skill enforces 1-15 seconds and a final composed prompt of at most 4096 UTF-8 bytes. For image-to-video, send only the current shot keyframe.
 
+Named upstreams using the `newapi-json` adapter may set `capabilities.generate_audio_field=false` when their gateway rejects that optional field. The default remains to send `generate_audio` explicitly, preserving the documented JSON contract.
+
 The new-project canonical model default is seedance-2.0-mini-720p. Its built-in route prefers configured Sub2Api and may continue to configured NewApi for the same model only after an eligible failure. The selected model/upstream adapter controls the request contract; model catalog presence alone does not prove create, status, download, or parameter compatibility. Both video modes use the same resolved project/shot route; image presence never selects an upstream implicitly.
 
 ## Native audio and frame layout

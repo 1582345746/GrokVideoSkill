@@ -175,7 +175,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.12.0"
+SKILL_VERSION = "2.12.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -2602,7 +2602,14 @@ def select_video_client(
     if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json"}:
         return Sub2ApiVideoClient(base_url, key, remote_model)
     if adapter == "newapi-json":
-        return NewApiJsonVideoClient(base_url, key, remote_model)
+        capabilities = upstream.get("capabilities") if isinstance(upstream.get("capabilities"), dict) else {}
+        include_generate_audio_field = capabilities.get("generate_audio_field", True) is not False
+        return NewApiJsonVideoClient(
+            base_url,
+            key,
+            remote_model,
+            include_generate_audio_field=include_generate_audio_field,
+        )
     if adapter in {"newapi", "newapi-multipart", "openai-video-multipart"}:
         return NewApiVideoClient(base_url, key, remote_model)
     raise SkillError(f"video upstream {provider!r} uses unsupported adapter {adapter!r}")
@@ -2940,6 +2947,13 @@ def update_provider_attempt(video: dict[str, Any], *, attempt_id: str, **values:
     if record is None:
         record = {"attempt_id": attempt_id}
         attempts.append(record)
+    status = str(values.get("status", "")).strip().lower()
+    if status in {"queued", "completed"}:
+        # A resumed or completed attempt must not retain failure metadata from
+        # an earlier ambiguous create, timeout, or provider error. Keep a new
+        # finished_at supplied by the caller for the current completion.
+        for key in ("error", "error_category", "finished_at"):
+            record.pop(key, None)
     record.update(values)
     del attempts[:-20]
 
@@ -4590,7 +4604,14 @@ def doctor() -> tuple[int, dict[str, Any]]:
         required = upstream_id in required_upstreams
         result_name = {"sub2api": "sub2api_video", "newapi": "newapi_video"}.get(upstream_id, upstream_id)
         if not upstream.get("enabled", True):
-            report = {"ok": True, "configured_model": model, "skipped": True, "required": required, "reason": "disabled"}
+            report = {
+                "ok": True,
+                "configured_model": model,
+                "skipped": True,
+                "required": required,
+                "reason": "disabled",
+                "create_verification": "unverified",
+            }
             result["providers"][result_name] = report
             route_reports[upstream_id] = report
             continue
@@ -4601,6 +4622,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "skipped": True,
                 "required": required,
                 "reason": "key_not_configured",
+                "create_verification": "unverified",
             }
             result["providers"][result_name] = report
             route_reports[upstream_id] = report
@@ -4622,6 +4644,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "model_count": len(models),
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "circuit": client.health_snapshot(),
+                "create_verification": "unverified",
             }
             result["providers"][result_name] = report
             route_reports[upstream_id] = report
@@ -4632,6 +4655,7 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "required": required,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "error": sanitized_provider_error(error, settings),
+                "create_verification": "unverified",
             }
             result["providers"][result_name] = report
             route_reports[upstream_id] = report
@@ -4643,6 +4667,10 @@ def doctor() -> tuple[int, dict[str, Any]]:
     if not route_available:
         result["ok"] = False
         result["diagnostics_zh"].append(f"默认视频模型 {model} 没有任何已验证可用的路由上游。")
+    if route_reports:
+        result["diagnostics_zh"].append(
+            "视频上游的 create_verification 均为 unverified：模型目录命中不等于可创建；doctor 未执行付费创建、轮询或下载验证。"
+        )
     if not settings.get("sub2api_image_key"):
         result["diagnostics_zh"].append("Sub2Api 生图 Key 未配置：生图会在付费请求前停止。")
     if not any(str(item.get("key", "")).strip() for item in upstream_registry(settings).values()):

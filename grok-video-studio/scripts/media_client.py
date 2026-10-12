@@ -615,6 +615,10 @@ class NewApiJsonVideoClient(Sub2ApiVideoClient):
     explicitly.
     """
 
+    def __init__(self, base_url: str, key: str, model: str, *, include_generate_audio_field: bool = True) -> None:
+        super().__init__(base_url, key, model)
+        self.include_generate_audio_field = include_generate_audio_field
+
     @staticmethod
     def _data_url(path: Path) -> str:
         payload = path.read_bytes()
@@ -643,8 +647,9 @@ class NewApiJsonVideoClient(Sub2ApiVideoClient):
             "seconds": seconds,
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
-            "generate_audio": bool(generate_audio),
         }
+        if self.include_generate_audio_field:
+            payload["generate_audio"] = bool(generate_audio)
         references_by_type: dict[str, list[str]] = {"images": [], "videos": [], "audios": []}
         for path in references:
             suffix = path.suffix.lower()

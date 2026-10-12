@@ -22,7 +22,7 @@ from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 
 CONFIG_VERSION = 4
-USER_AGENT = "GrokVideoStudioSkill/2.12.0"
+USER_AGENT = "GrokVideoStudioSkill/2.12.1"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
 DEFAULT_VIDEO_MODEL = "seedance-2.0-mini-720p"
 MAX_JSON_BYTES = 48 * 1024 * 1024
