@@ -41,11 +41,11 @@ Text-to-video defaults to Sub2Api's JSON contract:
 
 `POST /v1/videos/generations` with `model`, `prompt`, `duration`, `resolution`, and `aspect_ratio`. Sub2Api has no explicit audio flag in this contract; `audio_generation=model_default` is reported as a capability, not a guarantee. Text-to-video sends no image fields. Image-to-video sends one first-frame data URL as `image.url`; multiple guidance images use `reference_images[].url`. Query uses `/v1/videos/{request_id}`. Completed responses normally expose the media URL in `video.url`; the adapter also accepts the gateway's `/v1/videos/{request_id}/content` download route when present.
 
-NewApi uses this multipart contract for either video mode when selected as an explicit provider or safe automatic fallback:
+The configured NewApi multipart adapter uses this contract when it is selected for the canonical model, either by a fixed route or an eligible same-model fallback:
 
 `POST /v1/videos` as multipart with `model`, `prompt`, `seconds`, optional `size`, `resolution`, `aspect_ratio`, `generate_audio`, and zero or more repeated `input_reference` file parts. `generate_audio=true` is the v2 default for native dialogue. This Skill enforces 1-15 seconds and a final composed prompt of at most 4096 UTF-8 bytes. For image-to-video, send only the current shot keyframe.
 
-Both adapters send `resolution` (`480p`, `720p`, or `1080p`) and `aspect_ratio`. Both video modes default to Sub2Api. NewApi is considered only when its key is configured and the Sub2Api failure is safe to fail over, or when the project explicitly fixes `video_provider=newapi`; providers are never selected implicitly from image presence.
+The new-project canonical model default is seedance-2.0-mini-720p. Its built-in route prefers configured Sub2Api and may continue to configured NewApi for the same model only after an eligible failure. The selected model/upstream adapter controls the request contract; model catalog presence alone does not prove create, status, download, or parameter compatibility. Both video modes use the same resolved project/shot route; image presence never selects an upstream implicitly.
 
 ## Native audio and frame layout
 
@@ -59,7 +59,7 @@ Automatic fallback is allowed only when a create was definitively rejected befor
 
 For `submission_unknown`, first check the provider dashboard or support using its HTTP trace ID. A trace ID and the skill's local `request_id` are diagnostic identifiers, not provider task IDs. After verified evidence is available, `submission-resolve` verifies a supplied provider task ID through its read-only status endpoint before binding it for normal resume, or records confirmed rejection. The command never creates media. A confirmed rejection still requires an explicit, shot-scoped retry authorization.
 
-The expected model is configured, with `grok-imagine-video-1.5` as the default. Do not silently rename it to a preview model. The adapter searches common `data`, `result`, `output`, `response`, `task`, and `video` wrappers; it accepts snake_case and camelCase task IDs, status, progress, errors, and result URLs.
+The default canonical model for new projects is seedance-2.0-mini-720p. Grok grok-imagine-video-1.5 remains available when explicitly selected, and old projects without video_model keep that legacy model for compatibility. Each upstream adapter still has its own verified request and response contract; do not infer XingAPI compatibility from its Sub2Api-shaped adapter wiring or model directory listing.
 
 ## Video status and content
 

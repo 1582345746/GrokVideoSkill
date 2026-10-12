@@ -1,4 +1,4 @@
-# Project Contract (v2.11.1 verified-unknown-submission-recovery)
+# Project Contract (v2.12.0 multi-model-routing)
 
 Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md), [scoped compiler](scoped-prompts.md), and [content reviews](content-reviews.md). Format version remains 1 for compatibility. Field-coverage scores do not evaluate semantic quality.
 
@@ -13,8 +13,11 @@ Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md
   "workflow_title": "角色一致性故事",
   "workflow_guidance": {},
   "video_mode": "image-to-video",
-  "video_provider": "sub2api",
-  "video_provider_policy": "automatic",
+  "video_model": "seedance-2.0-mini-720p",
+  "video_route": {
+    "preferred_upstream": "sub2api",
+    "policy": "automatic"
+  },
   "frame_layout": "single-full-frame",
   "allow_multi_panel": false,
   "layout_risk_policy": "block",
@@ -151,7 +154,7 @@ Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md
     "image_quality": "auto",
     "video_size": "1280x720",
     "video_seconds": 6,
-    "video_resolution": "480p",
+    "video_resolution": "720p",
     "video_aspect_ratio": "16:9",
     "audio_policy": "preserve"
   },
@@ -226,7 +229,7 @@ Fast dialogue projects also use the [event/pace contract](fast-event-dialogue.md
     "video_references": [],
     "image_size": "1536x1024",
     "video_size": "1280x720",
-    "video_resolution": "480p",
+    "video_resolution": "720p",
     "video_aspect_ratio": "16:9",
     "seconds": 6
   }]
@@ -247,9 +250,15 @@ Every character selected by `shot.character_ids` also contributes its `character
 
 Every clip is 1-15 seconds. Final composed image, video, and character-master prompts cannot exceed 4096 UTF-8 bytes; 3800 is the recommended working ceiling. Preflight exposes full/compact/minimal versions and remaining byte space. Limits are hard preflight gates and request counts include a generated character master.
 
-`video_mode` must be `text-to-video` or `image-to-video`. An optional `shots[].video_mode` overrides the project value for that shot; when omitted, it inherits `project.video_mode`. A T2V shot does not require a generated keyframe and sends no image references with its video request. An I2V shot follows the normal keyframe/reference rules, including any required reviewed-clip-exit handoff. `video_provider` must be `sub2api` or `newapi`; `video_provider_policy` must be `automatic` or `fixed`. New projects default to Sub2Api plus `automatic`. Supplying `--video-provider sub2api|newapi` is an explicit user selection and defaults the policy to `fixed`; `--video-provider-policy automatic` opts back into a fallback chain. When automatic Sub2Api safely fails and the NewApi video key is configured, the runtime records a separate provider attempt and can continue with NewApi. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+`video_mode` must be `text-to-video` or `image-to-video`. An optional `shots[].video_mode` overrides the project value for that shot; when omitted, it inherits `project.video_mode`. A T2V shot does not require a generated keyframe and sends no image references with its video request. An I2V shot follows the normal keyframe/reference rules, including any required reviewed-clip-exit handoff.
 
-A user preference for Sub2Api first with NewApi only when unavailable must use both `--video-provider sub2api --video-provider-policy automatic`. A saved default affects new projects; a known task stays on its original provider during resume, and completed media is not regenerated to change providers. Runtime `references[{path,sha256}]` records the selected source stills before adapter processing, along with `prompt_sha256` and the request `signature`; each new provider attempt preserves these values. These source hashes do not prove the hash or fidelity of Sub2Api's temporary cropped JPEG payload. Legacy attempts have no retroactively inferred evidence.
+`video_model` is the canonical model ID for the project; a shot may override it with `shots[].video_model`. New projects default to `seedance-2.0-mini-720p` and request `720p`, unless an explicit model or resolution selects another value. Inspect downloaded-frame QA to establish actual resolution. The default Seedance route prefers the `sub2api` video upstream and then allows `newapi` as a same-model fallback when policy and failure classification permit it. `video_route` supports `preferred_upstream` and `policy=automatic|fixed`; an explicit project `video_upstream` or shot `video_upstream` may select a configured named upstream, while shot-level `video_route` can set its preference and policy. The first upstream in a configured model route is preferred. Automatic routing never changes the selected model. Before a new billable create, the selected upstream must advertise the mapped model ID; a model-catalog match does not prove that every generation parameter or the full create/query/download protocol is supported.
+
+Legacy `video_provider=sub2api|newapi` and `video_provider_policy=automatic|fixed` remain readable for existing projects. They describe an upstream preference/policy, not the canonical model. A legacy project without `video_model` continues to resolve as `grok-imagine-video-1.5`; newly initialized projects explicitly store the configured default model. A known task resumes with its recorded model and original upstream attempt, regardless of later default changes. Completed media is not regenerated to change providers. Resolution is limited to `480p`, `720p`, and `1080p`; aspect ratio is limited to `16:9`, `9:16`, `1:1`, `4:3`, `3:4`, `2:3`, or `3:2`.
+
+The optional `xingapi-seedance` entry is an independent named video upstream, not an alias for Sub2Api. It does not replace the built-in Sub2Api-first, NewApi-second order; when registered, configuration appends it after those candidates. Its read-only model catalog advertises the exact remote ID `seedance-2.0-mini-720P`, which the dedicated mapping uses for canonical `seedance-2.0-mini-720p`. Its current adapter wiring follows the Sub2Api-shaped JSON client, but the XingAPI create/query/download behavior and generated-media contract have not been fully verified. Do not infer full protocol support from model discovery alone.
+
+Image generation remains independent: `image_base_url`, `image_model`, and the image credential role continue to drive image requests. Changing `video_model`, `video_route`, or video credentials must not alter image routing. Runtime `references[{path,sha256}]` records the selected source stills before adapter processing, along with `prompt_sha256` and the request `signature`; each provider attempt preserves these values. These source hashes do not prove the hash or fidelity of Sub2Api's temporary cropped JPEG payload. Legacy attempts have no retroactively inferred evidence.
 
 `visual_profile` is optional for backwards compatibility. `medium` describes rendering language; it does not mean that the subject is real. A realistic anime or CG person uses `subject_nature=human-like-fictional`; an AI-generated live-action-looking person uses `synthetic-human`; only supplied/captured actual-human evidence uses `real-person`. Automatic text/filename analysis is a review signal only. See [visual-profile-schema.md](visual-profile-schema.md).
 

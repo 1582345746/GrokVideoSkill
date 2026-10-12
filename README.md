@@ -2,7 +2,7 @@
 
 [![Grok Video Studio CI](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/1582345746/GrokVideoSkill/actions/workflows/ci.yml)
 
-面向 Codex 的可恢复 AI 视频制作技能。当前版本为 `v2.8.0 scoped-event-dialogue-content-review`，发布分支为 `main`。
+面向 Codex 的可恢复、多模型、多上游 AI 视频制作技能。当前版本为 `v2.12.0 model-routed-upstreams`，发布分支为 `main`。
 
 新增单事件快对白工作流、局部提示词编译、事件/节奏合同、实际参考图审核、内容回执闭环、参考视频本地分析和 Windows OCR 后备。详见 [2026-10-08 案例审查与开发清单](docs/20261008-reference-audit-and-development-plan.zh-CN.md)。结构分只代表字段覆盖；剧情、说话人和穿模必须依据实际画面与声音审核。
 
@@ -21,7 +21,7 @@ v2.5 在 v2.4 的基础上加入质量与连续性合同：记录请求/实际�
 
 用户现成图片的动画属于图生视频，不是第五条产品路线。
 
-本技能没有内置生产上游地址。用户必须分别提供生图 URL/Key、Sub2Api 视频 URL/Key 和 NewApi 视频 URL/Key；配置完成后，未指定视频提供方时默认优先用户配置的 Sub2Api，并使用 `automatic` 策略只对安全分类失败尝试用户配置的 NewApi。用户明确说“生视频选择 NewApi”时，必须固定直连 NewApi，不先调用 Sub2Api；明确选择 Sub2Api 时同理。默认总尝试次数为 3 次，备用也计入次数，提交结果不明时不自动重建。
+本技能没有内置生产上游地址。生图继续使用独立的图片 URL/Key 和 `gpt-image-2`；视频默认模型为 `seedance-2.0-mini-720p`，默认优先已配置的 Sub2Api，同一模型只在安全分类失败时按 `automatic` 策略尝试 NewApi。Grok `grok-imagine-video-1.5` 保留为显式可选模型。命名上游可通过配置注册，路由在付费创建前必须经过只读模型目录确认；未验证的模型/上游组合直接阻断。用户明确选择 NewApi 时固定直连 NewApi，不先调用 Sub2Api；明确选择 Sub2Api 时同理。默认总尝试次数为 3 次，备用也计入次数，提交结果不明时不自动重建。
 
 ### 画面布局规则
 

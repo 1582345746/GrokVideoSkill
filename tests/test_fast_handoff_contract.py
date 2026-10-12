@@ -128,7 +128,7 @@ class FastHandoffContractTests(unittest.TestCase):
 
     def test_provider_candidates_check_the_effective_shot_mode(self) -> None:
         project = self._project()
-        settings = {"newapi_video_key": "configured"}
+        settings = {"newapi_video_key": "configured", "newapi_video_base_url": "https://newapi.example"}
         self.assertEqual(gvs.video_provider_candidates(project, settings, mode="text-to-video"), ["newapi"])
 
     def test_generate_image_false_rejects_explicit_reference_in_fast_i2v(self) -> None:

@@ -5,7 +5,7 @@
 | `401` or `403` | Credential or account | Rotate the correct provider key and run `doctor`. |
 | Missing unused provider key | Configuration | Allowed. Configure a key when a workflow or explicit provider override needs that provider. |
 | Sub2Api image request uses the T2V key, or T2V uses the image key | Credential role | Configure `sub2api_image_key` and `sub2api_video_key` separately. Legacy `sub2api_key` intentionally supplies both roles only when role-specific values are absent. |
-| Mode/provider mismatch | Project contract | Set `video_mode` and `video_provider` explicitly and verify the matching key. |
+| Model, mode, or upstream mismatch | Project contract | Set `video_mode` and `video_model` explicitly; choose a configured `video_upstream`/`video_route` and verify that its adapter supports the model and requested mode. |
 | `unknown provider for model` | Upstream model routing | Confirm the exact model appears in that provider's `/v1/models`; do not retry create. |
 | `404` on `/v1/videos` | Base path or incompatible upstream | Store only the origin; verify the provider implements the OpenAI video endpoint. |
 | Intermittent `404 Video request not found` while polling a known task ID | Provider read path | Keep the known task ID, back off, and poll it again. The HTTP response `request_id` is a trace ID, not a replacement video task ID. Do not create or fail over to a second paid task. If repeated polling times out and the operator explicitly authorizes replacement, use `resume --shot <id> --replace-lost-task --retry-failed --retry-reason "..."`; the command checks both status and content endpoints before any replacement create. |

@@ -11,7 +11,7 @@ Product route is separate from workflow. The four routes are text-to-video, imag
 | ID | Title | Primary input |
 | --- | --- | --- |
 | `general-video` | 通用视频项目 | Goal, optional references |
-| `text-to-video` | 文生视频 | Text; defaults to Sub2Api JSON with no reference images |
+| `text-to-video` | 文生视频 | Text; defaults to Seedance via the configured model route and sends no reference images |
 | `single-image-animation` | 单图动画 | One image |
 | `character-consistent-story` | 角色一致性故事 | One single-sheet character master |
 | `dance-performance` | 人物跳舞与表演 | One person image |
@@ -28,7 +28,7 @@ For character workflows, create one master sheet image containing the same chara
 
 `news-video` is initialized with `news-init`, not plain `init`. Codex must browse current sources and complete `news.json`; generation is blocked until `news-validate` passes. See `news-schema.md`.
 
-The selected `video_mode` and `video_provider` are part of the project contract. Do not infer the mode from whether an image happens to exist in state.
+The selected `video_mode`, canonical `video_model`, and upstream route are part of the project contract. Do not infer the mode from whether an image happens to exist in state.
 
 `comparison-short` is a strict six-shot starting preset for fast comparison clips. Its
 `comparison_contract` requires at least three adjacent pairs, one `before` and one

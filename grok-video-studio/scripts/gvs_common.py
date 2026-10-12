@@ -5,6 +5,7 @@ import base64
 import ctypes
 import json
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -20,10 +21,10 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 
-CONFIG_VERSION = 3
-USER_AGENT = "GrokVideoStudioSkill/2.5.0"
+CONFIG_VERSION = 4
+USER_AGENT = "GrokVideoStudioSkill/2.12.0"
 DEFAULT_IMAGE_MODEL = "gpt-image-2"
-DEFAULT_VIDEO_MODEL = "grok-imagine-video-1.5"
+DEFAULT_VIDEO_MODEL = "seedance-2.0-mini-720p"
 MAX_JSON_BYTES = 48 * 1024 * 1024
 MAX_MULTIPART_BYTES = 128 * 1024 * 1024
 MAX_MEDIA_BYTES = 512 * 1024 * 1024
@@ -137,6 +138,10 @@ def normalize_base_url(value: str) -> str:
     parsed = urllib.parse.urlsplit(value.strip())
     if not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise SkillError("provider base URL is invalid")
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise SkillError("provider base URL has an invalid port") from error
     loopback = parsed.hostname in {"127.0.0.1", "localhost", "::1"}
     if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
         raise SkillError("provider base URL must use HTTPS; HTTP is allowed only for loopback tests")
@@ -259,6 +264,7 @@ def save_settings(
     sub2api_image_key: str | None = None,
     sub2api_video_key: str | None = None,
     newapi_video_key: str | None = None,
+    video_upstream_keys: dict[str, str] | None = None,
 ) -> None:
     image_base_url = str(config.get("image_base_url", config.get("sub2api_base_url", ""))).strip()
     sub2api_video_base_url = str(config.get("sub2api_video_base_url", config.get("sub2api_base_url", ""))).strip()
@@ -269,14 +275,57 @@ def save_settings(
         "sub2api_video_base_url": normalize_base_url(sub2api_video_base_url) if sub2api_video_base_url else "",
         "newapi_video_base_url": normalize_base_url(newapi_video_base_url) if newapi_video_base_url else "",
         "image_model": str(config["image_model"]).strip(),
-        "video_model": str(config["video_model"]).strip(),
+        "video_model": str(config.get("video_model", DEFAULT_VIDEO_MODEL)).strip() or DEFAULT_VIDEO_MODEL,
+        "default_video_model": str(config.get("default_video_model", DEFAULT_VIDEO_MODEL)).strip() or DEFAULT_VIDEO_MODEL,
         "default_video_provider": str(config.get("default_video_provider", "sub2api")).strip() or "sub2api",
+        "video_model_routes": {},
+        "video_upstreams": {},
         "secret_provider": "windows-dpapi" if store_secrets else "environment",
     }
+    upstream_keys = {str(name): str(value).strip() for name, value in (video_upstream_keys or {}).items() if str(value).strip()}
+    raw_upstreams = config.get("video_upstreams", {})
+    if isinstance(raw_upstreams, dict):
+        for upstream_id, raw_value in raw_upstreams.items():
+            if not isinstance(raw_value, dict):
+                continue
+            upstream_id = str(upstream_id).strip()
+            if not upstream_id:
+                continue
+            base_url = str(raw_value.get("base_url", "")).strip()
+            normalized["video_upstreams"][upstream_id] = {
+                "id": upstream_id,
+                "title": str(raw_value.get("title", upstream_id)).strip() or upstream_id,
+                "adapter": str(raw_value.get("adapter", "sub2api-json")).strip(),
+                "provider_kind": str(raw_value.get("provider_kind", raw_value.get("adapter", "sub2api"))).strip(),
+                "base_url": normalize_base_url(base_url) if base_url else "",
+                "enabled": bool(raw_value.get("enabled", True)),
+                "model_map": raw_value.get("model_map", {}) if isinstance(raw_value.get("model_map", {}), dict) else {},
+                "models": raw_value.get("models", []) if isinstance(raw_value.get("models", []), list) else [],
+                "capabilities": raw_value.get("capabilities", {}) if isinstance(raw_value.get("capabilities", {}), dict) else {},
+            }
     if not normalized["image_model"] or not normalized["video_model"]:
         raise SkillError("image and video models are required")
-    if normalized["default_video_provider"] not in {"sub2api", "newapi"}:
-        raise SkillError("default_video_provider must be sub2api or newapi")
+    raw_routes = config.get("video_model_routes", {})
+    if not isinstance(raw_routes, dict):
+        raise SkillError("video_model_routes must be an object")
+    for model_id, raw_route in raw_routes.items():
+        model_id = str(model_id).strip()
+        if not model_id or not isinstance(raw_route, dict):
+            raise SkillError("video_model_routes entries must map a model ID to an object")
+        upstreams = raw_route.get("upstreams", [])
+        if not isinstance(upstreams, list) or not upstreams:
+            raise SkillError(f"video_model_routes.{model_id}.upstreams must be a non-empty array")
+        upstreams = [str(item).strip() for item in upstreams]
+        if any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", item) for item in upstreams):
+            raise SkillError(f"video_model_routes.{model_id}.upstreams contains an invalid ID")
+        if len(set(upstreams)) != len(upstreams):
+            raise SkillError(f"video_model_routes.{model_id}.upstreams contains duplicates")
+        default_upstream = str(raw_route.get("default_upstream", upstreams[0])).strip()
+        if default_upstream not in upstreams:
+            raise SkillError(f"video_model_routes.{model_id}.default_upstream must be listed in upstreams")
+        normalized["video_model_routes"][model_id] = {**raw_route, "upstreams": upstreams, "default_upstream": default_upstream}
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", normalized["default_video_provider"]):
+        raise SkillError("default_video_provider must be a valid configured upstream ID")
     image_key = (sub2api_image_key if sub2api_image_key is not None else sub2api_key).strip()
     video_key = (sub2api_video_key if sub2api_video_key is not None else sub2api_key).strip()
     new_video_key = (newapi_video_key if newapi_video_key is not None else newapi_key).strip()
@@ -286,16 +335,42 @@ def save_settings(
         raise SkillError("sub2api_video_base_url is required when a Sub2Api video key is configured")
     if new_video_key and not normalized["newapi_video_base_url"]:
         raise SkillError("newapi_video_base_url is required when a NewApi video key is configured")
+    env_suffixes: set[str] = set()
+    for upstream_id, upstream in normalized["video_upstreams"].items():
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", upstream_id):
+            raise SkillError(f"video_upstreams.{upstream_id} must use ASCII letters, digits, underscore, or hyphen")
+        if upstream_id in {"sub2api", "newapi"}:
+            raise SkillError(f"video_upstreams.{upstream_id} is reserved; configure it through its standard fields")
+        env_suffix = upstream_id.upper().replace("-", "_")
+        if env_suffix in env_suffixes:
+            raise SkillError(f"video upstream IDs collide in environment variable names: {upstream_id}")
+        env_suffixes.add(env_suffix)
+        if upstream["adapter"] not in {
+            "sub2api-json", "sub2api", "xingapi-json", "openai-video-json",
+            "newapi-multipart", "newapi", "openai-video-multipart",
+        }:
+            raise SkillError(f"video_upstreams.{upstream_id}.adapter is unsupported")
+        if upstream_keys.get(upstream_id) and not upstream["base_url"]:
+            raise SkillError(f"video_upstreams.{upstream_id}.base_url is required when its API key is configured")
+    unregistered_key_ids = sorted(set(upstream_keys) - set(normalized["video_upstreams"]))
+    if unregistered_key_ids:
+        raise SkillError("video_upstream_keys contains IDs without configured upstreams: " + ", ".join(unregistered_key_ids))
+    configured_ids = {"sub2api", "newapi", *normalized["video_upstreams"]}
+    for model_id, route in normalized["video_model_routes"].items():
+        unknown = sorted(set(route["upstreams"]) - configured_ids)
+        if unknown:
+            raise SkillError(f"video_model_routes.{model_id} references unconfigured upstreams: " + ", ".join(unknown))
+    if store_secrets and not (image_key or video_key or new_video_key or any(upstream_keys.values())):
+        raise SkillError("at least one provider key is required")
     atomic_write_json(config_path(), normalized)
     if store_secrets:
-        if not image_key and not video_key and not new_video_key:
-            raise SkillError("at least one provider key is required")
         secret_payload = json.dumps(
             {
                 "version": 2,
                 "sub2api_image_key": image_key,
                 "sub2api_video_key": video_key,
                 "newapi_video_key": new_video_key,
+                "video_upstream_keys": upstream_keys,
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -309,7 +384,7 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     if not path.is_file():
         raise SkillError(f"configuration not found: {path}; run configure first")
     config = read_json(path)
-    if config.get("version") not in {1, 2, CONFIG_VERSION}:
+    if config.get("version") not in {1, 2, 3, CONFIG_VERSION}:
         raise SkillError("unsupported configuration version")
     legacy_config_fields = {
         "quickai_base_url",
@@ -348,7 +423,10 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
         "newapi_video_base_url": configured_url("newapi_video_base_url", "newapi_base_url", "quickainew_base_url"),
         "image_model": str(config.get("image_model", "")).strip(),
         "video_model": str(config.get("video_model", "")).strip(),
+        "default_video_model": str(config.get("default_video_model", DEFAULT_VIDEO_MODEL)).strip() or DEFAULT_VIDEO_MODEL,
         "default_video_provider": str(config.get("default_video_provider", "sub2api")).strip() or "sub2api",
+        "video_model_routes": config.get("video_model_routes", {}) if isinstance(config.get("video_model_routes", {}), dict) else {},
+        "video_upstreams": {},
         "secret_provider": str(config.get("secret_provider", "")),
     }
     for key, environment_name in (
@@ -394,6 +472,39 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
         or str(stored.get("newapi_video_key", "")).strip()
         or (str(stored.get("quickainew_video_key", "")).strip() if allow_legacy_secret_migration else "")
     )
+    dynamic_keys = stored.get("video_upstream_keys", {})
+    if not isinstance(dynamic_keys, dict):
+        dynamic_keys = {}
+    upstreams = config.get("video_upstreams", {})
+    if isinstance(upstreams, dict):
+        for upstream_id, raw_value in upstreams.items():
+            if not isinstance(raw_value, dict):
+                continue
+            upstream_id = str(upstream_id)
+            key = str(dynamic_keys.get(upstream_id, "")).strip()
+            env_suffix = str(upstream_id).upper().replace("-", "_")
+            key = os.environ.get(f"GVS_VIDEO_UPSTREAM_{env_suffix}_KEY", "").strip() or key
+            base_url = str(raw_value.get("base_url", "")).strip()
+            if base_url:
+                base_url = normalize_base_url(base_url)
+            result["video_upstreams"][upstream_id] = {
+                **raw_value,
+                "id": upstream_id,
+                "base_url": base_url,
+                "key": key,
+            }
+    if "sub2api" not in result["video_upstreams"] and (result["sub2api_video_key"] or result["sub2api_video_base_url"]):
+        result["video_upstreams"]["sub2api"] = {
+            "id": "sub2api", "title": "Sub2Api video", "adapter": "sub2api-json", "provider_kind": "sub2api",
+            "base_url": result["sub2api_video_base_url"], "key": result["sub2api_video_key"], "enabled": True,
+            "model_map": {}, "models": [], "capabilities": {},
+        }
+    if "newapi" not in result["video_upstreams"] and (result["newapi_video_key"] or result["newapi_video_base_url"]):
+        result["video_upstreams"]["newapi"] = {
+            "id": "newapi", "title": "NewApi video", "adapter": "newapi-multipart", "provider_kind": "newapi",
+            "base_url": result["newapi_video_base_url"], "key": result["newapi_video_key"], "enabled": True,
+            "model_map": {}, "models": [], "capabilities": {},
+        }
     sub2api_key = (
         os.environ.get("GVS_SUB2API_KEY", "").strip()
         or str(stored.get("sub2api_key", "")).strip()
@@ -418,9 +529,14 @@ def load_settings(*, require_secrets: bool = True) -> dict[str, Any]:
     for key_name, url_name, label in required_urls:
         if result[key_name] and not result[url_name]:
             raise SkillError(f"{label} is required when {key_name} is configured")
-    if require_secrets and not any(result[name] for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")):
+    for upstream_id, upstream in result["video_upstreams"].items():
+        if isinstance(upstream, dict) and upstream.get("key") and not upstream.get("base_url"):
+            raise SkillError(f"video_upstreams.{upstream_id}.base_url is required when its key is configured")
+    if require_secrets and not any(result[name] for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")) and not any(
+        upstream.get("key") for upstream in result["video_upstreams"].values() if isinstance(upstream, dict)
+    ):
         raise SkillError(
-            "provider keys are unavailable; run configure or set GVS_IMAGE_API_KEY, GVS_VIDEO_API_KEY, or GVS_NEWAPI_VIDEO_KEY"
+            "provider keys are unavailable; run configure or set a supported GVS_*_KEY environment variable for a configured upstream"
         )
     return result
 

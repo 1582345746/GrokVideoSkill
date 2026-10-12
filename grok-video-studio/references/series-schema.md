@@ -86,7 +86,7 @@ series-root/
     "video_provider": "sub2api",
     "video_provider_policy": "automatic",
     "video_size": "1280x720",
-    "video_resolution": "480p",
+    "video_resolution": "720p",
     "video_aspect_ratio": "9:16"
   },
   "limits": {

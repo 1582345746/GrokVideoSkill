@@ -50,6 +50,7 @@ from component_manager import (  # noqa: E402
     load_model_state,
 )
 import grok_video_studio as gvs  # noqa: E402
+import gvs_common  # noqa: E402
 import media_tools  # noqa: E402
 import voice_workflow  # noqa: E402
 from grok_video_studio import composed_video_prompt, prompt_bytes, prompt_variants, review_shot_asset  # noqa: E402
@@ -85,7 +86,157 @@ class ProviderContractTests(unittest.TestCase):
             for payload, expected in cases:
                 with self.subTest(fields=list(payload)):
                     with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload) + "\n")):
-                        self.assertEqual(gvs.read_credentials_payload(), expected)
+                        self.assertEqual(gvs.read_credentials_payload(), (*expected, {}))
+
+    def test_seedance_model_routing_is_model_scoped_and_sub2api_first(self) -> None:
+        model = gvs.DEFAULT_SEEDANCE_VIDEO_MODEL
+        settings = {
+            "video_upstreams": {
+                "sub2api": {"key": "s", "base_url": "https://sub.example", "adapter": "sub2api-json", "models": [model]},
+                "newapi": {"key": "n", "base_url": "https://new.example", "adapter": "newapi-multipart", "models": [model]},
+                "grok-only": {"key": "g", "base_url": "https://grok.example", "adapter": "sub2api-json", "models": [gvs.LEGACY_VIDEO_MODEL]},
+            },
+            "video_model_routes": gvs.DEFAULT_MODEL_ROUTES,
+        }
+        project = {
+            "video_model": model,
+            "video_provider": "sub2api",
+            "video_provider_policy": "automatic",
+            "video_route": {"preferred_upstream": "", "policy": "automatic"},
+        }
+        self.assertEqual(gvs.video_provider_candidates(project, settings), ["sub2api", "newapi"])
+        fixed = {**project, "video_provider": "newapi", "video_provider_policy": "fixed"}
+        self.assertEqual(gvs.video_provider_candidates(fixed, settings), ["newapi"])
+        shot = {"video_upstream": "newapi"}
+        self.assertEqual(gvs.video_provider_candidates(project, settings, shot=shot), ["newapi"])
+
+    def test_disabled_upstream_is_excluded_from_automatic_candidates(self) -> None:
+        model = gvs.DEFAULT_SEEDANCE_VIDEO_MODEL
+        settings = {
+            "video_upstreams": {
+                "sub2api": {"key": "s", "base_url": "https://sub.example", "provider_kind": "sub2api", "enabled": False},
+                "newapi": {"key": "n", "base_url": "https://new.example", "provider_kind": "newapi", "enabled": True},
+            },
+            "video_model_routes": gvs.DEFAULT_MODEL_ROUTES,
+        }
+        project = {"video_model": model, "video_provider": "sub2api", "video_provider_policy": "automatic"}
+        self.assertEqual(gvs.video_provider_candidates(project, settings), ["newapi"])
+
+    def test_retry_override_preserves_case_sensitive_named_upstream_id(self) -> None:
+        model = gvs.DEFAULT_SEEDANCE_VIDEO_MODEL
+        settings = {
+            "video_upstreams": {
+                "sub2api": {"key": "s", "base_url": "https://sub.example", "provider_kind": "sub2api"},
+                "Custom-API": {"key": "c", "base_url": "https://custom.example", "provider_kind": "custom"},
+            },
+            "video_model_routes": {
+                model: {"default_upstream": "sub2api", "upstreams": ["sub2api", "Custom-API"]},
+            },
+        }
+        project = {"video_model": model, "video_route": {"policy": "automatic"}}
+        video = {
+            "status": "failed",
+            "provider": "sub2api",
+            "provider_attempts": [{"provider": "sub2api", "status": "failed", "task_id": ""}],
+        }
+        self.assertEqual(
+            gvs.validate_retry_provider_override(
+                "Custom-API", project, settings, video, retry_failed=True,
+            ),
+            "Custom-API",
+        )
+
+    def test_active_task_keeps_its_recorded_model_after_project_default_changes(self) -> None:
+        self.assertEqual(
+            gvs.effective_video_model(
+                {"video_model": "seedance-new"},
+                runtime={"model": "grok-imagine-video-1.5", "task_id": "task-123", "status": "queued"},
+            ),
+            "grok-imagine-video-1.5",
+        )
+
+    def test_existing_config_keeps_explicit_video_model_during_default_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir, "config.json")
+            config_path.write_text(
+                json.dumps({"version": 1, "image_model": "gpt-image-2", "video_model": "grok-imagine-video-1.5"}),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"GVS_CONFIG_DIR": temp_dir}):
+                self.assertEqual(gvs.configured_default_video_model(), "seedance-2.0-mini-720p")
+                config_path.write_text(
+                    json.dumps({"version": 4, "image_model": "gpt-image-2", "default_video_model": "grok-imagine-video-1.5"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(gvs.configured_default_video_model(), "grok-imagine-video-1.5")
+
+    def test_dynamic_upstream_can_supply_the_only_persisted_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = gvs.build_parser().parse_args([
+                "configure", "--environment-only", "--skip-test",
+                "--video-upstream-config",
+                "xingapi-seedance|XingAPI|sub2api-json|xingapi|https://xingapi.example/v1|seedance-2.0-mini-720p",
+                "--video-model-route", "seedance-2.0-mini-720p=xingapi-seedance",
+            ])
+            environment = {
+                "GVS_CONFIG_DIR": temp_dir,
+                "GVS_VIDEO_UPSTREAM_XINGAPI_SEEDANCE_KEY": "environment-only-key",
+            }
+            with mock.patch.dict(os.environ, environment, clear=True):
+                result = gvs.configure(args)
+                settings = gvs_common.load_settings()
+            self.assertEqual(result["default_video_model"], "seedance-2.0-mini-720p")
+            self.assertEqual(settings["video_upstreams"]["xingapi-seedance"]["key"], "environment-only-key")
+            self.assertEqual(settings["sub2api_image_key"], "")
+
+    def test_xingapi_default_remote_model_id_matches_read_only_catalog_casing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = gvs.build_parser().parse_args([
+                "configure", "--environment-only", "--skip-test",
+                "--xingapi-video-base-url", "https://xingapi.example/v1",
+            ])
+            environment = {
+                "GVS_CONFIG_DIR": temp_dir,
+                "GVS_VIDEO_UPSTREAM_XINGAPI_SEEDANCE_KEY": "environment-only-key",
+            }
+            with mock.patch.dict(os.environ, environment, clear=True):
+                result = gvs.configure(args)
+                settings = gvs_common.load_settings()
+            upstream = settings["video_upstreams"]["xingapi-seedance"]
+            self.assertEqual(result["default_video_model"], "seedance-2.0-mini-720p")
+            self.assertEqual(upstream["model_map"]["seedance-2.0-mini-720p"], "seedance-2.0-mini-720P")
+
+    def test_dynamic_upstream_key_can_be_stored_without_going_into_config_json(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config = {
+                "image_model": "gpt-image-2",
+                "video_model": "seedance-2.0-mini-720p",
+                "default_video_model": "seedance-2.0-mini-720p",
+                "video_upstreams": {
+                    "xingapi-seedance": {
+                        "base_url": "https://xingapi.example/v1",
+                        "adapter": "sub2api-json",
+                        "provider_kind": "xingapi",
+                        "models": ["seedance-2.0-mini-720p"],
+                    }
+                },
+                "video_model_routes": {
+                    "seedance-2.0-mini-720p": {
+                        "default_upstream": "xingapi-seedance",
+                        "upstreams": ["xingapi-seedance"],
+                    }
+                },
+            }
+            with mock.patch.dict(os.environ, {"GVS_CONFIG_DIR": temp_dir}), mock.patch.object(
+                gvs_common, "dpapi_protect", return_value=b"encrypted-secret"
+            ):
+                gvs_common.save_settings(
+                    config, "", "", store_secrets=True,
+                    video_upstream_keys={"xingapi-seedance": "private-key-value"},
+                )
+            saved = Path(temp_dir, "config.json").read_text(encoding="utf-8")
+            self.assertNotIn("private-key-value", saved)
+            self.assertNotIn("private-key-value", Path(temp_dir, "secrets.dpapi").read_text(encoding="utf-8", errors="ignore"))
 
     def test_dialogue_and_subtitle_outputs_force_standard_audio_format(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -225,6 +376,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
     image_authorization = ""
     json_video_authorization = ""
     multipart_video_authorization = ""
+    task_authorizations: list[str] = []
     video_payload = FAKE_MP4
     audio_payload = FAKE_MP4
     fail_video_create = False
@@ -310,6 +462,7 @@ class FakeProviderHandler(BaseHTTPRequestHandler):
             self.send_bytes(FAKE_WAV, "audio/wav")
             return
         if self.path == "/v1/videos/task-1":
+            type(self).task_authorizations.append(self.headers.get("Authorization", ""))
             if type(self).task_lookup_404_remaining > 0:
                 type(self).task_lookup_404_remaining -= 1
                 self.send_json({"error": {"message": "Video request not found"}}, 404)
@@ -495,6 +648,7 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.image_authorization = ""
         FakeProviderHandler.json_video_authorization = ""
         FakeProviderHandler.multipart_video_authorization = ""
+        FakeProviderHandler.task_authorizations = []
         FakeProviderHandler.fail_video_create = False
         FakeProviderHandler.video_status = "completed"
         FakeProviderHandler.json_video_status = ""
@@ -511,7 +665,7 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.voicebox_generations = 0
         FakeProviderHandler.voicebox_profiles = []
         FakeProviderHandler.voicebox_model_downloaded = True
-        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5"]
+        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5", "seedance-2.0-mini-720p"]
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name)
         voicebox_ref = (
@@ -583,6 +737,42 @@ class SkillIntegrationTests(unittest.TestCase):
         (project / "project.json").write_text(json.dumps(value, indent=2), encoding="utf-8")
         return project
 
+    def test_new_project_defaults_to_seedance_while_explicit_grok_is_preserved(self) -> None:
+        seedance_project = self.create_project("new-default-model", generate_image=False)
+        seedance_value = json.loads((seedance_project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(seedance_value["video_model"], "seedance-2.0-mini-720p")
+        self.assertEqual(gvs.video_resolution(seedance_value, seedance_value["shots"][0]), "720p")
+
+        grok_project = self.root / "explicit-grok-model"
+        self.run_cli(
+            "init", str(grok_project), "--title", "Legacy model", "--topic", "Compatibility",
+            "--shots", "1", "--video-model", "grok-imagine-video-1.5",
+        )
+        grok_value = json.loads((grok_project / "project.json").read_text(encoding="utf-8"))
+        self.assertEqual(grok_value["video_model"], "grok-imagine-video-1.5")
+
+    def test_old_series_sync_keeps_legacy_model_for_episodes_without_model_field(self) -> None:
+        series_root = self.root / "legacy-series-model"
+        self.run_cli(
+            "series-init", str(series_root), "--title", "Legacy Series", "--premise", "Compatibility test",
+            "--episodes", "1", "--episode-seconds", "6", "--clip-seconds", "6", "--mode", "text-to-video",
+        )
+        series_path = series_root / "series.json"
+        series = json.loads(series_path.read_text(encoding="utf-8"))
+        series["defaults"].pop("video_model", None)
+        series_path.write_text(json.dumps(series, indent=2), encoding="utf-8")
+
+        episode = series_root / series["episodes"][0]["project"]
+        project_path = episode / "project.json"
+        project = json.loads(project_path.read_text(encoding="utf-8"))
+        project.pop("video_model", None)
+        project_path.write_text(json.dumps(project, indent=2), encoding="utf-8")
+
+        self.run_cli("series-sync", str(series_root))
+        synced = json.loads(project_path.read_text(encoding="utf-8"))
+        self.assertNotIn("video_model", synced)
+        self.assertEqual(gvs.effective_video_model(synced), "grok-imagine-video-1.5")
+
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "ffmpeg and ffprobe are required")
     def test_doctor_and_complete_run_are_resumable(self) -> None:
         doctor = self.run_cli("doctor")
@@ -598,6 +788,7 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.image_creates, 1)
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         self.assertEqual(FakeProviderHandler.last_json_video["duration"], 6)
+        self.assertEqual(FakeProviderHandler.last_json_video["resolution"], "720p")
         self.assertNotIn("seconds", FakeProviderHandler.last_json_video)
         self.assertNotIn("size", FakeProviderHandler.last_json_video)
         self.assertNotIn("generate_audio", FakeProviderHandler.last_json_video)
@@ -620,7 +811,11 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertTrue((project / "clips" / "shot-001.mp4").is_file())
 
     def test_doctor_accepts_known_billing_suffix_without_fuzzy_model_matching(self) -> None:
-        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5（按次）"]
+        FakeProviderHandler.model_ids = ["gpt-image-2", "grok-imagine-video-1.5（按次）", "seedance-2.0-mini-720p"]
+        config_path = self.config_dir / "config.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config["default_video_model"] = "grok-imagine-video-1.5"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
         doctor = self.run_cli("doctor")
         self.assertTrue(doctor["ok"])
         self.assertEqual(doctor["providers"]["newapi_video"]["matched_model"], "grok-imagine-video-1.5（按次）")
@@ -628,6 +823,21 @@ class SkillIntegrationTests(unittest.TestCase):
         FakeProviderHandler.model_ids = ["gpt-image-2", "prefix-grok-imagine-video-1.5-other"]
         blocked = self.run_cli("doctor", expected=1)
         self.assertFalse(blocked["providers"]["newapi_video"]["model_present"])
+
+    def test_doctor_allows_missing_optional_fallback_when_primary_model_is_verified(self) -> None:
+        self.env["GVS_NEWAPI_VIDEO_KEY"] = ""
+        doctor = self.run_cli("doctor")
+        self.assertTrue(doctor["ok"])
+        self.assertTrue(doctor["providers"]["sub2api_video"]["model_present"])
+        self.assertEqual(doctor["providers"]["newapi_video"]["reason"], "key_not_configured")
+
+    def test_model_discovery_blocks_paid_create_when_selected_model_is_not_advertised(self) -> None:
+        FakeProviderHandler.model_ids = ["gpt-image-2"]
+        project = self.create_project("unadvertised-model", generate_image=False)
+        result = self.run_cli("generate-videos", str(project), "--poll-timeout", "5", expected=1)
+        self.assertIn("no selected video upstream has verified support", result["error"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 0)
+        self.assertEqual(FakeProviderHandler.video_creates, 0)
 
     def test_multiple_video_references_use_sub2api_reference_array(self) -> None:
         project = self.root / "multi"
@@ -1700,6 +1910,70 @@ class SkillIntegrationTests(unittest.TestCase):
         self.assertEqual(FakeProviderHandler.json_video_creates, 1)
         state = json.loads(state_path.read_text(encoding="utf-8"))
         self.assertEqual(state["shots"]["shot-001"]["video"]["status"], "completed")
+
+    def test_legacy_grok_task_signature_resumes_on_recorded_upstream_without_create(self) -> None:
+        project = self.create_project("legacy-grok-task", generate_image=False)
+        project_path = project / "project.json"
+        project_value = json.loads(project_path.read_text(encoding="utf-8"))
+        project_value["video_model"] = "grok-imagine-video-1.5"
+        (project_path).write_text(json.dumps(project_value, indent=2), encoding="utf-8")
+
+        generated = self.run_cli("generate-videos", str(project), "--poll-timeout", "6")
+        self.assertTrue(generated["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertEqual(FakeProviderHandler.last_json_video["model"], "grok-imagine-video-1.5")
+
+        state_path = project / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        runtime = state["shots"]["shot-001"]["video"]
+        self.assertEqual(runtime["provider"], "sub2api")
+        self.assertEqual(runtime["model"], "grok-imagine-video-1.5")
+        prompt = str(runtime["prompt"])
+        shot = project_value["shots"][0]
+        legacy_signature = gvs.signature(
+            {
+                "mode": "image-to-video",
+                "provider": "sub2api",
+                "model": "grok-imagine-video-1.5",
+                "prompt": prompt,
+                "seconds": int(gvs.shot_value(project_value, shot, "seconds", 6)),
+                "size": str(gvs.shot_value(project_value, shot, "video_size", "1280x720")),
+                "resolution": gvs.video_resolution(project_value, shot),
+                "aspect_ratio": gvs.video_aspect_ratio(project_value, shot),
+                "generate_audio": bool(gvs.audio_config(project_value)["generate_audio"]),
+            },
+            [],
+        )
+        runtime.update(
+            {
+                "status": "failed",
+                "error_category": "capability_unsupported",
+                "error": "HTTP 404: Video request not found (request_id=trace-only)",
+                "path": "",
+                "signature": legacy_signature,
+            }
+        )
+        runtime.pop("upstream_id", None)
+        attempts = runtime.get("provider_attempts", [])
+        if attempts and isinstance(attempts[-1], dict):
+            attempts[-1].pop("upstream_id", None)
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        clip_path = project / "clips" / "shot-001.mp4"
+        if clip_path.exists():
+            clip_path.unlink()
+
+        FakeProviderHandler.task_authorizations = []
+        resumed = self.run_cli("resume", str(project), "--poll-timeout", "6")
+
+        self.assertTrue(resumed["ok"])
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+        self.assertTrue(FakeProviderHandler.task_authorizations)
+        self.assertTrue(all(value == "Bearer test-video-key" for value in FakeProviderHandler.task_authorizations))
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        resumed_runtime = state["shots"]["shot-001"]["video"]
+        self.assertEqual(resumed_runtime["status"], "completed")
+        self.assertEqual(resumed_runtime["model"], "grok-imagine-video-1.5")
+        self.assertEqual(resumed_runtime["provider"], "sub2api")
 
     def test_explicit_lost_task_replacement_requires_two_404_checks(self) -> None:
         project = self.create_project("lost-task-replacement", generate_image=False)

@@ -152,6 +152,8 @@ def create_series_contract(
     video_aspect_ratio: str,
     audio_mode: str = "native-dialogue",
     subtitle_source: str = "none",
+    video_model: str = "seedance-2.0-mini-720p",
+    video_upstream: str = "",
 ) -> dict[str, Any]:
     root = root.resolve()
     if series_file(root).exists() or series_state_file(root).exists():
@@ -205,6 +207,8 @@ def create_series_contract(
             "video_mode": video_mode,
             "video_provider": video_provider,
             "video_provider_policy": video_provider_policy,
+            "video_model": video_model,
+            "video_upstream": video_upstream,
             "video_size": video_size,
             "video_resolution": video_resolution,
             "video_aspect_ratio": video_aspect_ratio,
@@ -283,6 +287,8 @@ def validate_series(root: Path, series: dict[str, Any]) -> list[str]:
         errors.append("series.defaults.video_provider must be sub2api or newapi")
     if defaults.get("video_provider_policy", "automatic") not in {"automatic", "fixed"}:
         errors.append("series.defaults.video_provider_policy must be automatic or fixed")
+    if not str(defaults.get("video_model", "seedance-2.0-mini-720p")).strip():
+        errors.append("series.defaults.video_model must be a non-empty model ID")
     retry_policy = series.get("retry_policy") if isinstance(series.get("retry_policy"), dict) else {}
     try:
         max_attempts = int(retry_policy.get("max_total_attempts", 3))
@@ -505,6 +511,12 @@ def sync_episode_contract(
     defaults = series.get("defaults") if isinstance(series.get("defaults"), dict) else {}
     project["video_provider"] = str(defaults.get("video_provider", "sub2api"))
     project["video_provider_policy"] = str(defaults.get("video_provider_policy", "automatic"))
+    if str(defaults.get("video_model", "")).strip():
+        project["video_model"] = str(defaults["video_model"]).strip()
+    project["video_route"] = {
+        "preferred_upstream": str(defaults.get("video_upstream", "")),
+        "policy": "fixed" if defaults.get("video_upstream") or defaults.get("video_provider_policy") == "fixed" else "automatic",
+    }
     if str(series.get("style_bible", "")).strip():
         project["style_bible"] = str(series["style_bible"]).strip()
     old_characters = {
@@ -781,6 +793,8 @@ def series_status(root: Path) -> dict[str, Any]:
         "title": series.get("title", ""),
         "video_mode": (series.get("defaults") or {}).get("video_mode"),
         "video_provider": (series.get("defaults") or {}).get("video_provider"),
+        "video_model": (series.get("defaults") or {}).get("video_model"),
+        "video_upstream": (series.get("defaults") or {}).get("video_upstream"),
         "counts": counts,
         "episodes": episodes,
         "characters": state.get("characters", {}),

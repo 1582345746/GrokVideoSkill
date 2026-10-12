@@ -29,7 +29,7 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
         self.image.write_bytes(b"fixture-image-bytes")
         self.project = {
             "prompt_compiler": "scoped-v1", "video_mode": "image-to-video", "video_provider": "newapi",
-            "video_provider_policy": "fixed", "story": "A crate slides onto a table.",
+            "video_provider_policy": "fixed", "video_model": "fixture", "story": "A crate slides onto a table.",
             "prompt_style": {"medium": "photoreal"},
             "audio": {"mode": "native-dialogue", "subtitle_source": "none"},
             "shots": [{"id": "shot-001", "generate_image": True, "character_ids": [], "seconds": 5,
@@ -40,6 +40,8 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
         runtime = gvs.shot_state(self.state, "shot-001")["image"]
         runtime.update(status="completed", path="assets/keyframes/shot-001.png", review_status="pending")
         self.provider = mock.Mock()
+        self.provider.model = "fixture"
+        self.provider.list_models.return_value = ["fixture"]
         self.provider.create.side_effect = RuntimeError("fixture-paid-create-boundary")
         self.persisted_states: list[dict] = []
 
@@ -91,12 +93,15 @@ class ScopedPaidGateIntegrationTests(unittest.TestCase):
             expected_signature = gvs.signature(
                 {
                     "mode": "text-to-video",
-                    "provider": "newapi",
+                    "upstream_id": "newapi",
+                    "upstream_url": "",
+                    "adapter": "newapi",
                     "model": "fixture",
+                    "remote_model": "fixture",
                     "prompt": prompt,
                     "seconds": 5,
                     "size": "1280x720",
-                    "resolution": "480p",
+                    "resolution": "720p",
                     "aspect_ratio": "16:9",
                     "generate_audio": video["generate_audio"],
                 },

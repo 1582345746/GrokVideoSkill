@@ -75,6 +75,15 @@ from media_client import (
     image_reference_report,
     save_image_bytes,
 )
+from video_routing import (
+    DEFAULT_MODEL_ROUTES,
+    DEFAULT_VIDEO_MODEL as DEFAULT_SEEDANCE_VIDEO_MODEL,
+    LEGACY_VIDEO_MODEL,
+    XINGAPI_SEEDANCE_REMOTE_MODEL,
+    effective_video_model,
+    route_candidates,
+    upstream_registry,
+)
 from media_tools import SUBTITLE_STYLES, detect_tail_motion, export_review_frames, extract_cover, postprocess_video, quality_report
 from news_workflow import apply_news_script, create_news_contract, load_news_contract, news_context, validate_news_contract
 from provider_contracts import (
@@ -165,7 +174,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.11.1"
+SKILL_VERSION = "2.12.0"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -519,6 +528,10 @@ def shots_for_video_mode(project: dict[str, Any], mode: str) -> list[dict[str, A
 
 
 def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = None) -> str:
+    route = project.get("video_route") if isinstance(project.get("video_route"), dict) else {}
+    upstream_id = str(route.get("preferred_upstream", project.get("video_upstream", ""))).strip()
+    if upstream_id:
+        return upstream_id
     value = str(project.get("video_provider", "")).strip()
     if value:
         return value
@@ -526,6 +539,10 @@ def video_provider(project: dict[str, Any], settings: dict[str, Any] | None = No
 
 
 def video_provider_policy(project: dict[str, Any]) -> str:
+    route = project.get("video_route") if isinstance(project.get("video_route"), dict) else {}
+    routed = str(route.get("policy", "")).strip().lower()
+    if routed:
+        return routed
     value = str(project.get("video_provider_policy", "")).strip().lower()
     if value:
         return value
@@ -541,6 +558,21 @@ def configured_default_video_provider() -> str:
     except SkillError:
         return "sub2api"
     return value if value in PROVIDER_CAPABILITIES else "sub2api"
+
+
+def configured_default_video_model() -> str:
+    path = config_path()
+    if not path.is_file():
+        return DEFAULT_SEEDANCE_VIDEO_MODEL
+    try:
+        config = read_json(path)
+    except SkillError:
+        return DEFAULT_SEEDANCE_VIDEO_MODEL
+    return str(config.get("default_video_model", DEFAULT_SEEDANCE_VIDEO_MODEL)).strip() or DEFAULT_SEEDANCE_VIDEO_MODEL
+
+
+def resolve_video_model(value: str | None) -> str:
+    return str(value or configured_default_video_model()).strip() or DEFAULT_SEEDANCE_VIDEO_MODEL
 
 
 def resolve_video_provider_options(provider: str | None, policy: str | None) -> tuple[str, str]:
@@ -575,37 +607,27 @@ def provider_capability_report(settings: dict[str, Any]) -> dict[str, dict[str, 
     return report
 
 
-def video_provider_candidates(project: dict[str, Any], settings: dict[str, Any], *, mode: str | None = None) -> list[str]:
-    preferred = video_provider(project, settings)
-    policy = video_provider_policy(project)
+def video_provider_candidates(
+    project: dict[str, Any],
+    settings: dict[str, Any],
+    *,
+    mode: str | None = None,
+    model: str | None = None,
+    shot: dict[str, Any] | None = None,
+) -> list[str]:
     resolved_mode = mode or video_mode(project)
-    capability_name = "text_to_video" if resolved_mode == "text-to-video" else "image_to_video"
-    if preferred not in PROVIDER_CAPABILITIES:
-        raise SkillError("video_provider must be sub2api or newapi")
-    if not getattr(PROVIDER_CAPABILITIES[preferred], capability_name):
-        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} does not support {resolved_mode}")
-
-    if policy == "fixed":
-        credential_role = PROVIDER_CAPABILITIES[preferred].credential_role
-        if settings.get(credential_role):
-            return [preferred]
-        raise SkillError(f"{PROVIDER_CAPABILITIES[preferred].title} 视频 Key 未配置，无法执行固定提供方视频任务")
-    if policy != "automatic":
-        raise SkillError("video_provider_policy must be automatic or fixed")
-
-    if preferred == "newapi":
-        if settings.get("newapi_video_key"):
-            return ["newapi"]
-        raise SkillError("NewApi 视频 Key 未配置，无法执行明确指定的 NewApi 视频任务")
-
-    candidates = []
-    if settings.get("sub2api_video_key"):
-        candidates.append("sub2api")
-    if settings.get("newapi_video_key"):
-        candidates.append("newapi")
-    if not candidates:
-        raise SkillError("未配置可用的视频 Key：请配置 Sub2Api 或 NewApi 视频 Key")
-    return candidates
+    model = model or effective_video_model(project, shot)
+    routed_project = project
+    if isinstance(shot, dict) and (shot.get("video_upstream") or isinstance(shot.get("video_route"), dict)):
+        routed_project = {**project}
+        if isinstance(shot.get("video_route"), dict):
+            routed_project["video_route"] = dict(shot["video_route"])
+        elif shot.get("video_upstream"):
+            routed_project["video_route"] = {"preferred_upstream": str(shot["video_upstream"]), "policy": "fixed"}
+    try:
+        return route_candidates(routed_project, settings, model, mode=resolved_mode)
+    except ValueError as error:
+        raise SkillError(str(error)) from error
 
 
 def validate_retry_provider_override(
@@ -616,30 +638,38 @@ def validate_retry_provider_override(
     *,
     retry_failed: bool,
     mode: str | None = None,
+    model: str | None = None,
+    shot: dict[str, Any] | None = None,
 ) -> str:
     """Allow an explicit provider change only after a confirmed create rejection."""
-    override = str(provider or "").strip().lower()
+    override = str(provider or "").strip()
     if not override:
         return ""
-    if override not in PROVIDER_CAPABILITIES:
-        raise SkillError("--retry-provider must be sub2api or newapi")
+    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", override):
+        raise SkillError("--retry-provider must be a configured upstream ID")
     if not retry_failed:
         raise SkillError("--retry-provider requires --retry-failed and --retry-reason")
     if str(video.get("status", "")) != "failed" or str(video.get("task_id", "")).strip():
         raise SkillError("--retry-provider is allowed only for a failed create with no task ID; known tasks stay on their original provider")
     attempts = video.get("provider_attempts", [])
     latest_attempt = attempts[-1] if isinstance(attempts, list) and attempts else None
-    failed_provider = str(latest_attempt.get("provider", "")).strip().lower() if isinstance(latest_attempt, dict) else ""
+    failed_provider = str(latest_attempt.get("provider", "")).strip() if isinstance(latest_attempt, dict) else ""
     if (
         not isinstance(latest_attempt, dict)
         or latest_attempt.get("status") != "failed"
         or str(latest_attempt.get("task_id", "")).strip()
         or not failed_provider
         or failed_provider == override
-        or failed_provider != str(video.get("provider", "")).strip().lower()
+        or failed_provider != str(video.get("provider", "")).strip()
     ):
         raise SkillError("--retry-provider requires a recorded rejected create from another provider with no task ID")
-    candidates = video_provider_candidates(project, settings, mode=mode)
+    candidates = video_provider_candidates(
+        project,
+        settings,
+        mode=mode,
+        model=model or effective_video_model(project, shot, video),
+        shot=shot,
+    )
     if override not in candidates:
         raise SkillError(f"retry provider {override} is not available under this project's provider policy or credentials")
     return override
@@ -669,13 +699,15 @@ def validate_retry_provider_override_batch(
             runtime["video"],
             retry_failed=retry_failed,
             mode=shot_video_mode(project, shot),
+            model=effective_video_model(project, shot, runtime["video"]),
+            shot=shot,
         )
     return override
 
 
 def video_resolution(project: dict[str, Any], shot: dict[str, Any]) -> str:
     defaults = project.get("defaults") if isinstance(project.get("defaults"), dict) else {}
-    return str(shot.get("video_resolution", defaults.get("video_resolution", "480p"))).strip()
+    return str(shot.get("video_resolution", defaults.get("video_resolution", "720p"))).strip()
 
 
 def video_aspect_ratio(project: dict[str, Any], shot: dict[str, Any]) -> str:
@@ -1058,6 +1090,16 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     if _known_secret_field(project):
         errors.append("project contains a credential-like field; credentials must stay outside the project")
     mode = video_mode(project)
+    model_value = project.get("video_model")
+    if model_value is not None and (not isinstance(model_value, str) or not model_value.strip()):
+        errors.append("project.video_model must be a non-empty model ID when specified")
+    video_route = project.get("video_route") if isinstance(project.get("video_route"), dict) else {}
+    preferred_upstream = str(video_route.get("preferred_upstream", "")).strip()
+    route_policy = str(video_route.get("policy", "")).strip()
+    if preferred_upstream and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", preferred_upstream):
+        errors.append("project.video_route.preferred_upstream must be a valid upstream ID")
+    if route_policy and route_policy not in {"automatic", "fixed"}:
+        errors.append("project.video_route.policy must be automatic or fixed")
     provider = str(project.get("video_provider", "")).strip()
     if mode not in {"text-to-video", "image-to-video"}:
         errors.append("project.video_mode must be text-to-video or image-to-video")
@@ -1102,6 +1144,15 @@ def validate_project(root: Path, project: dict[str, Any]) -> list[str]:
     if not isinstance(shots, list) or not shots:
         errors.append("project.shots must be a non-empty array")
         return errors
+    for index, shot in enumerate(shots):
+        if not isinstance(shot, dict):
+            errors.append(f"shots[{index}] must be an object")
+            continue
+        if "video_model" in shot and (not isinstance(shot.get("video_model"), str) or not str(shot.get("video_model", "")).strip()):
+            errors.append(f"shots[{index}].video_model must be a non-empty model ID")
+        shot_upstream = str(shot.get("video_upstream", "")).strip()
+        if shot_upstream and not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", shot_upstream):
+            errors.append(f"shots[{index}].video_upstream must be a valid upstream ID")
     fast_dialogue = project.get("workflow") == "fast-continuous-event-dialogue"
     if fast_dialogue:
         continuity = continuity_config(project)
@@ -2466,7 +2517,9 @@ def resolve_unknown_submission(
     if selected_outcome == "accepted":
         try:
             _, _, settings = clients()
-            verifier = select_video_client(settings, provider)
+            shot = next(item for item in project.get("shots", []) if isinstance(item, dict) and str(item.get("id", "")) == shot_id)
+            pinned_model = effective_video_model(project, shot, video)
+            verifier = select_video_client(settings, provider, pinned_model)
             provider_status, _ = verifier.query(provider_task_id)
         except Exception as error:
             raise SkillError(
@@ -2482,14 +2535,22 @@ def resolve_unknown_submission(
         pass
     note = redact(
         note,
-        [str(settings.get(name, "")) for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")],
+        [
+            *[str(settings.get(name, "")) for name in ("sub2api_image_key", "sub2api_video_key", "newapi_video_key")],
+            *[
+                str(upstream.get("key", ""))
+                for upstream in settings.get("video_upstreams", {}).values()
+                if isinstance(upstream, dict)
+            ],
+        ],
     )
     resolved_at = int(time.time())
     resolution = {"outcome": selected_outcome, "evidence": note, "resolved_at": resolved_at}
     if selected_outcome == "accepted":
         resolution["verified_status"] = provider_status
         video.update({"status": "queued", "task_id": provider_task_id, "error": "", "error_category": ""})
-        attempt.update({"status": "queued", "task_id": provider_task_id})
+        attempt.update({"status": "queued", "task_id": provider_task_id, "error": "", "error_category": ""})
+        attempt.pop("finished_at", None)
     else:
         message = "Provider confirmed that no task was created."
         video.update({"status": "failed", "task_id": "", "error": message, "error_category": "provider_confirmed_rejection"})
@@ -2515,21 +2576,56 @@ def clients(*, require_secrets: bool = True) -> tuple[Sub2ApiImageClient, NewApi
     settings = load_settings(require_secrets=require_secrets)
     return (
         Sub2ApiImageClient(settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"]),
-        NewApiVideoClient(settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"]),
+        NewApiVideoClient(settings["newapi_video_base_url"], settings["newapi_video_key"], settings["default_video_model"]),
         settings,
     )
 
 
-def select_video_client(settings: dict[str, Any], provider: str) -> Sub2ApiVideoClient | NewApiVideoClient:
-    if provider == "sub2api":
-        if not settings.get("sub2api_video_key"):
-            raise SkillError("Sub2Api video key is required for video_provider=sub2api")
-        return Sub2ApiVideoClient(settings["sub2api_video_base_url"], settings["sub2api_video_key"], settings["video_model"])
-    if provider == "newapi":
-        if not settings.get("newapi_video_key"):
-            raise SkillError("NewApi video key is required for video_provider=newapi")
-        return NewApiVideoClient(settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"])
-    raise SkillError("video_provider must be sub2api or newapi")
+def select_video_client(
+    settings: dict[str, Any],
+    provider: str,
+    model: str | None = None,
+) -> Sub2ApiVideoClient | NewApiVideoClient:
+    registry = upstream_registry(settings)
+    upstream = registry.get(provider)
+    if not isinstance(upstream, dict):
+        raise SkillError(f"video upstream is not configured: {provider}")
+    key = str(upstream.get("key", "")).strip()
+    base_url = str(upstream.get("base_url", "")).strip()
+    if not key or not base_url:
+        raise SkillError(f"video upstream {provider!r} requires both base URL and API key")
+    canonical_model = str(model or settings.get("default_video_model", DEFAULT_SEEDANCE_VIDEO_MODEL)).strip()
+    model_map = upstream.get("model_map") if isinstance(upstream.get("model_map"), dict) else {}
+    remote_model = str(model_map.get(canonical_model, canonical_model)).strip()
+    adapter = str(upstream.get("adapter", "")).strip().lower()
+    if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json"}:
+        return Sub2ApiVideoClient(base_url, key, remote_model)
+    if adapter in {"newapi", "newapi-multipart", "openai-video-multipart"}:
+        return NewApiVideoClient(base_url, key, remote_model)
+    raise SkillError(f"video upstream {provider!r} uses unsupported adapter {adapter!r}")
+
+
+def verified_video_provider_candidates(
+    candidates: list[str], settings: dict[str, Any], model: str
+) -> list[str]:
+    """Require a read-only model-catalog match before any new paid create."""
+    verified: list[str] = []
+    failures: list[str] = []
+    for upstream_id in candidates:
+        try:
+            client = select_video_client(settings, upstream_id, model)
+            advertised = client.list_models()
+        except Exception as error:
+            failures.append(f"{upstream_id}: {sanitized_provider_error(error, settings)}")
+            continue
+        if provider_model_match(client.model, advertised):
+            verified.append(upstream_id)
+        else:
+            failures.append(f"{upstream_id}: model {client.model!r} is not advertised")
+    if not verified:
+        detail = "; ".join(failures) if failures else "no candidate upstreams are configured"
+        raise SkillError(f"no selected video upstream has verified support for model {model!r}: {detail}")
+    return verified
 
 
 def resolved_character_master(root: Path, project: dict[str, Any], state: dict[str, Any]) -> Path:
@@ -2823,6 +2919,11 @@ def sanitized_provider_error(error: Exception, settings: dict[str, Any]) -> str:
             str(settings.get("sub2api_image_key", "")),
             str(settings.get("sub2api_video_key", "")),
             str(settings.get("newapi_video_key", "")),
+            *[
+                str(upstream.get("key", ""))
+                for upstream in settings.get("video_upstreams", {}).values()
+                if isinstance(upstream, dict)
+            ],
         ],
     )
 
@@ -2893,9 +2994,10 @@ def generate_videos(
         mode = shot_video_mode(project, shot)
         if mode not in {"text-to-video", "image-to-video"}:
             raise SkillError(f"{shot_id}.video_mode must be text-to-video or image-to-video")
-        candidates = video_provider_candidates(project, settings, mode=mode)
         runtime = shot_state(state, shot_id)
         video = runtime["video"]
+        model = effective_video_model(project, shot, video)
+        candidates = video_provider_candidates(project, settings, mode=mode, model=model, shot=shot)
         references: list[Path] = []
         handoff_only = False
         if mode == "image-to-video":
@@ -2924,8 +3026,18 @@ def generate_videos(
         resolution = video_resolution(project, shot)
         aspect_ratio = video_aspect_ratio(project, shot)
         def provider_signature(provider_name: str) -> str:
+            upstream = upstream_registry(settings).get(provider_name, {})
+            model_map = upstream.get("model_map") if isinstance(upstream.get("model_map"), dict) else {}
+            adapter = str(upstream.get("adapter", provider_name))
+            remote_model = str(model_map.get(model, model))
             return signature(
-                {"mode": mode, "provider": provider_name, "model": settings["video_model"], "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
+                {"mode": mode, "upstream_id": provider_name, "upstream_url": upstream.get("base_url", ""), "adapter": adapter, "model": model, "remote_model": remote_model, "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
+                references,
+            )
+
+        def legacy_provider_signature(provider_name: str) -> str:
+            return signature(
+                {"mode": mode, "provider": provider_name, "model": model, "prompt": prompt, "seconds": seconds, "size": size, "resolution": resolution, "aspect_ratio": aspect_ratio, "generate_audio": generate_audio},
                 references,
             )
 
@@ -2947,15 +3059,23 @@ def generate_videos(
         if retry_provider_override:
             candidates_for_shot = [retry_provider_override]
         elif active_provider not in candidates:
-            candidates_for_shot = [active_provider]
+            if task_id:
+                candidates_for_shot = [active_provider]
+            else:
+                candidates_for_shot = candidates
+                active_provider = candidates_for_shot[0]
         else:
             candidates_for_shot = candidates
         changed_failed_retry = video.get("status") == "failed" and retry_failed
+        attempts_value = video.get("provider_attempts", [])
+        latest_attempt = attempts_value[-1] if isinstance(attempts_value, list) and attempts_value and isinstance(attempts_value[-1], dict) else {}
+        legacy_task = bool(task_id) and not video.get("upstream_id") and not latest_attempt.get("upstream_id")
         if (
             task_id
             and video.get("signature")
             and video.get("signature") != provider_signature(active_provider)
             and not changed_failed_retry
+            and not (legacy_task and video.get("signature") == legacy_provider_signature(active_provider))
         ):
             raise SkillError(f"{shot_id} changed after task creation; restore the original shot or start a new project to avoid mixing task state")
         automatic_failover = False
@@ -2967,7 +3087,7 @@ def generate_videos(
                 raise SkillError(
                     f"{shot_id} is not an unresolved lost-task candidate; use ordinary resume or the confirmed terminal-failure retry path"
                 )
-            verification_client = select_video_client(settings, active_provider)
+            verification_client = select_video_client(settings, active_provider, model)
             try:
                 status, _ = verification_client.query(task_id)
             except APIError as error:
@@ -3114,9 +3234,18 @@ def generate_videos(
                 },
             )
 
+        if not task_id and video.get("status") != "submission_unknown" and (
+            int(video.get("attempts", 0)) == 0 or retry_failed or automatic_failover
+        ):
+            candidates_for_shot = verified_video_provider_candidates(candidates_for_shot, settings, model)
+            if active_provider not in candidates_for_shot:
+                if retry_provider_override:
+                    raise SkillError(f"retry upstream {retry_provider_override} does not advertise model {model!r}")
+                active_provider = candidates_for_shot[0]
+
         while True:
             provider_index = candidates_for_shot.index(active_provider) if active_provider in candidates_for_shot else 0
-            video_client = select_video_client(settings, active_provider)
+            video_client = select_video_client(settings, active_provider, model)
             if not task_id:
                 attempts = int(video.get("attempts", 0))
                 if attempts >= max_total_attempts(project):
@@ -3146,7 +3275,10 @@ def generate_videos(
                         "prompt_utf8_bytes": prompt_bytes(prompt),
                         "prompt_sha256": prompt_sha256,
                         "provider": active_provider,
-                        "model": settings["video_model"],
+                        "upstream_id": active_provider,
+                        "adapter": str(upstream_registry(settings).get(active_provider, {}).get("adapter", active_provider)),
+                        "model": model,
+                        "remote_model": str(video_client.model),
                         "seconds": seconds,
                         "resolution": resolution,
                         "aspect_ratio": aspect_ratio,
@@ -3166,6 +3298,10 @@ def generate_videos(
                     attempt_id=attempt_id,
                     request_id=request_id,
                     provider=active_provider,
+                    upstream_id=active_provider,
+                    adapter=str(upstream_registry(settings).get(active_provider, {}).get("adapter", active_provider)),
+                    model=model,
+                    remote_model=str(video_client.model),
                     task_id="",
                     status="submitting",
                     created_at=int(time.time()),
@@ -4134,6 +4270,8 @@ def init_project(
     frame_layout_value: str = "single-full-frame",
     prompt_version_value: str = "auto",
     visual_medium_value: str = "auto",
+    video_model_value: str = DEFAULT_SEEDANCE_VIDEO_MODEL,
+    video_upstream_value: str = "",
 ) -> Path:
     root = root.resolve()
     path = project_file(root)
@@ -4219,6 +4357,11 @@ def init_project(
         "workflow_title": workflow["title"],
         "workflow_guidance": workflow.get("guidance", {}),
         "video_mode": video_mode_value,
+        "video_model": video_model_value.strip() or DEFAULT_SEEDANCE_VIDEO_MODEL,
+        "video_route": {
+            "preferred_upstream": video_upstream_value.strip(),
+            "policy": "fixed" if video_upstream_value.strip() or video_provider_policy_value == "fixed" else "automatic",
+        },
         "video_provider": video_provider_value,
         "video_provider_policy": video_provider_policy_value,
         "target_duration_seconds": sum(shot_durations),
@@ -4404,51 +4547,71 @@ def doctor() -> tuple[int, dict[str, Any]]:
     }
     if result["ffmpeg"] == "not_found" or result["ffprobe"] == "not_found":
         result["ok"] = False
-    checks = [
-        (
-            "sub2api_image",
-            settings.get("sub2api_image_key", ""),
-            settings["image_model"],
-            Sub2ApiImageClient(settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"]),
-            False,
-        ),
-        (
-            "sub2api_video",
-            settings.get("sub2api_video_key", ""),
-            settings["video_model"],
-            Sub2ApiVideoClient(settings["sub2api_video_base_url"], settings["sub2api_video_key"], settings["video_model"]),
-            False,
-        ),
-        (
-            "newapi_video",
-            settings.get("newapi_video_key", ""),
-            settings["video_model"],
-            NewApiVideoClient(
-                settings["newapi_video_base_url"], settings["newapi_video_key"], settings["video_model"]
-            ),
-            False,
-        ),
-    ]
-    for name, key, model, client, required in checks:
+    image_client = Sub2ApiImageClient(settings["image_base_url"], settings["sub2api_image_key"], settings["image_model"])
+    image_key = settings.get("sub2api_image_key", "")
+    if not image_key:
+        result["providers"]["sub2api_image"] = {
+            "ok": True, "configured_model": settings["image_model"], "skipped": True,
+            "required": False, "reason": "key_not_configured",
+        }
+    else:
+        started = time.perf_counter()
+        try:
+            image_models = image_client.list_models()
+            matched = provider_model_match(settings["image_model"], image_models)
+            result["providers"]["sub2api_image"] = {
+                "ok": bool(matched), "configured_model": settings["image_model"], "models": image_models,
+                "model_present": bool(matched), "matched_model": matched, "required": False,
+                "model_count": len(image_models), "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "circuit": image_client.health_snapshot(),
+            }
+            if not matched:
+                result["ok"] = False
+        except Exception as error:
+            result["providers"]["sub2api_image"] = {
+                "ok": False, "configured_model": settings["image_model"], "required": False,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 1),
+                "error": sanitized_provider_error(error, settings), "circuit": image_client.health_snapshot(),
+            }
+            result["ok"] = False
+
+    model = str(settings.get("default_video_model", DEFAULT_SEEDANCE_VIDEO_MODEL))
+    routes = settings.get("video_model_routes", {})
+    route = routes.get(model) if isinstance(routes, dict) else None
+    if not isinstance(route, dict):
+        route = DEFAULT_MODEL_ROUTES.get(model, {"upstreams": ["sub2api", "newapi"]})
+    required_upstreams = {str(item) for item in route.get("upstreams", [])} if isinstance(route.get("upstreams"), list) else set()
+    route_reports: dict[str, dict[str, Any]] = {}
+    for upstream_id, upstream in upstream_registry(settings).items():
+        key = str(upstream.get("key", "")).strip()
+        required = upstream_id in required_upstreams
+        result_name = {"sub2api": "sub2api_video", "newapi": "newapi_video"}.get(upstream_id, upstream_id)
+        if not upstream.get("enabled", True):
+            report = {"ok": True, "configured_model": model, "skipped": True, "required": required, "reason": "disabled"}
+            result["providers"][result_name] = report
+            route_reports[upstream_id] = report
+            continue
         if not key:
-            result["providers"][name] = {
-                "ok": not required,
+            report = {
+                "ok": True,
                 "configured_model": model,
                 "skipped": True,
                 "required": required,
                 "reason": "key_not_configured",
             }
-            if required:
-                result["ok"] = False
+            result["providers"][result_name] = report
+            route_reports[upstream_id] = report
             continue
         started = time.perf_counter()
         try:
+            client = select_video_client(settings, upstream_id, model)
             models = client.list_models()
-            matched_model = provider_model_match(model, models)
+            matched_model = provider_model_match(client.model, models)
             present = bool(matched_model)
-            result["providers"][name] = {
-                "ok": present,
+            report = {
+                "ok": present or not required,
                 "configured_model": model,
+                "remote_model": client.model,
                 "models": models,
                 "model_present": present,
                 "matched_model": matched_model,
@@ -4457,28 +4620,34 @@ def doctor() -> tuple[int, dict[str, Any]]:
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
                 "circuit": client.health_snapshot(),
             }
-            if not present:
-                result["ok"] = False
+            result["providers"][result_name] = report
+            route_reports[upstream_id] = report
         except Exception as error:
-            result["providers"][name] = {
-                "ok": False,
+            report = {
+                "ok": not required,
                 "configured_model": model,
                 "required": required,
                 "latency_ms": round((time.perf_counter() - started) * 1000, 1),
-                "error": str(error)[:1000],
-                "circuit": client.health_snapshot(),
+                "error": sanitized_provider_error(error, settings),
             }
-            result["ok"] = False
+            result["providers"][result_name] = report
+            route_reports[upstream_id] = report
+    route_available = any(
+        route_reports.get(upstream_id, {}).get("ok")
+        and route_reports.get(upstream_id, {}).get("model_present")
+        for upstream_id in required_upstreams
+    )
+    if not route_available:
+        result["ok"] = False
+        result["diagnostics_zh"].append(f"默认视频模型 {model} 没有任何已验证可用的路由上游。")
     if not settings.get("sub2api_image_key"):
         result["diagnostics_zh"].append("Sub2Api 生图 Key 未配置：生图会在付费请求前停止。")
-    if not settings.get("sub2api_video_key") and not settings.get("newapi_video_key"):
-        result["diagnostics_zh"].append("Sub2Api 与 NewApi 视频 Key 均未配置：当前不能生成视频。")
-    elif not settings.get("newapi_video_key"):
-        result["diagnostics_zh"].append("NewApi 视频 Key 未配置：Sub2Api 视频失败时不会进入备用提供方。")
+    if not any(str(item.get("key", "")).strip() for item in upstream_registry(settings).values()):
+        result["diagnostics_zh"].append("没有已配置的视频上游 Key：当前不能生成视频。")
     return (0 if result["ok"] else 1), result
 
 
-def read_credentials_payload() -> tuple[str, str, str, str]:
+def read_credentials_payload() -> tuple[str, str, str, str, dict[str, str]]:
     prompt = "Credential payload JSON: "
     raw = getpass.getpass(prompt) if sys.stdin.isatty() else sys.stdin.readline(MAX_CREDENTIAL_PAYLOAD_CHARS + 1)
     if len(raw) > MAX_CREDENTIAL_PAYLOAD_CHARS:
@@ -4512,14 +4681,81 @@ def read_credentials_payload() -> tuple[str, str, str, str]:
     image_key = role_key("image_api_key", "sub2api_image_key", "quickai_image_key", fallback=sub2api_key)
     video_key = role_key("video_api_key", "sub2api_video_key", "quickai_video_key", fallback=sub2api_key)
     new_video_key = role_key("newapi_video_key", "quickainew_video_key", fallback=newapi_key)
-    return image_key, video_key, new_video_key, sub2api_key
+    dynamic = payload.get("video_upstream_keys", {})
+    if not isinstance(dynamic, dict):
+        raise SkillError("video_upstream_keys must be an object")
+    dynamic_keys: dict[str, str] = {}
+    for upstream_id, value in dynamic.items():
+        upstream_id = str(upstream_id).strip()
+        key = str(value).strip()
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", upstream_id):
+            raise SkillError("video upstream IDs must use ASCII letters, digits, underscore, or hyphen")
+        if key:
+            dynamic_keys[upstream_id] = key
+    if "xingapi_seedance_video_key" in payload:
+        if not isinstance(payload["xingapi_seedance_video_key"], str):
+            raise SkillError("credential payload field xingapi_seedance_video_key must be a string when provided")
+        dynamic_keys["xingapi-seedance"] = str(payload["xingapi_seedance_video_key"]).strip()
+    return image_key, video_key, new_video_key, sub2api_key, dynamic_keys
+
+
+def parse_video_upstream_configs(values: list[str]) -> dict[str, dict[str, Any]]:
+    """Parse non-secret named upstreams: ID|TITLE|ADAPTER|KIND|BASE_URL|MODEL[,MODEL]."""
+    result: dict[str, dict[str, Any]] = {}
+    allowed_adapters = {
+        "sub2api-json", "sub2api", "xingapi-json", "openai-video-json",
+        "newapi-multipart", "newapi", "openai-video-multipart",
+    }
+    for value in values:
+        parts = str(value).split("|", 5)
+        if len(parts) != 6:
+            raise SkillError("--video-upstream-config must be ID|TITLE|ADAPTER|KIND|BASE_URL|MODEL[,MODEL]")
+        upstream_id, title, adapter, provider_kind, base_url, models_text = (part.strip() for part in parts)
+        if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", upstream_id):
+            raise SkillError("video upstream IDs must use ASCII letters, digits, underscore, or hyphen")
+        if upstream_id in {"sub2api", "newapi"} or upstream_id in result:
+            raise SkillError(f"video upstream ID is reserved or duplicated: {upstream_id}")
+        if adapter.lower() not in allowed_adapters:
+            raise SkillError(f"unsupported video upstream adapter: {adapter}")
+        if not base_url:
+            raise SkillError(f"base URL is required for video upstream {upstream_id}")
+        models = [item.strip() for item in models_text.split(",") if item.strip()]
+        if not models:
+            raise SkillError(f"at least one supported model ID is required for video upstream {upstream_id}")
+        result[upstream_id] = {
+            "title": title or upstream_id,
+            "adapter": adapter,
+            "provider_kind": provider_kind or adapter,
+            "base_url": normalize_base_url(base_url),
+            "enabled": True,
+            "models": models,
+            "model_map": {},
+            "capabilities": {"text_to_video": True, "image_to_video": True},
+        }
+    return result
+
+
+def parse_video_model_routes(values: list[str]) -> dict[str, dict[str, Any]]:
+    routes: dict[str, dict[str, Any]] = {}
+    for value in values:
+        model, separator, upstreams_text = str(value).partition("=")
+        upstreams = [item.strip() for item in upstreams_text.split(",") if item.strip()]
+        if not separator or not model.strip() or not upstreams:
+            raise SkillError("--video-model-route must be MODEL=UPSTREAM_ID[,UPSTREAM_ID]")
+        if model.strip() in routes:
+            raise SkillError(f"duplicate video model route: {model.strip()}")
+        if any(not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}", item) for item in upstreams):
+            raise SkillError(f"invalid upstream ID in model route for {model.strip()}")
+        routes[model.strip()] = {"default_upstream": upstreams[0], "upstreams": upstreams}
+    return routes
 
 
 def configure(args: argparse.Namespace) -> dict[str, Any]:
     if args.credentials_stdin and args.environment_only:
         raise SkillError("--credentials-stdin cannot be combined with --environment-only because the supplied keys would not persist")
+    configured_upstreams = parse_video_upstream_configs(args.video_upstream_config)
     if args.credentials_stdin:
-        image_key, video_key, new_video_key, sub2api_key = read_credentials_payload()
+        image_key, video_key, new_video_key, sub2api_key, dynamic_video_keys = read_credentials_payload()
         newapi_key = new_video_key
         credential_source = "agent-stdin"
     else:
@@ -4531,39 +4767,88 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
                      or os.environ.get("GVS_SUB2API_KEY", "").strip())
         new_video_key = (os.environ.get("GVS_NEWAPI_VIDEO_KEY", "").strip()
                          or os.environ.get("GVS_NEWAPI_KEY", "").strip())
-        if not image_key:
-            image_key = getpass.getpass("Image provider API key (optional): ").strip()
-        if not video_key:
-            video_key = getpass.getpass("Sub2Api video API key (optional): ").strip()
-        if not new_video_key:
-            new_video_key = getpass.getpass("NewApi video API key (optional): ").strip()
+        dynamic_video_keys = {}
+        xingapi_key = os.environ.get("GVS_VIDEO_UPSTREAM_XINGAPI_SEEDANCE_KEY", "").strip()
+        if xingapi_key:
+            dynamic_video_keys["xingapi-seedance"] = xingapi_key
+        for upstream_id in configured_upstreams:
+            env_suffix = upstream_id.upper().replace("-", "_")
+            dynamic_key = os.environ.get(f"GVS_VIDEO_UPSTREAM_{env_suffix}_KEY", "").strip()
+            if dynamic_key:
+                dynamic_video_keys[upstream_id] = dynamic_key
+        if not args.environment_only:
+            if not image_key:
+                image_key = getpass.getpass("Image provider API key (optional): ").strip()
+            if not video_key:
+                video_key = getpass.getpass("Sub2Api video API key (optional): ").strip()
+            if not new_video_key:
+                new_video_key = getpass.getpass("NewApi video API key (optional): ").strip()
         sub2api_key = image_key or video_key
         newapi_key = new_video_key
         credential_source = "environment-or-interactive"
-    if not image_key and not video_key and not new_video_key:
+    if not image_key and not video_key and not new_video_key and not any(dynamic_video_keys.values()):
         raise SkillError("at least one provider key is required")
     image_base_url = (args.image_base_url or os.environ.get("GVS_IMAGE_API_URL", "").strip())
     sub2api_video_base_url = (args.sub2api_video_base_url or os.environ.get("GVS_VIDEO_API_URL", "").strip()
                               or os.environ.get("GVS_SUB2API_VIDEO_URL", "").strip())
     newapi_video_base_url = (args.newapi_video_base_url or os.environ.get("GVS_NEWAPI_VIDEO_URL", "").strip())
+    xingapi_video_base_url = (args.xingapi_video_base_url or os.environ.get("GVS_XINGAPI_VIDEO_URL", "").strip())
+    if "xingapi-seedance" in configured_upstreams and xingapi_video_base_url:
+        raise SkillError("xingapi-seedance must be configured with either --video-upstream-config or the dedicated --xingapi-video-base-url, not both")
     if image_key and not image_base_url:
         raise SkillError("--image-base-url is required when an image API key is configured")
     if video_key and not sub2api_video_base_url:
         raise SkillError("--sub2api-video-base-url is required when a Sub2Api video key is configured")
     if new_video_key and not newapi_video_base_url:
         raise SkillError("--newapi-video-base-url is required when a NewApi video key is configured")
+    if dynamic_video_keys.get("xingapi-seedance") and not xingapi_video_base_url and "xingapi-seedance" not in configured_upstreams:
+        raise SkillError("--xingapi-video-base-url is required when the XingAPI Seedance key is configured")
+    xingapi_model = str(args.xingapi_video_model_id or XINGAPI_SEEDANCE_REMOTE_MODEL).strip()
+    video_upstreams: dict[str, Any] = configured_upstreams
+    if "xingapi-seedance" not in configured_upstreams and (xingapi_video_base_url or dynamic_video_keys.get("xingapi-seedance")):
+        video_upstreams["xingapi-seedance"] = {
+            "title": "XingAPI Seedance",
+            "adapter": "sub2api-json",
+            "provider_kind": "xingapi",
+            "base_url": xingapi_video_base_url,
+            "enabled": True,
+            "model_map": {DEFAULT_SEEDANCE_VIDEO_MODEL: xingapi_model},
+            "models": [DEFAULT_SEEDANCE_VIDEO_MODEL],
+            "capabilities": {"text_to_video": True, "image_to_video": True},
+        }
     config = {
         "image_base_url": normalize_base_url(image_base_url) if image_base_url else "",
         "sub2api_video_base_url": normalize_base_url(sub2api_video_base_url) if sub2api_video_base_url else "",
         "newapi_video_base_url": normalize_base_url(newapi_video_base_url) if newapi_video_base_url else "",
         "image_model": args.image_model.strip(),
         "video_model": args.video_model.strip(),
+        "default_video_model": args.video_model.strip(),
         "default_video_provider": args.video_provider or ("newapi" if new_video_key and not video_key else "sub2api"),
+        "video_upstreams": video_upstreams,
+        "video_model_routes": {**DEFAULT_MODEL_ROUTES, **parse_video_model_routes(args.video_model_route)},
     }
+    if "xingapi-seedance" in video_upstreams:
+        seedance_route = dict(config["video_model_routes"][DEFAULT_SEEDANCE_VIDEO_MODEL])
+        seedance_route["upstreams"] = list(dict.fromkeys([*seedance_route["upstreams"], "xingapi-seedance"]))
+        config["video_model_routes"][DEFAULT_SEEDANCE_VIDEO_MODEL] = seedance_route
+    for model_id, upstream in video_upstreams.items():
+        for model in upstream.get("models", []):
+            if model not in config["video_model_routes"]:
+                config["video_model_routes"][model] = {"default_upstream": model_id, "upstreams": [model_id]}
+            else:
+                route = config["video_model_routes"][model]
+                if model_id not in route["upstreams"]:
+                    route["upstreams"].append(model_id)
+    known_upstreams = {"sub2api", "newapi", *video_upstreams.keys()}
+    for model_id, route in config["video_model_routes"].items():
+        unknown = sorted(set(route.get("upstreams", [])) - known_upstreams)
+        if unknown:
+            raise SkillError(f"video model route {model_id} references unconfigured upstreams: {', '.join(unknown)}")
     connection: dict[str, Any] = {
         "sub2api_image": "not_tested",
         "sub2api_video": "not_tested",
         "newapi_video": "not_tested",
+        "xingapi_seedance_video": "not_tested",
     }
     if not args.skip_test:
         connection = {"sub2api_image": "not_configured", "sub2api_video": "not_configured", "newapi_video": "not_configured"}
@@ -4573,15 +4858,36 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
                 raise SkillError(f"configured image model is not advertised by Sub2Api: {config['image_model']}")
             connection["sub2api_image"] = "ok"
         if video_key:
-            video_models = Sub2ApiVideoClient(config["sub2api_video_base_url"], video_key, config["video_model"]).list_models()
-            if config["video_model"] not in video_models:
-                raise SkillError(f"configured video model is not advertised by Sub2Api: {config['video_model']}")
-            connection["sub2api_video"] = "ok"
+            models = Sub2ApiVideoClient(config["sub2api_video_base_url"], video_key, config["video_model"]).list_models()
+            connection["sub2api_video"] = {"ok": True, "model_count": len(models), "default_model_present": config["video_model"] in models}
         if new_video_key:
-            video_models = NewApiVideoClient(config["newapi_video_base_url"], new_video_key, config["video_model"]).list_models()
-            if config["video_model"] not in video_models:
-                raise SkillError(f"configured video model is not advertised by NewApi: {config['video_model']}")
-            connection["newapi_video"] = "ok"
+            models = NewApiVideoClient(config["newapi_video_base_url"], new_video_key, config["video_model"]).list_models()
+            connection["newapi_video"] = {"ok": True, "model_count": len(models), "default_model_present": config["video_model"] in models}
+        if dynamic_video_keys.get("xingapi-seedance") and "xingapi-seedance" not in configured_upstreams:
+            xing = video_upstreams["xingapi-seedance"]
+            client = Sub2ApiVideoClient(xingapi_video_base_url, dynamic_video_keys["xingapi-seedance"], xingapi_model)
+            models = client.list_models()
+            if xingapi_model not in models:
+                raise SkillError(f"configured Seedance model is not advertised by XingAPI: {xingapi_model}")
+            connection["xingapi_seedance_video"] = {"ok": True, "model_count": len(models), "model_present": True}
+        for upstream_id, upstream in configured_upstreams.items():
+            key = dynamic_video_keys.get(upstream_id, "")
+            if not key:
+                continue
+            client = select_video_client(
+                {"video_upstreams": {upstream_id: {**upstream, "key": key}}},
+                upstream_id,
+                str(upstream.get("models", [config["video_model"]])[0]),
+            )
+            models = client.list_models()
+            configured_model = str(upstream.get("models", [config["video_model"]])[0])
+            matched = provider_model_match(client.model, models)
+            connection[upstream_id] = {
+                "ok": bool(matched), "model_count": len(models), "configured_model": configured_model,
+                "model_present": bool(matched), "matched_model": matched,
+            }
+            if not matched:
+                raise SkillError(f"configured model is not advertised by video upstream {upstream_id}: {client.model}")
     save_settings(
         config,
         sub2api_key,
@@ -4590,12 +4896,14 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
         sub2api_image_key=image_key,
         sub2api_video_key=video_key,
         newapi_video_key=new_video_key,
+        video_upstream_keys=dynamic_video_keys,
     )
     return {
         "configured": str(config_path()),
         "secret_provider": "environment" if args.environment_only else "windows-dpapi",
         "credential_source": credential_source,
         "connection": connection,
+        "default_video_model": config["default_video_model"],
     }
 
 
@@ -4617,7 +4925,7 @@ def status_summary(root: Path) -> dict[str, Any]:
                 },
                 "video": {
                     key: runtime["video"].get(key)
-                    for key in ("status", "request_id", "attempt_id", "task_id", "path", "sha256", "media", "attempts", "progress", "mode", "provider", "final_provider", "provider_attempts", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "references", "prompt_sha256", "signature", "qa", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
+                    for key in ("status", "request_id", "attempt_id", "task_id", "path", "sha256", "media", "attempts", "progress", "mode", "provider", "upstream_id", "adapter", "remote_model", "final_provider", "provider_attempts", "model", "seconds", "resolution", "aspect_ratio", "reference_count", "references", "prompt_sha256", "signature", "qa", "history", "review_status", "review_notes", "reviewed_at", "error_category", "error")
                     if runtime["video"].get(key) not in (None, "")
                 },
             }
@@ -4630,6 +4938,8 @@ def status_summary(root: Path) -> dict[str, Any]:
         "video_mode": video_mode(project),
         "video_provider": str(project.get("video_provider", "")) or None,
         "video_provider_policy": video_provider_policy(project),
+        "video_model": str(project.get("video_model", "")).strip() or LEGACY_VIDEO_MODEL,
+        "video_route": project.get("video_route", {}),
         "character_master": {key: master.get(key) for key in ("status", "path", "source", "attempts", "error") if master.get(key) not in (None, "")},
         "pipeline": pipeline_status(root, project, state),
         "asset_registry": asset_registry_from_state(state),
@@ -4907,7 +5217,7 @@ def resolve_project_audio_options(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Create resumable Sub2Api and Grok video projects.")
+    parser = argparse.ArgumentParser(description="Create resumable multi-model video projects with configurable upstream routing.")
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("version", help="Print the installed Skill version.")
@@ -4941,6 +5251,22 @@ def build_parser() -> argparse.ArgumentParser:
     setup.add_argument("--image-model", default=DEFAULT_IMAGE_MODEL)
     setup.add_argument("--video-model", default=DEFAULT_VIDEO_MODEL)
     setup.add_argument("--video-provider", choices=("sub2api", "newapi"))
+    setup.add_argument("--xingapi-video-base-url")
+    setup.add_argument("--xingapi-video-model-id", default=XINGAPI_SEEDANCE_REMOTE_MODEL)
+    setup.add_argument(
+        "--video-upstream-config",
+        action="append",
+        default=[],
+        metavar="ID|TITLE|ADAPTER|KIND|BASE_URL|MODELS",
+        help="Register a named video upstream; repeat MODEL IDs as comma-separated values.",
+    )
+    setup.add_argument(
+        "--video-model-route",
+        action="append",
+        default=[],
+        metavar="MODEL=UPSTREAM[,UPSTREAM]",
+        help="Set ordered upstreams for a model; the first upstream is preferred.",
+    )
     setup.add_argument("--environment-only", action="store_true", help="Do not persist secrets; require environment variables at runtime.")
     setup.add_argument(
         "--credentials-stdin",
@@ -5002,7 +5328,9 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--mode", choices=("text-to-video", "image-to-video"))
     init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
-    init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    init.add_argument("--video-model")
+    init.add_argument("--video-upstream", default="")
+    init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="720p")
     init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
     init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
@@ -5029,7 +5357,9 @@ def build_parser() -> argparse.ArgumentParser:
     series_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="image-to-video")
     series_init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     series_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
-    series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    series_init.add_argument("--video-model")
+    series_init.add_argument("--video-upstream", default="")
+    series_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="720p")
     series_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     series_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
     series_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
@@ -5089,7 +5419,9 @@ def build_parser() -> argparse.ArgumentParser:
     news_init.add_argument("--mode", choices=("text-to-video", "image-to-video"), default="text-to-video")
     news_init.add_argument("--video-provider", choices=("sub2api", "newapi"))
     news_init.add_argument("--video-provider-policy", choices=("automatic", "fixed"))
-    news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="480p")
+    news_init.add_argument("--video-model")
+    news_init.add_argument("--video-upstream", default="")
+    news_init.add_argument("--video-resolution", choices=tuple(sorted(VIDEO_RESOLUTIONS)), default="720p")
     news_init.add_argument("--aspect-ratio", choices=tuple(sorted(ASPECT_RATIOS)), default="16:9")
     news_init.add_argument("--audio-mode", choices=tuple(sorted(DIALOGUE_MODES)))
     news_init.add_argument("--subtitle-source", choices=tuple(sorted(SUBTITLE_SOURCES)))
@@ -5253,7 +5585,6 @@ def build_parser() -> argparse.ArgumentParser:
         videos.add_argument("--retry-reason", default="")
         videos.add_argument(
             "--retry-provider",
-            choices=("sub2api", "newapi"),
             help="Retry one or more explicitly selected, definitely rejected creates through the named provider.",
         )
         videos.add_argument("--progress", action="store_true", help="Write JSONL progress events to stderr.")
@@ -5419,10 +5750,14 @@ def main() -> int:
                         "visual_profile": "auto text/reference-name classification with explicit review when confidence is low",
                     },
                     "video_provider_default": configured_default_video_provider(),
+                    "video_model_default": configured_default_video_model(),
+                    "video_model_routes": provider_settings.get("video_model_routes") or DEFAULT_MODEL_ROUTES,
                     "video_provider_selection": {
-                        "unspecified": "sub2api with safe newapi fallback",
-                        "explicit_sub2api": "fixed sub2api when --video-provider sub2api is supplied",
-                        "explicit_newapi": "fixed newapi when --video-provider newapi is supplied",
+                        "unspecified": "use the default canonical model and its configured ordered upstream route",
+                        "explicit_model": "select another canonical video model with --video-model",
+                        "explicit_named_upstream": "fix a configured named upstream with --video-upstream",
+                        "legacy_sub2api": "fixed sub2api when --video-provider sub2api is supplied",
+                        "legacy_newapi": "fixed newapi when --video-provider newapi is supplied",
                     },
                     "providers": provider_capability_report(provider_settings),
                     "product_routes": [
@@ -5660,6 +5995,7 @@ def main() -> int:
             selected_provider, selected_provider_policy = resolve_video_provider_options(
                 args.video_provider, args.video_provider_policy
             )
+            selected_video_model = resolve_video_model(args.video_model)
             root = args.series.resolve()
             series = create_series_contract(
                 root,
@@ -5676,6 +6012,8 @@ def main() -> int:
                 video_aspect_ratio=args.aspect_ratio,
                 audio_mode=selected_audio_mode,
                 subtitle_source=selected_subtitle_source,
+                video_model=selected_video_model,
+                video_upstream=args.video_upstream,
             )
             for episode in episode_records(series):
                 project_root = root / str(episode["project"])
@@ -5695,6 +6033,8 @@ def main() -> int:
                     selected_subtitle_source,
                     args.genre,
                     visual_medium_value=args.visual_medium,
+                    video_model_value=selected_video_model,
+                    video_upstream_value=args.video_upstream,
                 )
             synced = sync_all_episode_contracts(root, series)
             print_json(
@@ -5707,6 +6047,8 @@ def main() -> int:
                     "shot_seconds": durations,
                     "video_provider": selected_provider,
                     "video_provider_policy": selected_provider_policy,
+                    "video_model": selected_video_model,
+                    "video_upstream": args.video_upstream or None,
                     "synced_episodes": synced,
                     "next": "Fill the season plan and episode project prompts, then run series-preflight and series-approve ep-001.",
                 }
@@ -5942,6 +6284,7 @@ def main() -> int:
             provider, provider_policy = resolve_video_provider_options(
                 args.video_provider, args.video_provider_policy
             )
+            selected_video_model = resolve_video_model(args.video_model)
             root = args.project.resolve()
             path = init_project(
                 root,
@@ -5961,6 +6304,8 @@ def main() -> int:
                 args.frame_layout,
                 args.prompt_version,
                 args.visual_medium,
+                selected_video_model,
+                args.video_upstream,
             )
             package = create_news_contract(
                 root,
@@ -5977,6 +6322,8 @@ def main() -> int:
                     "video_mode": args.mode,
                     "video_provider": provider,
                     "video_provider_policy": provider_policy,
+                    "video_model": selected_video_model,
+                    "video_upstream": args.video_upstream or None,
                     "shot_seconds": durations,
                     "research_status": package["editorial"]["status"],
                     "next": "Codex must browse current sources, fill sourced claims and script segments, then run news-validate.",
@@ -6018,6 +6365,7 @@ def main() -> int:
             selected_provider, selected_provider_policy = resolve_video_provider_options(
                 args.video_provider, args.video_provider_policy
             )
+            selected_video_model = resolve_video_model(args.video_model)
             path = init_project(
                 args.project,
                 args.title,
@@ -6036,6 +6384,8 @@ def main() -> int:
                 args.frame_layout,
                 args.prompt_version,
                 args.visual_medium,
+                selected_video_model,
+                args.video_upstream,
             )
             print_json(
                 {
@@ -6044,6 +6394,8 @@ def main() -> int:
                     "workflow": args.workflow,
                     "video_provider": selected_provider,
                     "video_provider_policy": selected_provider_policy,
+                    "video_model": selected_video_model,
+                    "video_upstream": args.video_upstream or None,
                     "shot_seconds": durations,
                     "target_seconds": sum(durations),
                     "frame_layout": args.frame_layout,
