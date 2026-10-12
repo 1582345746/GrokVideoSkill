@@ -346,7 +346,7 @@ def save_settings(
             raise SkillError(f"video upstream IDs collide in environment variable names: {upstream_id}")
         env_suffixes.add(env_suffix)
         if upstream["adapter"] not in {
-            "sub2api-json", "sub2api", "xingapi-json", "openai-video-json",
+            "sub2api-json", "sub2api", "xingapi-json", "openai-video-json", "newapi-json",
             "newapi-multipart", "newapi", "openai-video-multipart",
         }:
             raise SkillError(f"video_upstreams.{upstream_id}.adapter is unsupported")

@@ -206,6 +206,48 @@ class ProviderContractTests(unittest.TestCase):
             self.assertEqual(result["default_video_model"], "seedance-2.0-mini-720p")
             self.assertEqual(upstream["model_map"]["seedance-2.0-mini-720p"], "seedance-2.0-mini-720P")
 
+    def test_named_upstream_model_map_persists_canonical_and_remote_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            args = gvs.build_parser().parse_args([
+                "configure", "--environment-only", "--skip-test",
+                "--video-upstream-config",
+                "suanliai-seedance|Suanliai Seedance|newapi-json|newapi|https://suanliai.example/v1|seedance-2.0-mini-720P",
+                "--video-upstream-model-map",
+                "suanliai-seedance|seedance-2.0-mini-720p=seedance-2.0-mini-720P",
+                "--video-model-route", "seedance-2.0-mini-720p=suanliai-seedance",
+            ])
+            environment = {
+                "GVS_CONFIG_DIR": temp_dir,
+                "GVS_VIDEO_UPSTREAM_SUANLIAI_SEEDANCE_KEY": "environment-only-key",
+            }
+            with mock.patch.dict(os.environ, environment, clear=True):
+                result = gvs.configure(args)
+                settings = gvs_common.load_settings()
+            upstream = settings["video_upstreams"]["suanliai-seedance"]
+            self.assertEqual(result["default_video_model"], "seedance-2.0-mini-720p")
+            self.assertEqual(
+                upstream["model_map"]["seedance-2.0-mini-720p"],
+                "seedance-2.0-mini-720P",
+            )
+
+    def test_named_upstream_map_accepts_remote_model_in_advertised_list(self) -> None:
+        model = gvs.DEFAULT_SEEDANCE_VIDEO_MODEL
+        settings = {
+            "video_upstreams": {
+                "suanliai-seedance": {
+                    "key": "s", "base_url": "https://suanliai.example",
+                    "adapter": "newapi-multipart",
+                    "models": ["seedance-2.0-mini-720P"],
+                    "model_map": {model: "seedance-2.0-mini-720P"},
+                },
+            },
+            "video_model_routes": {
+                model: {"default_upstream": "suanliai-seedance", "upstreams": ["suanliai-seedance"]},
+            },
+        }
+        project = {"video_model": model, "video_route": {"policy": "fixed"}}
+        self.assertEqual(gvs.video_provider_candidates(project, settings), ["suanliai-seedance"])
+
     def test_dynamic_upstream_key_can_be_stored_without_going_into_config_json(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             config = {

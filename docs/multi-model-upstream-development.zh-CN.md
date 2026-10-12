@@ -30,7 +30,9 @@ Seedance 内置默认路由等价于：
 }
 ```
 
-自定义路由可通过 `configure --video-upstream-config ID|TITLE|ADAPTER|KIND|BASE_URL|MODEL[,MODEL]` 注册，再用 `--video-model-route MODEL=UPSTREAM[,UPSTREAM]` 声明模型对应的有序上游。第一个上游是首选项。密钥通过对应的安全配置或环境变量提供，不要把 Key 放入参数、项目、运行状态、文档或 Git。
+自定义路由可通过 `configure --video-upstream-config ID|TITLE|ADAPTER|KIND|BASE_URL|MODEL[,MODEL]` 注册，再用 `--video-upstream-model-map UPSTREAM_ID|CANONICAL_MODEL=REMOTE_MODEL` 保存本地 canonical ID 到渠道完整模型名的映射，最后用 `--video-model-route MODEL=UPSTREAM[,UPSTREAM]` 声明模型对应的有序上游。第一个上游是首选项。`newapi-json` 表示采用 NewApi 的统一 JSON 视频协议；`newapi-multipart` 表示旧的 multipart 协议。密钥通过对应的安全配置或环境变量提供，不要把 Key 放入参数、项目、运行状态、文档或 Git。
+
+当前用户的 Seedance 远端模型映射为：XingAPI 使用 `seedance-2.0-mini-720P`，算力 AI 使用 `004系列/sd2.0(933/480p最多15秒/720p最多12秒)`。这些是渠道模型名，不应改写成另一个大小写或自行补充括号。
 
 ## 项目选择与兼容
 

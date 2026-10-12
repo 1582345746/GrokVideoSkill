@@ -150,8 +150,14 @@ def route_candidates(
         supported_models = upstream.get("models")
         if isinstance(model_map, dict) and model_map and model not in model_map:
             continue
-        if isinstance(supported_models, list) and supported_models and model not in supported_models:
-            continue
+        if isinstance(supported_models, list) and supported_models:
+            # `models` historically contained canonical IDs, while generic
+            # upstream registrations often copy the provider's remote ID.
+            # Accept either spelling when an explicit canonical -> remote map
+            # is present; the client still sends only the mapped remote ID.
+            remote_model = str(model_map.get(model, model)).strip() if isinstance(model_map, dict) else model
+            if model not in supported_models and remote_model not in supported_models:
+                continue
         available.append(upstream_id)
     if not available:
         raise ValueError(f"no configured upstream supports video model {model!r}")

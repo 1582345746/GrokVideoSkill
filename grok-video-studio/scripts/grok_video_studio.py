@@ -2598,7 +2598,7 @@ def select_video_client(
     model_map = upstream.get("model_map") if isinstance(upstream.get("model_map"), dict) else {}
     remote_model = str(model_map.get(canonical_model, canonical_model)).strip()
     adapter = str(upstream.get("adapter", "")).strip().lower()
-    if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json"}:
+    if adapter in {"sub2api", "sub2api-json", "xingapi-json", "openai-video-json", "newapi-json"}:
         return Sub2ApiVideoClient(base_url, key, remote_model)
     if adapter in {"newapi", "newapi-multipart", "openai-video-multipart"}:
         return NewApiVideoClient(base_url, key, remote_model)
@@ -4703,7 +4703,7 @@ def parse_video_upstream_configs(values: list[str]) -> dict[str, dict[str, Any]]
     """Parse non-secret named upstreams: ID|TITLE|ADAPTER|KIND|BASE_URL|MODEL[,MODEL]."""
     result: dict[str, dict[str, Any]] = {}
     allowed_adapters = {
-        "sub2api-json", "sub2api", "xingapi-json", "openai-video-json",
+        "sub2api-json", "sub2api", "xingapi-json", "openai-video-json", "newapi-json",
         "newapi-multipart", "newapi", "openai-video-multipart",
     }
     for value in values:
@@ -4735,6 +4735,40 @@ def parse_video_upstream_configs(values: list[str]) -> dict[str, dict[str, Any]]
     return result
 
 
+def parse_video_upstream_model_maps(values: list[str]) -> dict[str, dict[str, str]]:
+    """Parse canonical-to-remote model maps for named video upstreams.
+
+    Syntax: ``UPSTREAM_ID|CANONICAL_MODEL=REMOTE_MODEL``.  Keeping this
+    separate from ``--video-upstream-config`` lets a registration advertise
+    either canonical or provider model IDs without overloading the legacy
+    model-list field.
+    """
+    result: dict[str, dict[str, str]] = {}
+    for value in values:
+        upstream_text, separator, mapping = str(value).partition("|")
+        canonical, equal, remote = mapping.partition("=") if separator else ("", "", "")
+        upstream_id = upstream_text.strip()
+        canonical = canonical.strip()
+        remote = remote.strip()
+        if (
+            not separator
+            or not equal
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", upstream_id)
+            or not canonical
+            or not remote
+        ):
+            raise SkillError(
+                "--video-upstream-model-map must be UPSTREAM_ID|CANONICAL_MODEL=REMOTE_MODEL"
+            )
+        upstream_maps = result.setdefault(upstream_id, {})
+        if canonical in upstream_maps:
+            raise SkillError(
+                f"duplicate video upstream model map: {upstream_id}|{canonical}"
+            )
+        upstream_maps[canonical] = remote
+    return result
+
+
 def parse_video_model_routes(values: list[str]) -> dict[str, dict[str, Any]]:
     routes: dict[str, dict[str, Any]] = {}
     for value in values:
@@ -4754,6 +4788,7 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
     if args.credentials_stdin and args.environment_only:
         raise SkillError("--credentials-stdin cannot be combined with --environment-only because the supplied keys would not persist")
     configured_upstreams = parse_video_upstream_configs(args.video_upstream_config)
+    configured_model_maps = parse_video_upstream_model_maps(args.video_upstream_model_map)
     if args.credentials_stdin:
         image_key, video_key, new_video_key, sub2api_key, dynamic_video_keys = read_credentials_payload()
         newapi_key = new_video_key
@@ -4816,6 +4851,22 @@ def configure(args: argparse.Namespace) -> dict[str, Any]:
             "models": [DEFAULT_SEEDANCE_VIDEO_MODEL],
             "capabilities": {"text_to_video": True, "image_to_video": True},
         }
+    for upstream_id, model_map in configured_model_maps.items():
+        upstream = video_upstreams.get(upstream_id)
+        if not isinstance(upstream, dict):
+            raise SkillError(
+                f"video upstream model map references an unconfigured upstream: {upstream_id}"
+            )
+        existing_map = upstream.get("model_map")
+        if not isinstance(existing_map, dict):
+            existing_map = {}
+        overlap = sorted(set(existing_map).intersection(model_map))
+        if overlap:
+            raise SkillError(
+                f"video upstream model map duplicates configured mappings for {upstream_id}: "
+                + ", ".join(overlap)
+            )
+        upstream["model_map"] = {**existing_map, **model_map}
     config = {
         "image_base_url": normalize_base_url(image_base_url) if image_base_url else "",
         "sub2api_video_base_url": normalize_base_url(sub2api_video_base_url) if sub2api_video_base_url else "",
@@ -5259,6 +5310,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="ID|TITLE|ADAPTER|KIND|BASE_URL|MODELS",
         help="Register a named video upstream; repeat MODEL IDs as comma-separated values.",
+    )
+    setup.add_argument(
+        "--video-upstream-model-map",
+        action="append",
+        default=[],
+        metavar="UPSTREAM|CANONICAL=REMOTE",
+        help="Map a canonical model ID to the remote model ID for a named upstream.",
     )
     setup.add_argument(
         "--video-model-route",
