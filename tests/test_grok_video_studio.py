@@ -1624,6 +1624,32 @@ class SkillIntegrationTests(unittest.TestCase):
         )
         self.assertIn("unresolved submission_unknown", stale["error"])
 
+    def test_unknown_submission_requires_provider_verification_before_binding_task_id(self) -> None:
+        project = self.create_project("resolve-unverified-task", generate_image=False)
+        FakeProviderHandler.fail_video_create = True
+        first = self.run_cli("generate-videos", str(project), "--shot", "shot-001", "--poll-timeout", "5", expected=1)
+        self.assertFalse(first["ok"])
+        FakeProviderHandler.fail_video_create = False
+
+        unresolved = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "accepted",
+            "--task-id", "trace-or-invalid-id", "--evidence", "Operator supplied this ID.", expected=1,
+        )
+        self.assertIn("remains submission_unknown", unresolved["error"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        video = state["shots"]["shot-001"]["video"]
+        self.assertEqual(video["status"], "submission_unknown")
+        self.assertEqual(video.get("task_id", ""), "")
+
+        verified = self.run_cli(
+            "submission-resolve", str(project), "--shot", "shot-001", "--outcome", "accepted",
+            "--task-id", "task-1", "--evidence", "Provider confirmed task task-1.",
+        )
+        self.assertTrue(verified["ok"])
+        state = json.loads((project / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual(state["shots"]["shot-001"]["video"]["submission_resolution"]["verified_status"], "completed")
+        self.assertEqual(FakeProviderHandler.json_video_creates, 1)
+
     def test_newapi_success_without_task_id_does_not_create_twice(self) -> None:
         project = self.create_project("newapi-missing-task-id", generate_image=False)
         value = json.loads((project / "project.json").read_text(encoding="utf-8"))

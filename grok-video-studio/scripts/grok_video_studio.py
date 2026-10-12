@@ -165,7 +165,7 @@ from workflow_registry import (
 )
 
 
-SKILL_VERSION = "2.11.0"
+SKILL_VERSION = "2.11.1"
 PROJECT_VERSION = 1
 STATE_VERSION = 1
 MAX_VIDEO_SECONDS = 15
@@ -2462,6 +2462,19 @@ def resolve_unknown_submission(
     if not isinstance(attempt, dict) or attempt.get("status") != "submission_unknown" or str(attempt.get("task_id", "")).strip():
         raise SkillError(f"{shot_id} has no matching ambiguous provider attempt")
 
+    provider = str(video.get("provider", "")).strip().lower()
+    if selected_outcome == "accepted":
+        try:
+            _, _, settings = clients()
+            verifier = select_video_client(settings, provider)
+            provider_status, _ = verifier.query(provider_task_id)
+        except Exception as error:
+            raise SkillError(
+                f"provider task ID could not be verified ({type(error).__name__}); {shot_id} remains submission_unknown"
+            ) from None
+        if provider_status in {"", "unknown"}:
+            raise SkillError(f"provider returned no recognizable status; {shot_id} remains submission_unknown")
+
     settings: dict[str, Any] = {}
     try:
         settings = load_settings(require_secrets=False)
@@ -2474,6 +2487,7 @@ def resolve_unknown_submission(
     resolved_at = int(time.time())
     resolution = {"outcome": selected_outcome, "evidence": note, "resolved_at": resolved_at}
     if selected_outcome == "accepted":
+        resolution["verified_status"] = provider_status
         video.update({"status": "queued", "task_id": provider_task_id, "error": "", "error_category": ""})
         attempt.update({"status": "queued", "task_id": provider_task_id})
     else:
